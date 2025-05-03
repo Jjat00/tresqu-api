@@ -1,6 +1,6 @@
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 # Inicializar el modelo de LangChain con OpenAI de manera perezosa
 llm = None
 chain = None
+
+# Definir estados para la conversación
+ESPERANDO_TELEFONO = 0
 
 
 # Funciones síncronas para operaciones de base de datos
@@ -39,12 +42,18 @@ def get_user_by_external_id(external_id):
     return User.objects.filter(external_id=external_id).first()
 
 
-def create_user(external_id, platform, first_name, username):
+def get_user_by_phone_number(phone_number):
+    """Busca un usuario por número de teléfono"""
+    return User.objects.filter(phone_number=phone_number).first()
+
+
+def create_user(external_id, platform, first_name, username, phone_number=None):
     return User.objects.create(
         external_id=external_id,
         platform=platform,
         first_name=first_name or "",
-        username=username or ""
+        username=username or "",
+        phone_number=phone_number
     )
 
 
@@ -69,13 +78,14 @@ def get_chat_user(chat_id):
 get_or_create_chat_async = sync_to_async(get_or_create_chat)
 create_message_async = sync_to_async(create_message)
 get_user_by_external_id_async = sync_to_async(get_user_by_external_id)
+get_user_by_phone_number_async = sync_to_async(get_user_by_phone_number)
 create_user_async = sync_to_async(create_user)
 update_chat_user_async = sync_to_async(update_chat_user)
 get_chat_user_async = sync_to_async(get_chat_user)
 
 
 def get_llm_chain():
-    """Inicializa la cadena de LangChain de manera perezosa"""
+    """Inicializa la cadena de LangChain"""
     global llm, chain
 
     if not settings.OPENAI_API_KEY:
@@ -112,8 +122,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     welcome_message = (
         f"¡Hola {user.first_name}! Soy CashBot, tu asistente de finanzas personales. "
         f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
-        f"Para comenzar, simplemente escribe tu consulta o registra un gasto. "
-        f"Para registrarte como usuario, usa el comando /registrar."
+        f"Para comenzar, necesitas registrarte con tu número de teléfono. "
+        f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
+        f"Tu número de teléfono nos permite identificarte de manera única "
+        f"en todas nuestras plataformas, incluyendo futuras integraciones con WhatsApp."
     )
 
     await update.message.reply_text(welcome_message)
@@ -135,53 +147,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
-async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Registra un nuevo usuario desde Telegram."""
+async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Inicia el proceso de registro solicitando el número de teléfono."""
     chat_id = update.effective_chat.id
     user = update.effective_user
 
     logger.info(
-        f"Registrando usuario: {user.id} ({user.username or user.first_name})")
+        f"Iniciando registro para usuario: {user.id} ({user.username or user.first_name})")
 
     # Verificar si ya existe un chat
     chat, _ = await get_or_create_chat_async(chat_id)
 
-    # Obtener el usuario asociado al chat de manera segura
-    user_id, chat_user = await get_chat_user_async(chat_id)
-
-    # Si el chat no tiene usuario asociado, crear uno
-    message = ""
-    if user_id is None or chat_user is None:
-        # Verificar si ya existe un usuario con este external_id
-        external_id = f"telegram_{user.id}"
-        existing_user = await get_user_by_external_id_async(external_id)
-
-        if existing_user:
-            await update_chat_user_async(chat, existing_user)
-            message = "¡Tu cuenta ha sido conectada exitosamente!"
-            logger.info(f"Usuario reconectado: {external_id}")
-        else:
-            # Crear nuevo usuario
-            try:
-                new_user = await create_user_async(
-                    external_id,
-                    "telegram",
-                    user.first_name,
-                    user.username
-                )
-                await update_chat_user_async(chat, new_user)
-                message = "¡Tu cuenta ha sido creada exitosamente!"
-                logger.info(f"Nuevo usuario creado: {external_id}")
-            except Exception as e:
-                logger.error(f"Error al crear usuario: {e}")
-                message = "Lo siento, ocurrió un error al crear tu cuenta. Por favor, intenta de nuevo más tarde."
-    else:
-        message = "Ya tienes una cuenta registrada."
-        logger.info(f"Usuario ya registrado: telegram_{user.id}")
-
-    await update.message.reply_text(message)
-
-    # Registrar mensaje y respuesta
+    # Registrar el mensaje recibido
     await create_message_async(
         chat,
         str(update.message.message_id),
@@ -189,12 +166,28 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         update.message.text
     )
 
+    # Crear botón para solicitar número de teléfono
+    contact_keyboard = KeyboardButton(
+        text="Compartir número de teléfono", request_contact=True)
+    reply_markup = ReplyKeyboardMarkup(
+        [[contact_keyboard]], one_time_keyboard=True)
+
+    message = (
+        "Para registrarte necesitamos tu número de teléfono. "
+        "Por favor, presiona el botón 'Compartir número de teléfono'."
+    )
+
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+    # Registrar respuesta
     await create_message_async(
         chat,
         "system",
         "outgoing",
         message
     )
+
+    return ESPERANDO_TELEFONO
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -223,6 +216,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         message = (
             "Parece que aún no estás registrado. Usa el comando /registrar para crear una cuenta "
             "y poder utilizar todas las funciones del bot."
+        )
+        await update.message.reply_text(message)
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            message
+        )
+        return
+
+    # Verificar si el usuario tiene número de teléfono
+    if not chat_user.phone_number:
+        message = (
+            "Tu cuenta no tiene un número de teléfono registrado. "
+            "Por favor, usa el comando /registrar para completar tu registro."
         )
         await update.message.reply_text(message)
 
@@ -283,6 +293,118 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
+async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Maneja el contacto recibido y completa el registro del usuario."""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    contact = update.message.contact
+    phone_number = contact.phone_number
+
+    # Verificar que el contacto pertenece al usuario que está haciendo el registro
+    if str(contact.user_id) != str(user.id):
+        await update.message.reply_text(
+            "El número de teléfono debe ser el tuyo. Por favor, utiliza el botón para compartir tu contacto.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return ESPERANDO_TELEFONO
+
+    logger.info(f"Contacto recibido de {user.id}: {phone_number}")
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        "Contacto compartido"
+    )
+
+    # Verificar si existe un usuario con este número de teléfono
+    existing_user = await get_user_by_phone_number_async(phone_number)
+    external_id = f"telegram_{user.id}"
+
+    if existing_user:
+        # Si el usuario ya existe, asociar el chat con ese usuario
+        await update_chat_user_async(chat, existing_user)
+        message = "¡Tu cuenta ha sido conectada exitosamente!"
+        logger.info(
+            f"Usuario reconectado por número de teléfono: {phone_number}")
+    else:
+        # Verificar si ya existe un usuario con este external_id
+        existing_user_by_id = await get_user_by_external_id_async(external_id)
+
+        if existing_user_by_id:
+            # Si existe un usuario con este ID pero sin número, actualizar su número
+            existing_user_by_id.phone_number = phone_number
+            await sync_to_async(existing_user_by_id.save)()
+            await update_chat_user_async(chat, existing_user_by_id)
+            message = "¡Tu cuenta ha sido actualizada con tu número de teléfono!"
+            logger.info(
+                f"Usuario actualizado con número de teléfono: {phone_number}")
+        else:
+            # Crear nuevo usuario con número de teléfono
+            try:
+                new_user = await create_user_async(
+                    external_id,
+                    "telegram",
+                    user.first_name,
+                    user.username,
+                    phone_number
+                )
+                await update_chat_user_async(chat, new_user)
+                message = "¡Tu cuenta ha sido creada exitosamente!"
+                logger.info(
+                    f"Nuevo usuario creado con número de teléfono: {phone_number}")
+            except Exception as e:
+                logger.error(f"Error al crear usuario: {e}")
+                message = "Lo siento, ocurrió un error al crear tu cuenta. Por favor, intenta de nuevo más tarde."
+
+    # Enviar mensaje de confirmación y quitar el teclado
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+
+    # Registrar respuesta
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        message
+    )
+
+    # Finalizar la conversación
+    return ConversationHandler.END
+
+
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Cancela la conversación actual."""
+    chat_id = update.effective_chat.id
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        update.message.text
+    )
+
+    message = "Proceso de registro cancelado. Puedes intentarlo nuevamente en cualquier momento con /registrar."
+    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+
+    # Registrar respuesta
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        message
+    )
+
+    return ConversationHandler.END
+
+
 def setup_bot():
     """Configura y devuelve la aplicación del bot."""
     if not settings.TELEGRAM_BOT_TOKEN:
@@ -293,9 +415,19 @@ def setup_bot():
     logger.info("Inicializando bot de Telegram")
     application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
 
-    # Comandos
+    # Comandos básicos
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("registrar", register_user))
+
+    # Manejador de conversación para registro
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("registrar", register_user)],
+        states={
+            ESPERANDO_TELEFONO: [MessageHandler(filters.CONTACT, handle_contact)],
+        },
+        fallbacks=[CommandHandler(
+            "cancel", cancel)],
+    )
+    application.add_handler(conv_handler)
 
     # Mensajes no comandos
     application.add_handler(MessageHandler(
