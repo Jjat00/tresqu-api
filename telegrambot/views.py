@@ -2,14 +2,12 @@ from django.shortcuts import render
 import json
 import asyncio
 import os
-from django.http import JsonResponse, HttpResponse
+from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
-from django.views.decorators.http import require_GET, require_POST
+from django.views.decorators.http import require_GET
 from telegram import Update
-from rest_framework.decorators import api_view
 from .bot import setup_bot
-from asgiref.sync import sync_to_async
 
 # Variable global para almacenar la aplicación del bot
 application = None

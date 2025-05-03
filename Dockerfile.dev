@@ -1,0 +1,22 @@
+FROM python:3.13.2-slim
+
+WORKDIR /app
+
+# Instalación de dependencias del sistema
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copiar requirements.txt primero para aprovechar la caché de Docker
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copiar el resto del código
+COPY . .
+
+# Puerto que expondrá la aplicación
+EXPOSE 8000
+
+# Comando por defecto (se sobrescribe en docker-compose)
+CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"] 
