@@ -32,7 +32,7 @@ def create_message(chat, message_id, message_type, text):
     if text and text.strip():
         try:
             # Usar servicio de embeddings si está disponible
-            from telegrambot.services import embeddings
+            from telegrambot.tools import embeddings
             embedding = embeddings.embed_query(text)
         except Exception as e:
             logger.error(f"Error al generar embedding para mensaje: {e}")
