@@ -42,6 +42,7 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'pgvector.django',
     'users',
     'expenses',
     'categories',
@@ -81,13 +82,17 @@ WSGI_APPLICATION = 'cashbotapp.wsgi.application'
 
 # Database
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
-
+# Configuración de Supabase
 DATABASES = {
-    'default': dj_database_url.config(
-        default=DATABASE_URL,
-        conn_health_checks=True,
+    "default": dj_database_url.parse(
+        os.getenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cashbot"), conn_max_age=600
     )
 }
+
+# Configuración de API de Supabase
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
 
 # Password validation
