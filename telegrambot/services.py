@@ -15,6 +15,7 @@ from telegrambot.tools import (
     parse_expense,
     is_greeting,
     create_expense,
+    parse_expenses,
 )
 
 logging.basicConfig(
@@ -26,26 +27,24 @@ llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
                  api_key=settings.OPENAI_API_KEY)
 
 
-agent_prompt = ChatPromptTemplate.from_messages(
-    [
-        (
-            "system",
-            """
+agent_prompt = ChatPromptTemplate.from_messages([
+    ("system", """
 Eres un asistente financiero.
+
+INSTRUCCIONES:
 1. Si detectas un saludo corto ⇒ responde con un saludo.
-2. Si identificas un gasto ⇒
-   2.1 Usa parse_expense.
-   2.2 Si parse_expense devuelve datos válidos, ejecuta create_expense
-       (no necesitas pasar user_external_id: ya está fijado).
-   2.3 Si el usuario no especifica una moneda, se usará su moneda predeterminada automáticamente.
-3. Si falta la fecha, usa get_current_date.
+2. Si hay UN solo gasto ⇒ usa parse_expense y luego create_expense.
+3. Si el mensaje contiene MÁS de un gasto (separado por “y”, “,”, “;”…) ⇒
+   3.1 Usa parse_expenses.
+   3.2 Recorre cada elemento del array devuelto y llama a create_expense
+       para cada gasto individual.
+4. Si falta fecha ⇒ usa get_current_date.
+5. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
 Responde SIEMPRE en español.
-""",
-        ),
-        ("human", "{input}"),
-        MessagesPlaceholder("agent_scratchpad"),
-    ]
-)
+"""),
+    ("human", "{input}"),
+    MessagesPlaceholder("agent_scratchpad"),
+])
 
 
 def make_create_expense_tool(user_external_id: str):
@@ -85,6 +84,7 @@ def build_agent_for_user(user_external_id: str) -> AgentExecutor:
         parse_expense,
         is_greeting,
         tool_expense,
+        parse_expenses,
     ]
 
     agent = create_openai_tools_agent(llm, tools, agent_prompt)

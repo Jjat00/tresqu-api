@@ -1,15 +1,26 @@
-from langchain_core.pydantic_v1 import BaseModel, Field
-from datetime import datetime
+from pydantic import BaseModel, Field, field_validator
+from typing import Optional
+import datetime as _dt
 
 
 class ExpenseData(BaseModel):
-    """Información sobre un gasto financiero."""
+    """Estructura de un gasto individual."""
+    amount: float = Field(..., gt=0, description="Monto numérico")
+    currency: str = Field(..., min_length=3, max_length=5,
+                          description="Código ISO‑4217, ej: COP")
+    category: str = Field(..., description="Categoría del gasto")
+    spent_at: Optional[str] = Field(
+        None, description="Fecha YYYY‑MM‑DD o None → hoy")
+    note: Optional[str] = Field(None, description="Nota del gasto")
+    description: Optional[str] = Field(
+        None, description="Descripción del gasto")
 
-    amount: float = Field(description="Cantidad numérica del gasto")
-    currency: str = Field(
-        description="Código ISO de moneda (COP, MXN, USD, etc.). Si no se proporciona, se usará la moneda por defecto del usuario.",
-        default="")
-    category: str = Field(description="Categoría (Comida, Transporte, etc.)")
-    spent_at: str = Field(
-        description="Fecha del gasto en formato YYYY-MM-DD", default=datetime.now().strftime("%Y-%m-%d"))
-    note: str = Field(description="Descripción del gasto")
+    # normalizamos fecha
+    @field_validator("spent_at")
+    @classmethod
+    def _validate_date(cls, v):
+        if v is None:
+            return None
+        # lanzará ValueError si es inválida
+        _dt.datetime.strptime(v, "%Y-%m-%d")
+        return v
