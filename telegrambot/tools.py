@@ -7,12 +7,20 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_openai import ChatOpenAI
 from django.conf import settings
 from django.utils import timezone
+from langchain_openai import OpenAIEmbeddings
 # models
 from expenses.models import Expense
 from users.models import User
 # serializasers
 from .serializasers import ExpenseData
 from .currencies import is_valid_currency
+# Import embeddings service
+
+embeddings = OpenAIEmbeddings(
+    api_key=settings.OPENAI_API_KEY,
+    model="text-embedding-3-small",
+)
+
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
                  api_key=settings.OPENAI_API_KEY)
@@ -97,10 +105,21 @@ def create_expense(
     else:
         date = timezone.now().date()
 
+    # Crear el texto para el embedding
+    expense_text = f"Gasto de {amount} {currency} en {category} el {date}. {note}"
+
+    # Generar embedding
+    embedding = None
+    try:
+        embedding = embeddings.embed_query(expense_text)
+    except Exception as e:
+        logger.error(f"Error al generar embedding para gasto: {e}")
+
     expense = Expense.objects.create(
         user=user, amount=amount, currency=currency,
         category_str=category, spent_at=date, note=note,
-        timestamp=timezone.now()
+        timestamp=timezone.now(), embedding=embedding,
+        raw_message=expense_text
     )
     return (
         f"✅ ¡Gasto registrado!\n"

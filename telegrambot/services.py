@@ -5,7 +5,7 @@ from typing import List
 from django.conf import settings
 from users.models import User
 
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings
+from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain_core.tools import tool
@@ -25,10 +25,6 @@ logger = logging.getLogger(__name__)
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
                  api_key=settings.OPENAI_API_KEY)
 
-embeddings = OpenAIEmbeddings(
-    api_key=settings.OPENAI_API_KEY,
-    model="text-embedding-3-small",
-)
 
 agent_prompt = ChatPromptTemplate.from_messages(
     [
