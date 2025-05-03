@@ -1,17 +1,12 @@
 import logging
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
-from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.output_parsers import StrOutputParser
 from asgiref.sync import sync_to_async
-import datetime
 
 from django.conf import settings
 from users.models import User
 from .models import TelegramChat, TelegramMessage
-from expenses.models import Expense
-from .services import process_message, generate_response
+from .services import process_message
 
 # Configuración de logging
 logging.basicConfig(
@@ -19,9 +14,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Inicializar el modelo de LangChain con OpenAI de manera perezosa
-llm = None
-chain = None
 
 # Definir estados para la conversación
 ESPERANDO_TELEFONO = 0
@@ -88,38 +80,6 @@ def get_chat_user(chat_id):
         return None, None
 
 
-def create_expense(user, parsed_data, embedding):
-    """Crea un nuevo gasto en la base de datos"""
-    try:
-        # Convertir fecha si viene en string
-        spent_at = parsed_data.get('spent_at')
-        if isinstance(spent_at, str):
-            try:
-                spent_at = datetime.datetime.strptime(
-                    spent_at, "%Y-%m-%d").date()
-            except ValueError:
-                spent_at = datetime.date.today()
-        else:
-            spent_at = datetime.date.today()
-
-        # Crear el gasto
-        expense = Expense.objects.create(
-            user=user,
-            amount=parsed_data.get('amount', 0),
-            currency=parsed_data.get('currency', 'MXN'),
-            category_str=parsed_data.get('category', 'Otros'),
-            spent_at=spent_at,
-            timestamp=datetime.datetime.now(),
-            note=parsed_data.get('note', ''),
-            description=parsed_data.get('note', ''),
-            embedding=embedding
-        )
-        return expense
-    except Exception as e:
-        logger.error(f"Error al crear gasto: {e}")
-        return None
-
-
 # Conversión a funciones asíncronas
 get_or_create_chat_async = sync_to_async(get_or_create_chat)
 create_message_async = sync_to_async(create_message)
@@ -128,36 +88,6 @@ get_user_by_phone_number_async = sync_to_async(get_user_by_phone_number)
 create_user_async = sync_to_async(create_user)
 update_chat_user_async = sync_to_async(update_chat_user)
 get_chat_user_async = sync_to_async(get_chat_user)
-create_expense_async = sync_to_async(create_expense)
-process_message_async = sync_to_async(process_message)
-generate_response_async = sync_to_async(generate_response)
-
-
-def get_llm_chain():
-    """Inicializa la cadena de LangChain"""
-    global llm, chain
-
-    if not settings.OPENAI_API_KEY:
-        logger.error(
-            "¡API key de OpenAI no configurada! Revisa la variable OPENAI_API_KEY")
-        return None
-
-    if chain is None:
-        try:
-            logger.info("Inicializando LangChain con OpenAI")
-            llm = ChatOpenAI(api_key=settings.OPENAI_API_KEY)
-            prompt = ChatPromptTemplate.from_messages([
-                ("system", "Eres un asistente útil que ayuda con finanzas personales y administración de gastos."),
-                ("user", "{input}")
-            ])
-            output_parser = StrOutputParser()
-            chain = prompt | llm | output_parser
-            logger.info("LangChain inicializado correctamente")
-        except Exception as e:
-            logger.error(f"Error al inicializar LangChain: {e}")
-            return None
-
-    return chain
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,6 +181,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Obtener el usuario asociado al chat de manera segura
     user_id, chat_user = await get_chat_user_async(chat_id)
+    print(f"😲😲 user_id: {user_id}")
+    print(f"👍👍 chat_user: {chat_user.external_id}")
 
     # Registrar el mensaje recibido
     await create_message_async(
@@ -297,23 +229,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Procesar el mensaje para extraer información y generar embedding
     try:
         # Procesar mensaje
-        result = await process_message_async(chat_user, user_message_text)
-
-        if "error" not in result:
-            # Si no es un saludo, crear gasto en base de datos
-            if not result.get("is_greeting", False):
-                expense = await create_expense_async(
-                    chat_user,
-                    result["parsed_data"],
-                    result["embedding"]
-                )
-
-            # Generar respuesta
-            response = await generate_response_async(chat_user, result)
-        else:
-            # Si hubo error en el procesamiento
-            logger.error(f"Error al procesar mensaje: {result['error']}")
-            response = "Lo siento, tuve problemas analizando tu mensaje. ¿Podrías intentar de nuevo con más detalles?"
+        response = await process_message(chat_user, user_message_text)
 
         await update.message.reply_text(response)
 

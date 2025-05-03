@@ -1,0 +1,103 @@
+from datetime import datetime
+import datetime as _dt
+import datetime
+import logging
+from langchain_core.tools import tool
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_openai import ChatOpenAI
+from django.conf import settings
+from django.utils import timezone
+# models
+from expenses.models import Expense
+from users.models import User
+# serializasers
+from .serializasers import ExpenseData
+
+llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
+                 api_key=settings.OPENAI_API_KEY)
+
+# Configuración de logging
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
+
+@tool
+def get_current_date() -> str:
+    """Obtiene la fecha actual en formato YYYY-MM-DD."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+@tool()
+async def parse_expense(text: str) -> dict:
+    """
+    Analiza un mensaje para extraer un gasto.
+    Devuelve dict o {'error': …} si no hay datos suficientes.
+    """
+    structured_llm = llm.with_structured_output(ExpenseData)
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        Eres un asistente financiero experto en extraer información de gastos.
+        Si el texto menciona un gasto, extrae la información solicitada.
+        Si no hay información suficiente, haz tu mejor estimación.
+        Si el texto no menciona ningún gasto (como saludos), genera un error.
+        """),
+        ("human", "{text}")
+    ])
+
+    try:
+        chain = prompt | structured_llm
+        result = await chain.ainvoke({"text": text})   # 👈  await
+        return dict(result)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def get_current_date() -> str:
+    """Fecha actual YYYY-MM-DD."""
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+@tool
+def is_greeting(text: str) -> bool:
+    """
+    Determina si un mensaje es un saludo simple.
+    """
+    common_greetings = ["hola", "hello", "hey", "hi",
+                        "buenos días", "buenas tardes", "buenas noches"]
+    return text.lower().strip() in common_greetings or len(text.strip()) < 10
+
+
+@tool
+def create_expense(
+    user_external_id: str,
+    amount: float,
+    currency: str,
+    category: str,
+    spent_at: str | None = None,
+    note: str | None = ""
+) -> str:
+    """Crea un gasto en la base de datos y devuelve un resumen confirmatorio."""
+    # lookup del usuario sin importar dónde estés llamando
+    user = User.objects.get(external_id=user_external_id)
+
+    if spent_at:
+        date = _dt.datetime.strptime(spent_at, "%Y-%m-%d").date()
+    else:
+        date = timezone.now().date()
+
+    expense = Expense.objects.create(
+        user=user, amount=amount, currency=currency,
+        category_str=category, spent_at=date, note=note,
+        timestamp=timezone.now()
+    )
+    return (
+        f"✅ ¡Gasto registrado!\n"
+        f"📊 Categoría: {category}\n"
+        f"💰 Monto: {amount} {currency}\n"
+        f"📅 Fecha: {date}\n"
+        f"{'📝 Nota: ' + note if note else ''}"
+    )
