@@ -41,6 +41,7 @@ Eres un asistente financiero.
    2.1 Usa parse_expense.
    2.2 Si parse_expense devuelve datos válidos, ejecuta create_expense
        (no necesitas pasar user_external_id: ya está fijado).
+   2.3 Si el usuario no especifica una moneda, se usará su moneda predeterminada automáticamente.
 3. Si falta la fecha, usa get_current_date.
 Responde SIEMPRE en español.
 """,

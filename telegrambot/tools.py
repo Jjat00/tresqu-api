@@ -12,6 +12,7 @@ from expenses.models import Expense
 from users.models import User
 # serializasers
 from .serializasers import ExpenseData
+from .currencies import is_valid_currency
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
                  api_key=settings.OPENAI_API_KEY)
@@ -84,6 +85,13 @@ def create_expense(
     # lookup del usuario sin importar dónde estés llamando
     user = User.objects.get(external_id=user_external_id)
 
+    # Verificar si la moneda es válida, de lo contrario usar la moneda por defecto del usuario
+    if not currency or not is_valid_currency(currency):
+        currency = user.default_currency
+        currency_message = f"(Se usó tu moneda por defecto: {currency})"
+    else:
+        currency_message = ""
+
     if spent_at:
         date = _dt.datetime.strptime(spent_at, "%Y-%m-%d").date()
     else:
@@ -97,7 +105,7 @@ def create_expense(
     return (
         f"✅ ¡Gasto registrado!\n"
         f"📊 Categoría: {category}\n"
-        f"💰 Monto: {amount} {currency}\n"
+        f"💰 Monto: {amount} {currency} {currency_message}\n"
         f"📅 Fecha: {date}\n"
         f"{'📝 Nota: ' + note if note else ''}"
     )

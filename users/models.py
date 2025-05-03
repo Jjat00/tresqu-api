@@ -8,6 +8,8 @@ class User(models.Model):
     first_name = models.CharField(max_length=100, blank=True)
     username = models.CharField(max_length=100, blank=True)
     phone_number = models.CharField(max_length=20, blank=True, null=True)
+    default_currency = models.CharField(
+        max_length=3, default='USD', help_text="Código ISO 4217 de la moneda por defecto")
     # Campo para almacenar embeddings (opcional)
     embedding = VectorField(dimensions=1536, null=True)
 

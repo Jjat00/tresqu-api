@@ -1,12 +1,13 @@
 import logging
-from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from asgiref.sync import sync_to_async
 
 from django.conf import settings
 from users.models import User
 from .models import TelegramChat, TelegramMessage
 from .services import process_message
+from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name, format_currency_option
 
 # Configuración de logging
 logging.basicConfig(
@@ -17,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Definir estados para la conversación
 ESPERANDO_TELEFONO = 0
+ESPERANDO_MONEDA = 1
 
 
 # Funciones síncronas para operaciones de base de datos
@@ -53,13 +55,14 @@ def get_user_by_phone_number(phone_number):
     return User.objects.filter(phone_number=phone_number).first()
 
 
-def create_user(external_id, platform, first_name, username, phone_number=None):
+def create_user(external_id, platform, first_name, username, phone_number=None, default_currency='USD'):
     return User.objects.create(
         external_id=external_id,
         platform=platform,
         first_name=first_name or "",
         username=username or "",
-        phone_number=phone_number
+        phone_number=phone_number,
+        default_currency=default_currency
     )
 
 
@@ -67,6 +70,13 @@ def update_chat_user(chat, user):
     chat.user = user
     chat.save()
     return chat
+
+
+def update_user_currency(user, currency_code):
+    """Actualiza la moneda por defecto del usuario"""
+    user.default_currency = currency_code
+    user.save()
+    return user
 
 
 def get_chat_user(chat_id):
@@ -87,6 +97,7 @@ get_user_by_external_id_async = sync_to_async(get_user_by_external_id)
 get_user_by_phone_number_async = sync_to_async(get_user_by_phone_number)
 create_user_async = sync_to_async(create_user)
 update_chat_user_async = sync_to_async(update_chat_user)
+update_user_currency_async = sync_to_async(update_user_currency)
 get_chat_user_async = sync_to_async(get_chat_user)
 
 
@@ -255,7 +266,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Maneja el contacto recibido y completa el registro del usuario."""
+    """Maneja el contacto recibido y solicita la moneda por defecto."""
     chat_id = update.effective_chat.id
     user = update.effective_user
     contact = update.message.contact
@@ -282,48 +293,205 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Contacto compartido"
     )
 
-    # Verificar si existe un usuario con este número de teléfono
-    existing_user = await get_user_by_phone_number_async(phone_number)
+    # Guardar el número de teléfono en el contexto para usarlo después
+    context.user_data["phone_number"] = phone_number
+
+    # Crear botones para monedas comunes
+    keyboard = []
+    for i in range(0, len(COMMON_CURRENCIES), 2):
+        row = []
+        currency = COMMON_CURRENCIES[i]
+        row.append(InlineKeyboardButton(
+            f"{currency['flag']} {currency['code']}",
+            callback_data=f"currency_{currency['code']}"
+        ))
+
+        # Agregar segunda moneda en la fila si existe
+        if i + 1 < len(COMMON_CURRENCIES):
+            currency2 = COMMON_CURRENCIES[i + 1]
+            row.append(InlineKeyboardButton(
+                f"{currency2['flag']} {currency2['code']}",
+                callback_data=f"currency_{currency2['code']}"
+            ))
+
+        keyboard.append(row)
+
+    # Agregar botón para especificar otra moneda
+    keyboard.append([InlineKeyboardButton(
+        "Otra moneda", callback_data="currency_other")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    message = (
+        "¡Gracias! Ahora necesito que selecciones tu moneda predeterminada. "
+        "Esta moneda se usará cuando no especifiques una al registrar gastos.\n\n"
+        "Selecciona una de las opciones comunes o elige 'Otra moneda' para escribir el código ISO:"
+    )
+
+    await update.message.reply_text(message, reply_markup=reply_markup)
+
+    # Registrar respuesta
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        message
+    )
+
+    return ESPERANDO_MONEDA
+
+
+async def handle_currency_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Maneja la selección de moneda desde los botones inline."""
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Extraer el código de moneda del callback_data
+    callback_data = query.data
+
+    if callback_data == "currency_other":
+        # El usuario quiere especificar otra moneda
+        message = (
+            "Por favor, escribe el código ISO 4217 de tu moneda (3 letras).\n"
+            "Por ejemplo: USD, EUR, GBP, etc."
+        )
+        await query.edit_message_text(text=message)
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            message
+        )
+
+        return ESPERANDO_MONEDA
+    else:
+        # El usuario ha seleccionado una moneda de la lista
+        currency_code = callback_data.replace("currency_", "")
+
+        # Completar el registro con la moneda seleccionada
+        return await complete_registration(update, context, currency_code)
+
+
+async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Maneja la entrada de texto para el código de moneda."""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    currency_code = update.message.text.strip().upper()
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        currency_code
+    )
+
+    # Validar el código de moneda
+    if not is_valid_currency(currency_code):
+        message = (
+            f"'{currency_code}' no es un código de moneda válido según ISO 4217.\n"
+            f"Por favor, escribe un código válido de 3 letras como USD, EUR, GBP, etc."
+        )
+        await update.message.reply_text(message)
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            message
+        )
+
+        return ESPERANDO_MONEDA
+
+    # Completar el registro con la moneda proporcionada
+    return await complete_registration(update, context, currency_code)
+
+
+async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, currency_code: str) -> int:
+    """Completa el proceso de registro con la información recopilada."""
+    if update.callback_query:
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        message_obj = update.callback_query.message
+    else:
+        chat_id = update.effective_chat.id
+        user = update.effective_user
+        message_obj = update.message
+
+    phone_number = context.user_data.get("phone_number")
     external_id = f"telegram_{user.id}"
 
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Verificar si existe un usuario con este número de teléfono
+    existing_user = await get_user_by_phone_number_async(phone_number)
+
     if existing_user:
-        # Si el usuario ya existe, asociar el chat con ese usuario
+        # Si el usuario ya existe, asociar el chat con ese usuario y actualizar moneda
         await update_chat_user_async(chat, existing_user)
-        message = "¡Tu cuenta ha sido conectada exitosamente!"
+        await update_user_currency_async(existing_user, currency_code)
+        message = (
+            f"¡Tu cuenta ha sido conectada exitosamente!\n"
+            f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
+        )
         logger.info(
-            f"Usuario reconectado por número de teléfono: {phone_number}")
+            f"Usuario reconectado con moneda {currency_code}: {phone_number}")
     else:
         # Verificar si ya existe un usuario con este external_id
         existing_user_by_id = await get_user_by_external_id_async(external_id)
 
         if existing_user_by_id:
-            # Si existe un usuario con este ID pero sin número, actualizar su número
+            # Si existe un usuario con este ID, actualizar su número y moneda
             existing_user_by_id.phone_number = phone_number
+            existing_user_by_id.default_currency = currency_code
             await sync_to_async(existing_user_by_id.save)()
             await update_chat_user_async(chat, existing_user_by_id)
-            message = "¡Tu cuenta ha sido actualizada con tu número de teléfono!"
+            message = (
+                f"¡Tu cuenta ha sido actualizada con tu número de teléfono y moneda predeterminada!\n"
+                f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
+            )
             logger.info(
-                f"Usuario actualizado con número de teléfono: {phone_number}")
+                f"Usuario actualizado con número y moneda {currency_code}: {phone_number}")
         else:
-            # Crear nuevo usuario con número de teléfono
+            # Crear nuevo usuario con número de teléfono y moneda
             try:
                 new_user = await create_user_async(
                     external_id,
                     "telegram",
                     user.first_name,
                     user.username,
-                    phone_number
+                    phone_number,
+                    currency_code
                 )
                 await update_chat_user_async(chat, new_user)
-                message = "¡Tu cuenta ha sido creada exitosamente!"
+                message = (
+                    f"¡Tu cuenta ha sido creada exitosamente!\n"
+                    f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
+                )
                 logger.info(
-                    f"Nuevo usuario creado con número de teléfono: {phone_number}")
+                    f"Nuevo usuario creado con número y moneda {currency_code}: {phone_number}")
             except Exception as e:
                 logger.error(f"Error al crear usuario: {e}")
                 message = "Lo siento, ocurrió un error al crear tu cuenta. Por favor, intenta de nuevo más tarde."
 
-    # Enviar mensaje de confirmación y quitar el teclado
-    await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+    # Enviar mensaje de confirmación
+    if update.callback_query:
+        await update.callback_query.edit_message_text(message)
+    else:
+        await message_obj.reply_text(message, reply_markup=ReplyKeyboardRemove())
 
     # Registrar respuesta
     await create_message_async(
@@ -384,9 +552,14 @@ def setup_bot():
         entry_points=[CommandHandler("registrar", register_user)],
         states={
             ESPERANDO_TELEFONO: [MessageHandler(filters.CONTACT, handle_contact)],
+            ESPERANDO_MONEDA: [
+                CallbackQueryHandler(
+                    handle_currency_selection, pattern=r"^currency_"),
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               handle_currency_text),
+            ],
         },
-        fallbacks=[CommandHandler(
-            "cancel", cancel)],
+        fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(conv_handler)
 
