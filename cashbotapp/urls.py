@@ -21,9 +21,9 @@ from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, Spec
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/', include('expenses.urls')),
-    path('api/', include('users.urls')),
-    path('telegram/', include('telegrambot.urls')),
+    path('api/', include('expenses.urls'), name='expenses'),
+    path('api/', include('users.urls'), name='users'),
+    path('telegram/', include('telegrambot.urls'), name='telegram'),
     # API Documentation
     path('schema/', SpectacularAPIView.as_view(), name='schema'),
     path('schema/swagger-ui/',
