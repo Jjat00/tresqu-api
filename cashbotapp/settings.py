@@ -43,11 +43,16 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     'rest_framework',
     'pgvector.django',
+    'drf_spectacular',
     'users',
     'expenses',
     'categories',
     'telegrambot',
 ]
+
+REST_FRAMEWORK = {
+    'DEFAULT_SCHEMA_CLASS': 'drf_spectacular.openapi.AutoSchema',
+}
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
@@ -142,3 +147,11 @@ TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL', '')
 
 # Configuración de OpenAI
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
+
+SPECTACULAR_SETTINGS = {
+    'TITLE': 'Cashbot API',
+    'DESCRIPTION': 'API para la gestión de Cashbot',
+    'VERSION': '0.0.1',
+    'SERVE_INCLUDE_SCHEMA': True,
+    'SCHEMA_PATH_PREFIX': None,
+}
