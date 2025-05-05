@@ -1,7 +1,7 @@
-# telegrambot/utils.py
 from asgiref.sync import sync_to_async
 from telegrambot.models import TelegramMessage
 from langchain.schema import HumanMessage, AIMessage
+from categories.models import Category
 
 
 async def fetch_last_messages(user_id: int, window: int = 10):
@@ -18,3 +18,21 @@ async def fetch_last_messages(user_id: int, window: int = 10):
             yield HumanMessage(content=r.text)
         else:
             yield AIMessage(content=r.text)
+
+
+def normalize_category_name(name: str) -> str:
+    return name.strip().lower()
+
+
+@sync_to_async
+def get_existing_categories():
+    """
+    Obtiene la lista de todas las categorías disponibles para gastos
+    desde la base de datos.
+    """
+    try:
+        categories = Category.get_all_categories()
+        return categories
+    except Exception as e:
+        print(f"Error al obtener categorías: {e}")
+        return []

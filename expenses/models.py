@@ -5,17 +5,6 @@ from categories.models import Category
 
 
 class Expense(models.Model):
-    CATEGORY_CHOICES = [
-        ('Comida', 'Comida'),
-        ('Transporte', 'Transporte'),
-        ('Vivienda', 'Vivienda'),
-        ('Entretenimiento', 'Entretenimiento'),
-        ('Salud', 'Salud'),
-        ('Educación', 'Educación'),
-        ('Ropa', 'Ropa'),
-        ('Otros', 'Otros'),
-    ]
-
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='expenses')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
@@ -23,7 +12,7 @@ class Expense(models.Model):
     category = models.ForeignKey(
         Category, on_delete=models.SET_NULL, null=True, blank=True)
     category_str = models.CharField(
-        max_length=20, choices=CATEGORY_CHOICES, blank=True, null=True)
+        max_length=100, blank=True, null=True)
     description = models.TextField(blank=True)
     timestamp = models.DateTimeField()
     spent_at = models.DateField(null=True, blank=True)

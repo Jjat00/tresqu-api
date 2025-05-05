@@ -11,6 +11,7 @@ from typing import List, Dict, Any
 # models
 from expenses.models import Expense
 from users.models import User
+from categories.models import Category
 # serializasers
 from .serializasers import ExpenseData
 from .currencies import is_valid_currency
@@ -103,6 +104,41 @@ def is_greeting(text: str) -> bool:
 
 
 @tool
+def get_or_create_category(name: str) -> Dict[str, str]:
+    """
+    Crea una nueva categoría en la base de datos.
+    Útil cuando un usuario registra un gasto con una categoría que no existe.
+    Devuelve un diccionario con el resultado de la operación.
+    """
+    try:
+        # Normalizar el nombre (primera letra mayúscula, resto minúsculas)
+        normalized_name = name.strip().capitalize()
+
+        # Verificar si ya existe
+        if Category.objects.filter(name=normalized_name).exists():
+            return {
+                "status": "info",
+                "message": f"La categoría '{normalized_name}' ya existe"
+            }
+
+        # Crear nueva categoría
+        category, created = Category.objects.get_or_create(
+            name=normalized_name)
+
+        return {
+            "status": "success",
+            "message": f"Categoría '{normalized_name}' creada exitosamente",
+            "id": str(category.id)
+        }
+    except Exception as e:
+        logger.error(f"Error al crear categoría: {e}")
+        return {
+            "status": "error",
+            "message": f"Error al crear categoría: {str(e)}"
+        }
+
+
+@tool
 def create_expense(
     user_external_id: str,
     amount: float,
@@ -127,8 +163,19 @@ def create_expense(
     else:
         date = timezone.now().date()
 
+    # Normalizar el nombre de la categoría
+    category_name = category.strip().capitalize()
+
+    # Buscar la categoría en la base de datos
+    category_obj = None
+    try:
+        category_obj = Category.objects.get(name=category_name)
+    except Category.DoesNotExist:
+        # Si no existe, solo usamos el nombre como category_str
+        pass
+
     # Crear el texto para el embedding
-    expense_text = f"Gasto de {amount} {currency} en {category} el {date}. {note}"
+    expense_text = f"Gasto de {amount} {currency} en {category_name} el {date}. {note}"
 
     # Generar embedding
     embedding = None
@@ -139,13 +186,14 @@ def create_expense(
 
     expense = Expense.objects.create(
         user=user, amount=amount, currency=currency,
-        category_str=category, spent_at=date, note=note,
+        category=category_obj, category_str=category_name,
+        spent_at=date, note=note,
         timestamp=timezone.now(), embedding=embedding,
         raw_message=expense_text
     )
     return (
         f"✅ ¡Gasto registrado!\n"
-        f"📊 Categoría: {category}\n"
+        f"📊 Categoría: {category_name}\n"
         f"💰 Monto: {amount} {currency} {currency_message}\n"
         f"📅 Fecha: {date}\n"
         f"{'📝 Nota: ' + note if note else ''}"
