@@ -1,5 +1,5 @@
 from django.db import models
-from pgvector.django import VectorField, CosineDistance
+from pgvector.django import VectorField, CosineDistance, HnswIndex
 from users.models import User
 from categories.models import Category
 
@@ -21,6 +21,18 @@ class Expense(models.Model):
     embedding = VectorField(dimensions=1536, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        indexes = [
+            HnswIndex(
+                name='expense_embedding_idx',
+                fields=['embedding'],
+                m=16,                     # Cantidad de conexiones por nodo
+                ef_construction=64,       # Factor de exploración durante construcción
+                # Operador de distancia coseno
+                opclasses=['vector_cosine_ops'],
+            ),
+        ]
 
     def __str__(self):
         category_name = self.category.name if self.category else self.category_str
