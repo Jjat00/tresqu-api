@@ -16,6 +16,7 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
@@ -24,6 +25,9 @@ urlpatterns = [
     path('api/', include('expenses.urls'), name='expenses'),
     path('api/', include('users.urls'), name='users'),
     path('telegram/', include('telegrambot.urls'), name='telegram'),
+    # JWT auth
+    path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
     # API Documentation
     path('schema/', SpectacularAPIView.as_view(), name='schema'),
     path('schema/swagger-ui/',

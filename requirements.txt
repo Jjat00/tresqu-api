@@ -9,6 +9,7 @@ dj-database-url==2.3.0
 Django==5.2
 django-filter==25.1
 djangorestframework==3.16.0
+djangorestframework_simplejwt==5.5.0
 drf-spectacular==0.28.0
 greenlet==3.2.1
 gunicorn==23.0.0
@@ -37,6 +38,7 @@ psycopg==3.2.7
 psycopg2==2.9.10
 pydantic==2.11.4
 pydantic_core==2.33.2
+PyJWT==2.9.0
 pyngrok==7.2.5
 python-dotenv==1.1.0
 python-telegram-bot==22.0

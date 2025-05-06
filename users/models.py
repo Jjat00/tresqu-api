@@ -2,6 +2,29 @@ from django.db import models
 from pgvector.django import VectorField
 from django.utils import timezone
 import datetime
+import random
+import string
+
+
+class TelegramVerification(models.Model):
+    phone_number = models.CharField(max_length=20)
+    verification_code = models.CharField(max_length=6)
+    telegram_chat_id = models.CharField(max_length=100, null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    is_verified = models.BooleanField(default=False)
+    used_for_registration = models.BooleanField(default=False)
+
+    @classmethod
+    def generate_code(cls, phone_number):
+        """Genera un código de verificación de 6 dígitos para el número de teléfono dado"""
+        code = ''.join(random.choices(string.digits, k=6))
+        verification = cls(phone_number=phone_number, verification_code=code)
+        verification.save()
+        return verification
+
+    def is_expired(self):
+        """Verifica si el código ha expirado (5 minutos)"""
+        return timezone.now() > self.created_at + datetime.timedelta(minutes=5)
 
 
 class SubscriptionPlan(models.Model):
