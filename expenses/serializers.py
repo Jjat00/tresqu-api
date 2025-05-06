@@ -11,7 +11,7 @@ class ExpenseSerializer(serializers.ModelSerializer):
         fields = ['id', 'user', 'amount', 'currency', 'description',
                   'timestamp', 'raw_message', 'created_at', 'updated_at',
                   'category', 'category_name', 'category_str', 'spent_at',
-                  'note', 'embedding']
+                  'note']
         read_only_fields = ['created_at', 'updated_at', 'category']
 
     def create(self, validated_data):

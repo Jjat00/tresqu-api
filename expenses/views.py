@@ -8,10 +8,7 @@ from django.conf import settings
 from django.db.models import Sum
 from django.utils import timezone
 from datetime import timedelta
-import datetime
-import logging  # Añadir logging para diagnóstico
-# Importar para obtener el modelo de usuario
-from django.contrib.auth import get_user_model
+import logging
 
 from .models import Expense
 from .serializers import ExpenseSerializer
@@ -71,64 +68,6 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             'categories': categories,
             'totals': totals
         })
-
-    @action(detail=False, methods=['get'])
-    def by_week(self, request):
-        """
-        Obtiene gastos semanales por categoría
-        GET /api/expenses/by_week/?months=1
-        """
-        months = int(request.query_params.get('months', 1))
-
-        # Calcular fecha de inicio (hace X meses)
-        start_date = timezone.now().date().replace(day=1)
-        if months > 0:
-            for _ in range(months - 1):
-                # Retroceder al primer día del mes anterior
-                start_date = (start_date - timedelta(days=1)).replace(day=1)
-
-        queryset = self.get_queryset().filter(timestamp__gte=start_date)
-
-        # Agrupar por semana y categoría
-        weekly_data = {}
-        categories = set()
-
-        for expense in queryset:
-            # Obtener el inicio de la semana (lunes)
-            expense_date = expense.timestamp.date()
-            week_start = expense_date - timedelta(days=expense_date.weekday())
-            week_key = week_start.strftime('%d %b')
-
-            category = expense.category.name if expense.category else expense.category_str or 'Otros'
-            categories.add(category)
-
-            if week_key not in weekly_data:
-                weekly_data[week_key] = {}
-
-            if category not in weekly_data[week_key]:
-                weekly_data[week_key][category] = 0
-
-            weekly_data[week_key][category] += float(expense.amount)
-
-        # Ordenar por semana
-        weeks = sorted(weekly_data.keys(),
-                       key=lambda x: datetime.datetime.strptime(x, '%d %b'))
-        categories = sorted(list(categories))
-
-        result = {
-            'weeks': weeks,
-            'categories': categories,
-            'data': {}
-        }
-
-        for category in categories:
-            result['data'][category] = []
-            for week in weeks:
-                result['data'][category].append(
-                    weekly_data[week].get(category, 0)
-                )
-
-        return Response(result)
 
     @action(detail=False, methods=['get'])
     def recent(self, request):
