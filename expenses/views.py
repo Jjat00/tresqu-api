@@ -10,6 +10,7 @@ from django.utils import timezone
 from datetime import timedelta, datetime
 import logging
 import calendar
+from django.db.models import Q
 
 from .models import Expense
 from .serializers import ExpenseSerializer
@@ -274,3 +275,163 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                     float(week_data['totals'][category]), 2)
 
         return Response(weekly_data)
+
+    @action(detail=False, methods=['get'])
+    def filtered_expenses(self, request):
+        """
+        Obtiene gastos filtrados por categoría y rango de fecha
+
+        GET /api/expenses/filtered_expenses/
+
+        Parámetros:
+        - category_id: ID de la categoría (opcional, si no se proporciona, se incluyen todas las categorías)
+        - date_filter: Filtro de fecha (opcional, valores: 'all', 'today', 'yesterday', 'current_month', 'previous_month', 
+                     'current_week', 'previous_week', 'current_year', 'previous_year', 'custom')
+        - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
+        - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
+        """
+        logger.info(
+            f"Endpoint /filtered_expenses/ accedido por usuario: {request.user}")
+
+        # Obtener queryset base (filtrado por usuario)
+        queryset = self.get_queryset()
+
+        # Filtrar por categoría si se proporciona
+        category_id = request.query_params.get('category_id')
+        if category_id:
+            try:
+                category_id = int(category_id)
+                queryset = queryset.filter(category_id=category_id)
+                logger.info(f"Filtrando por categoría: {category_id}")
+            except ValueError:
+                return Response(
+                    {"error": "ID de categoría inválido"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Aplicar filtro de fecha
+        date_filter = request.query_params.get('date_filter', 'all')
+        today = timezone.now().date()
+
+        if date_filter == 'today':
+            # Hoy
+            start_date = today
+            end_date = today
+
+        elif date_filter == 'yesterday':
+            # Ayer
+            start_date = today - timedelta(days=1)
+            end_date = start_date
+
+        elif date_filter == 'current_month':
+            # Mes actual
+            start_date = today.replace(day=1)
+            next_month = today.month + 1 if today.month < 12 else 1
+            next_month_year = today.year if today.month < 12 else today.year + 1
+            end_date = datetime(next_month_year, next_month,
+                                1).date() - timedelta(days=1)
+
+        elif date_filter == 'previous_month':
+            # Mes anterior
+            first_day_current = today.replace(day=1)
+            last_day_previous = first_day_current - timedelta(days=1)
+            start_date = last_day_previous.replace(day=1)
+            end_date = last_day_previous
+
+        elif date_filter == 'current_week':
+            # Semana actual (lunes a domingo)
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+
+        elif date_filter == 'previous_week':
+            # Semana anterior (lunes a domingo)
+            start_date = today - timedelta(days=today.weekday() + 7)
+            end_date = start_date + timedelta(days=6)
+
+        elif date_filter == 'current_year':
+            # Año actual
+            start_date = today.replace(month=1, day=1)
+            end_date = today.replace(month=12, day=31)
+
+        elif date_filter == 'previous_year':
+            # Año anterior
+            start_date = datetime(today.year - 1, 1, 1).date()
+            end_date = datetime(today.year - 1, 12, 31).date()
+
+        elif date_filter == 'custom':
+            # Filtro personalizado
+            try:
+                start_date = datetime.strptime(
+                    request.query_params.get('start_date'),
+                    '%Y-%m-%d'
+                ).date()
+                end_date = datetime.strptime(
+                    request.query_params.get('end_date'),
+                    '%Y-%m-%d'
+                ).date()
+
+                if start_date > end_date:
+                    return Response(
+                        {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # 'all' o cualquier otro valor: sin filtro de fecha
+            start_date = None
+            end_date = None
+
+        # Aplicar filtro de fecha al queryset
+        if start_date and end_date:
+            logger.info(
+                f"Filtrando por rango de fecha: {start_date} a {end_date}")
+            queryset = queryset.filter(
+                timestamp__date__gte=start_date,
+                timestamp__date__lte=end_date
+            )
+
+        # Si no hay gastos, devolver respuesta vacía
+        if not queryset.exists():
+            logger.warning(
+                f"No hay gastos para el usuario {request.user} con los filtros aplicados")
+            return Response({
+                'categories': [],
+                'totals': [],
+                'expenses': []
+            })
+
+        # Agrupar por categoría y calcular totales
+        by_category = queryset.values('category__name').annotate(
+            total=Sum('amount')
+        ).order_by('-total')
+
+        # Transformar a formato para gráficos
+        categories = []
+        totals = []
+        for item in by_category:
+            category_name = item['category__name'] or 'Otros'
+            categories.append(category_name)
+            totals.append(float(item['total']))
+
+        # Obtener lista detallada de gastos
+        expenses = self.get_serializer(
+            queryset.order_by('-timestamp'),
+            many=True
+        ).data
+
+        # Resumen del filtro aplicado
+        filter_summary = "Todos los gastos"
+        if date_filter != 'all' and start_date and end_date:
+            filter_summary = f"Gastos del {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
+
+        return Response({
+            'categories': categories,
+            'totals': totals,
+            'expenses': expenses,
+            'filter_summary': filter_summary,
+            'total_amount': sum(totals)
+        })
