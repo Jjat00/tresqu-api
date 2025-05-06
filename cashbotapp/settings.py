@@ -67,6 +67,7 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'cashbotapp.middleware.DatabaseConnectionMiddleware',
     'cashbotapp.middleware.AuthLoggingMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -97,9 +98,24 @@ WSGI_APPLICATION = 'cashbotapp.wsgi.application'
 # https://docs.djangoproject.com/en/5.1/ref/settings/#databases
 # Configuración de Supabase
 DATABASES = {
-    "default": dj_database_url.parse(
-        os.getenv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cashbot"), conn_max_age=600
+    "default": dj_database_url.config(
+        default=os.getenv(
+            "DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cashbot"),
+        conn_max_age=600,
+        ssl_require=True,
+        conn_health_checks=True,
+        engine='django.db.backends.postgresql'
     )
+}
+
+# Configuración adicional para manejo de conexiones
+DATABASES['default']['OPTIONS'] = {
+    'application_name': 'cashbot',
+    'connect_timeout': 30,
+    'keepalives': 1,
+    'keepalives_idle': 30,
+    'keepalives_interval': 10,
+    'keepalives_count': 5,
 }
 
 # Configuración de API de Supabase

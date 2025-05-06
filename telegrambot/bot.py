@@ -2,6 +2,8 @@ import logging
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from asgiref.sync import sync_to_async
+import time
+from django.db import transaction, connections, connection, InterfaceError
 
 from django.conf import settings
 from users.models import User
@@ -23,10 +25,46 @@ ESPERANDO_MONEDA = 1
 
 # Funciones síncronas para operaciones de base de datos
 def get_or_create_chat(chat_id):
-    return TelegramChat.objects.get_or_create(chat_id=str(chat_id))
+    """
+    Obtiene o crea un chat con manejo de errores de conexión
+    """
+    max_retries = 3
+    retry_count = 0
+    backoff_time = 0.5  # tiempo inicial en segundos
+
+    while retry_count < max_retries:
+        try:
+            with transaction.atomic():
+                return TelegramChat.objects.get_or_create(chat_id=str(chat_id))
+        except InterfaceError:
+            # La conexión se cerró, intentar reconectar
+            retry_count += 1
+            logger.warning(
+                f"Conexión cerrada, intento {retry_count} de reconexión para chat_id={chat_id}")
+
+            # Cerrar todas las conexiones para forzar una reconexión
+            connections.close_all()
+
+            if retry_count < max_retries:
+                # Esperar con backoff exponencial
+                time.sleep(backoff_time)
+                backoff_time *= 2
+                continue
+            else:
+                logger.error(
+                    f"No se pudo reconectar después de {max_retries} intentos")
+                raise
+        except Exception as e:
+            logger.error(f"Error al obtener/crear chat: {e}")
+            raise
 
 
 def create_message(chat, message_id, message_type, text):
+    """Crea un mensaje con reintentos en caso de conexión cerrada"""
+    max_retries = 3
+    retry_count = 0
+    backoff_time = 0.5  # tiempo inicial en segundos
+
     # Generar embedding para mensajes no vacíos
     embedding = None
     if text and text.strip():
@@ -37,13 +75,37 @@ def create_message(chat, message_id, message_type, text):
         except Exception as e:
             logger.error(f"Error al generar embedding para mensaje: {e}")
 
-    return TelegramMessage.objects.create(
-        chat=chat,
-        message_id=message_id,
-        message_type=message_type,
-        text=text,
-        embedding=embedding
-    )
+    while retry_count < max_retries:
+        try:
+            with transaction.atomic():
+                return TelegramMessage.objects.create(
+                    chat=chat,
+                    message_id=message_id,
+                    message_type=message_type,
+                    text=text,
+                    embedding=embedding
+                )
+        except InterfaceError:
+            # La conexión se cerró, intentar reconectar
+            retry_count += 1
+            logger.warning(
+                f"Conexión cerrada, intento {retry_count} de reconexión para create_message")
+
+            # Cerrar todas las conexiones para forzar una reconexión
+            connections.close_all()
+
+            if retry_count < max_retries:
+                # Esperar con backoff exponencial
+                time.sleep(backoff_time)
+                backoff_time *= 2
+                continue
+            else:
+                logger.error(
+                    f"No se pudo reconectar después de {max_retries} intentos")
+                raise
+        except Exception as e:
+            logger.error(f"Error al crear mensaje: {e}")
+            raise
 
 
 def get_user_by_external_id(external_id):
@@ -80,14 +142,41 @@ def update_user_currency(user, currency_code):
 
 
 def get_chat_user(chat_id):
-    """Obtiene el usuario asociado a un chat de manera segura"""
-    try:
-        chat = TelegramChat.objects.get(chat_id=str(chat_id))
-        # Hacemos una consulta explícita en lugar de usar chat.user
-        # para evitar problemas con el acceso lazy a relaciones
-        return chat.user_id, User.objects.filter(id=chat.user_id).first() if chat.user_id else None
-    except TelegramChat.DoesNotExist:
-        return None, None
+    """Obtiene el usuario asociado a un chat de manera segura con reintentos"""
+    max_retries = 3
+    retry_count = 0
+    backoff_time = 0.5  # tiempo inicial en segundos
+
+    while retry_count < max_retries:
+        try:
+            with transaction.atomic():
+                chat = TelegramChat.objects.get(chat_id=str(chat_id))
+                # Hacemos una consulta explícita en lugar de usar chat.user
+                # para evitar problemas con el acceso lazy a relaciones
+                return chat.user_id, User.objects.filter(id=chat.user_id).first() if chat.user_id else None
+        except InterfaceError:
+            # La conexión se cerró, intentar reconectar
+            retry_count += 1
+            logger.warning(
+                f"Conexión cerrada, intento {retry_count} de reconexión para get_chat_user")
+
+            # Cerrar todas las conexiones para forzar una reconexión
+            connections.close_all()
+
+            if retry_count < max_retries:
+                # Esperar con backoff exponencial
+                time.sleep(backoff_time)
+                backoff_time *= 2
+                continue
+            else:
+                logger.error(
+                    f"No se pudo reconectar después de {max_retries} intentos")
+                raise
+        except TelegramChat.DoesNotExist:
+            return None, None
+        except Exception as e:
+            logger.error(f"Error al obtener usuario de chat: {e}")
+            return None, None
 
 
 # Conversión a funciones asíncronas
