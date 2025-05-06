@@ -3,12 +3,14 @@ from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, ReplyKeyboardR
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler, CallbackQueryHandler
 from asgiref.sync import sync_to_async
 import time
+import tempfile
+import os
 from django.db import transaction, connections, connection, InterfaceError
 
 from django.conf import settings
 from users.models import User
 from .models import TelegramChat, TelegramMessage
-from .services import process_message
+from .services import process_message, process_voice_message
 from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name, format_currency_option
 
 # Configuración de logging
@@ -623,6 +625,113 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     return ConversationHandler.END
 
 
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja mensajes de voz y procesa el audio para extraer información de gastos."""
+    chat_id = update.effective_chat.id
+    voice = update.message.voice
+
+    logger.info(
+        f"Mensaje de voz recibido de {chat_id}: duración {voice.duration} segundos")
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Obtener el usuario asociado al chat de manera segura
+    user_id, chat_user = await get_chat_user_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        "Mensaje de voz"
+    )
+
+    # Si no hay usuario asociado, solicitar registro
+    if user_id is None or chat_user is None:
+        message = (
+            "Parece que aún no estás registrado. Usa el comando /registrar para crear una cuenta "
+            "y poder utilizar todas las funciones del bot."
+        )
+        await update.message.reply_text(message)
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            message
+        )
+        return
+
+    # Verificar si el usuario tiene número de teléfono
+    if not chat_user.phone_number:
+        message = (
+            "Tu cuenta no tiene un número de teléfono registrado. "
+            "Por favor, usa el comando /registrar para completar tu registro."
+        )
+        await update.message.reply_text(message)
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            message
+        )
+        return
+
+    # Descargar el archivo de audio
+    try:
+        # Enviar mensaje de espera mientras se procesa el audio
+        wait_message = await update.message.reply_text("Procesando tu mensaje de voz, dame un momento...")
+
+        # Obtener el archivo de voz
+        voice_file = await context.bot.get_file(voice.file_id)
+
+        # Crear un archivo temporal para guardar el audio
+        with tempfile.NamedTemporaryFile(suffix='.ogg', delete=False) as temp_file:
+            temp_path = temp_file.name
+            # Descargar el archivo de voz al archivo temporal
+            await voice_file.download_to_drive(custom_path=temp_path)
+
+            # Procesar el mensaje de voz
+            response = await process_voice_message(chat_user, temp_path)
+
+            # Eliminar el mensaje de espera
+            await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
+
+            # Enviar la respuesta
+            await update.message.reply_text(response)
+
+            # Registrar respuesta
+            await create_message_async(
+                chat,
+                "ai_response",
+                "outgoing",
+                response
+            )
+
+        # Eliminar el archivo temporal
+        try:
+            os.unlink(temp_path)
+        except Exception as e:
+            logger.warning(f"No se pudo eliminar el archivo temporal: {e}")
+
+    except Exception as e:
+        logger.error(f"Error al procesar mensaje de voz: {e}")
+        error_message = "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo más tarde."
+        await update.message.reply_text(error_message)
+
+        # Registrar error
+        await create_message_async(
+            chat,
+            "error",
+            "outgoing",
+            error_message
+        )
+
+
 def setup_bot():
     """Configura y devuelve la aplicación del bot."""
     if not settings.TELEGRAM_BOT_TOKEN:
@@ -652,7 +761,11 @@ def setup_bot():
     )
     application.add_handler(conv_handler)
 
-    # Mensajes no comandos
+    # Mensajes de voz
+    application.add_handler(MessageHandler(
+        filters.VOICE, handle_voice_message))
+
+    # Mensajes de texto no comandos
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
 

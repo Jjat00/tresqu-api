@@ -2,7 +2,7 @@
 from langchain.memory import ConversationBufferWindowMemory
 from telegrambot.utils import fetch_last_messages
 import logging
-from typing import List
+from openai import OpenAI
 
 from django.conf import settings
 from users.models import User
@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 
 llm = ChatOpenAI(model="gpt-4o", temperature=0.1,
                  api_key=settings.OPENAI_API_KEY)
+
+# Cliente de OpenAI para transcripción de audio
+openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 
 async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
@@ -80,6 +83,42 @@ def make_create_expense_tool(user_external_id: str):
         )
 
     return create_expense_for_user
+
+
+async def transcribe_audio(audio_file_path: str) -> str:
+    """
+    Transcribe un archivo de audio usando la API de OpenAI
+    """
+    try:
+        with open(audio_file_path, 'rb') as audio_file:
+            # Usar la API de OpenAI para transcribir
+            transcription = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+            return transcription.text
+    except Exception as e:
+        logger.error(f"Error transcribiendo audio: {e}")
+        return ""
+
+
+async def process_voice_message(user: User, voice_file_path: str) -> str:
+    """
+    Procesa un mensaje de voz de Telegram, lo transcribe y extrae información de gastos
+    """
+    try:
+        # Transcribir el audio
+        transcription = await transcribe_audio(voice_file_path)
+
+        if not transcription:
+            return "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
+
+        # Procesar el texto transcrito
+        return await process_message(user, transcription)
+
+    except Exception as e:
+        logger.error(f"Error procesando mensaje de voz: {e}")
+        return "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo."
 
 
 async def process_message(user: User, raw_text: str) -> str:
