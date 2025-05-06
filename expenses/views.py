@@ -209,62 +209,68 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         if not queryset.exists():
             logger.warning(
                 f"No hay gastos para el usuario {request.user} en {month}/{year}")
-            return Response({
-                'weeks': [],
-                'categories': [],
-                'data': []
-            })
+            return Response([])
 
-        # Obtener todas las categorías únicas
-        categories = list(set(expense.category.name if expense.category else 'Otros'
-                          for expense in queryset))
-        if '' in categories:
-            categories.remove('')
-            if 'Otros' not in categories:
-                categories.append('Otros')
+        # Obtener todas las categorías disponibles para el usuario
+        all_categories = list(set(expense.category.name if expense.category else 'Otros'
+                                  for expense in queryset))
+        if '' in all_categories:
+            all_categories.remove('')
+            if 'Otros' not in all_categories:
+                all_categories.append('Otros')
 
-        # Inicializar estructura de datos para las semanas
-        weeks_data = {}
+        # Identificar todas las semanas del mes
+        current_date = first_day
+        all_weeks = []
 
-        # Para cada gasto, asignarlo a la semana correspondiente
+        while current_date <= last_day:
+            # Encontrar el lunes de la semana actual
+            week_start = current_date - timedelta(days=current_date.weekday())
+            week_key = week_start.strftime("%d %b")
+
+            if week_key not in all_weeks:
+                all_weeks.append(week_key)
+
+            # Avanzar al siguiente día
+            current_date += timedelta(days=1)
+
+        # Ordenar las semanas cronológicamente
+        all_weeks = sorted(all_weeks,
+                           key=lambda x: datetime.strptime(f"{x} {year}", "%d %b %Y"))
+
+        # Inicializar datos de gastos por semana y categoría
+        weekly_data = []
+
+        # Preparar estructura para cada semana
+        for week in all_weeks:
+            week_data = {
+                'week': f"Lun {week}",
+                'totals': {cat: 0 for cat in all_categories}
+            }
+            weekly_data.append(week_data)
+
+        # Distribuir gastos en las semanas correspondientes
         for expense in queryset:
             date = expense.timestamp.date()
-            # Determinar el lunes de la semana (fecha de inicio de la semana)
+            # Determinar el lunes de la semana
             week_start = date - timedelta(days=date.weekday())
             week_key = week_start.strftime("%d %b")
 
-            # Inicializar la semana si no existe
-            if week_key not in weeks_data:
-                weeks_data[week_key] = {cat: 0 for cat in categories}
+            # Encontrar el índice de la semana en weekly_data
+            week_index = all_weeks.index(week_key)
 
-            # Sumar el gasto a la categoría correspondiente
-            category = expense.category.name if expense.category else 'Otros'
+            # Categoría del gasto
+            category = expense.category.name if expense.category and expense.category.name else 'Otros'
             if category == '':
                 category = 'Otros'
 
-            weeks_data[week_key][category] += expense.amount
+            # Sumar el gasto a la categoría correspondiente
+            weekly_data[week_index]['totals'][category] += expense.amount
 
-        # Ordenar las semanas cronológicamente
-        sorted_weeks = sorted(weeks_data.keys(),
-                              key=lambda x: datetime.strptime(f"{x} {year}", "%d %b %Y"))
+        # Redondear valores numéricos
+        for week_data in weekly_data:
+            for category in week_data['totals']:
+                week_data['totals'][category] = round(
+                    float(week_data['totals'][category]), 2)
 
-        # Preparar los datos para el frontend
-        result = {
-            'weeks': [f"Lun {week}" for week in sorted_weeks],
-            'categories': categories,
-            'data': []
-        }
-
-        # Para cada categoría, recopilar sus datos por semana
-        for category in categories:
-            category_data = []
-            for week in sorted_weeks:
-                category_data.append(
-                    round(float(weeks_data[week].get(category, 0)), 2))
-
-            result['data'].append({
-                'name': category,
-                'data': category_data
-            })
-
-        return Response(result)
+        return Response(weekly_data)
