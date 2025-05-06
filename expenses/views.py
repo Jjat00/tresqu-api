@@ -9,9 +9,15 @@ from django.db.models import Sum
 from django.utils import timezone
 from datetime import timedelta
 import datetime
+import logging  # Añadir logging para diagnóstico
+# Importar para obtener el modelo de usuario
+from django.contrib.auth import get_user_model
 
 from .models import Expense
 from .serializers import ExpenseSerializer
+
+# Configurar logger
+logger = logging.getLogger(__name__)
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -20,6 +26,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         """Filtrar gastos por el usuario autenticado"""
+        # En caso de que el usuario no esté autenticado, devolver un queryset vacío
+        if not self.request.user or not self.request.user.is_authenticated:
+            logger.warning(
+                "Usuario no autenticado intentando acceder a ExpenseViewSet")
+            return Expense.objects.none()
+
+        logger.info(f"Usuario autenticado: {self.request.user.id}")
         return Expense.objects.filter(user=self.request.user)
 
     @action(detail=False, methods=['get'])
@@ -28,7 +41,20 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         Obtiene el total de gastos agrupados por categoría
         GET /api/expenses/by_category/
         """
+        # Registrar información básica para depuración
+        logger.info(
+            f"Endpoint /by_category/ accedido por usuario: {request.user}")
+
         queryset = self.get_queryset()
+
+        # Si no hay datos, devolver respuesta vacía
+        if not queryset.exists():
+            logger.warning(f"No hay gastos para el usuario {request.user}")
+            return Response({
+                'categories': [],
+                'totals': []
+            })
+
         result = queryset.values('category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
