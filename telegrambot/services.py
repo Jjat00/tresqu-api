@@ -102,25 +102,6 @@ async def transcribe_audio(audio_file_path: str) -> str:
         return ""
 
 
-async def process_voice_message(user: User, voice_file_path: str) -> str:
-    """
-    Procesa un mensaje de voz de Telegram, lo transcribe y extrae información de gastos
-    """
-    try:
-        # Transcribir el audio
-        transcription = await transcribe_audio(voice_file_path)
-
-        if not transcription:
-            return "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
-
-        # Procesar el texto transcrito
-        return await process_message(user, transcription)
-
-    except Exception as e:
-        logger.error(f"Error procesando mensaje de voz: {e}")
-        return "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo."
-
-
 async def process_message(user: User, raw_text: str) -> str:
     try:
         # 1. herramientas (incluye create_expense closure)

@@ -10,8 +10,8 @@ from django.db import transaction, connections, connection, InterfaceError
 from django.conf import settings
 from users.models import User
 from .models import TelegramChat, TelegramMessage
-from .services import process_message, process_voice_message
-from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name, format_currency_option
+from .services import process_message
+from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name
 
 # Configuración de logging
 logging.basicConfig(
@@ -696,7 +696,27 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await voice_file.download_to_drive(custom_path=temp_path)
 
             # Procesar el mensaje de voz
-            response = await process_voice_message(chat_user, temp_path)
+            try:
+                # Transcribir el audio
+                from telegrambot.services import transcribe_audio
+                transcription = await transcribe_audio(temp_path)
+
+                # Guardar la transcripción en la base de datos
+                if transcription:
+                    await create_message_async(
+                        chat,
+                        f"transcription_{update.message.message_id}",
+                        "incoming",
+                        transcription
+                    )
+
+                    # Procesar el mensaje con la transcripción
+                    response = await process_message(chat_user, transcription)
+                else:
+                    response = "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
+            except Exception as e:
+                logger.error(f"Error al transcribir audio: {e}")
+                response = "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo."
 
             # Eliminar el mensaje de espera
             await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
