@@ -9,7 +9,7 @@ class Category(models.Model):
         'Educación', 'Ropa', 'Tecnología', 'Servicios', 'Mascota', 'Belleza',
         'Deportes', 'Viajes', 'Regalo', 'Seguros', 'Impuestos', 'Libros',
         'Mobiliario', 'Electrodomésticos', 'Restaurante', 'Café', 'Supermercado',
-        'Suscripciones', 'Hobbies', 'Ahorro', 'Inversión', 'Donación'
+        'Suscripciones', 'Hobbies', 'Ahorro', 'Inversión', 'Donación', 'Bebidas alcohólicas'
     ]
 
     name = models.CharField(max_length=100, unique=True)

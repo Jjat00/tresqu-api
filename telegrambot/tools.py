@@ -16,6 +16,8 @@ from categories.models import Category
 from .serializasers import ExpenseData
 from .currencies import is_valid_currency
 # Import embeddings service
+import calendar
+from datetime import datetime, timedelta
 
 embeddings = OpenAIEmbeddings(
     api_key=settings.OPENAI_API_KEY,
@@ -44,6 +46,81 @@ def get_current_date() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+@tool
+def parse_relative_date(date_text: str) -> str:
+    """
+    Convierte una referencia temporal relativa (ayer, el sábado, etc.) en una fecha específica.
+    Toma como referencia la fecha actual.
+    Devuelve la fecha en formato YYYY-MM-DD.
+    """
+    today = datetime.now()
+    date_text = date_text.lower().strip()
+
+    # Referencias básicas
+    if "hoy" in date_text:
+        return today.strftime("%Y-%m-%d")
+
+    if "ayer" in date_text:
+        return (today - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if "anteayer" in date_text or "antes de ayer" in date_text:
+        return (today - timedelta(days=2)).strftime("%Y-%m-%d")
+
+    if "mañana" in date_text:
+        return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    # Días de la semana
+    days_spanish = {
+        "lunes": 0, "martes": 1, "miércoles": 2, "miercoles": 2,
+        "jueves": 3, "viernes": 4, "sábado": 5, "sabado": 5, "domingo": 6
+    }
+
+    for day_name, day_num in days_spanish.items():
+        if day_name in date_text:
+            current_weekday = today.weekday()
+
+            # Palabras que indican pasado
+            past_indicators = ["gasté", "gaste", "compré", "compre", "pagué", "pague",
+                               "fue", "fui", "hice", "pasado", "anterior", "última", "ultima"]
+
+            # Revisar si hay indicadores de tiempo pasado en el texto
+            is_past_reference = any(
+                indicator in date_text for indicator in past_indicators)
+
+            # Si es una referencia al pasado o no hay indicadores claros de futuro,
+            # asumimos que se refiere al día más reciente en el pasado
+            if is_past_reference or not any(future_word in date_text for future_word in ["próximo", "proximo", "siguiente", "que viene"]):
+                # Si el día mencionado es posterior al actual en la semana actual
+                if day_num > current_weekday:
+                    # Vamos a la semana anterior
+                    days_diff = day_num - current_weekday - 7
+                else:
+                    # Día en la semana actual pero anterior o igual al día actual
+                    days_diff = day_num - current_weekday
+
+                target_date = today + timedelta(days=days_diff)
+            else:
+                # Si hay un indicador claro de futuro
+                if day_num >= current_weekday:
+                    days_diff = day_num - current_weekday
+                else:
+                    days_diff = 7 + day_num - current_weekday
+
+                target_date = today + timedelta(days=days_diff)
+
+            # Si el texto contiene indicadores adicionales de tiempo
+            if "pasado" in date_text or "anterior" in date_text or "última" in date_text or "ultima" in date_text:
+                target_date = target_date - timedelta(days=7)
+
+            if "próximo" in date_text or "proximo" in date_text or "siguiente" in date_text or "que viene" in date_text:
+                target_date = target_date + timedelta(days=7)
+
+            return target_date.strftime("%Y-%m-%d")
+
+    # Si no se pudo interpretar, devolvemos la fecha actual
+    return today.strftime("%Y-%m-%d")
+
+
 @tool()
 async def parse_expense(text: str) -> dict:
     """
@@ -60,6 +137,14 @@ async def parse_expense(text: str) -> dict:
         Si el texto menciona un gasto, extrae la información solicitada.
         Si no hay información suficiente, haz tu mejor estimación.
         Si el texto no menciona ningún gasto (como saludos), genera un error.
+        
+        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+        "la semana pasada", etc., debes identificarlas correctamente para establecer
+        la fecha del gasto. Usa la fecha actual como referencia.
+        
+        Por ejemplo:
+        - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
+        - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
         """),
         ("human", "{text}")
     ])
@@ -82,6 +167,10 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         Si el texto menciona gastos, extrae la información solicitada.
         Si no hay información suficiente, haz tu mejor estimación.
         Si el texto no menciona ningún gasto (como saludos), genera un error.
+        
+        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+        "la semana pasada", etc., debes identificarlas correctamente para establecer
+        la fecha del gasto. Usa la fecha actual como referencia.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(

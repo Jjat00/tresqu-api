@@ -19,6 +19,7 @@ from telegrambot.tools import (
     create_expense,
     parse_expenses,
     get_or_create_category,
+    parse_relative_date,
 )
 
 from telegrambot.utils import get_existing_categories
@@ -28,7 +29,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(model="gpt-4.1", temperature=0.3,
+llm = ChatOpenAI(model="gpt-4o", temperature=0.1,
                  api_key=settings.OPENAI_API_KEY)
 
 
@@ -36,9 +37,7 @@ async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
     mem = ConversationBufferWindowMemory(
         k=10, memory_key="history", return_messages=True
     )
-    print("👀👀", user_id)
     async for msg in fetch_last_messages(user_id):
-        print("😎😎", msg)
         mem.chat_memory.add_message(msg)
     return mem
 
@@ -93,6 +92,7 @@ async def process_message(user: User, raw_text: str) -> str:
             make_create_expense_tool(user.external_id),
             parse_expenses,
             get_or_create_category,
+            parse_relative_date,
         ]
 
         # Esperamos el resultado de la función asíncrona
@@ -111,13 +111,27 @@ async def process_message(user: User, raw_text: str) -> str:
                 3.1 Usa parse_expenses.
                 3.2 Recorre cada elemento del array devuelto y llama a create_expense
                     para cada gasto individual.
-            4. Si falta fecha ⇒ usa get_current_date.
-            5. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
-            6. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
-            7. Clasifica el gasto en una de las categorías proporcionadas.
-            8. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
+            4. Si identificas referencias temporales (ayer, el sábado, etc.) ⇒ usa parse_relative_date
+               para convertirlas en fechas específicas antes de crear el gasto.
+               IMPORTANTE: cuando el usuario menciona un día de la semana (ej: "el sábado gasté"),
+               asume que se refiere al día más reciente en el pasado, no al próximo.
+            5. Si falta fecha ⇒ usa get_current_date.
+            6. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
+            7. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
+            8. Clasifica el gasto en una de las categorías proporcionadas.
+            9. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
 
-            Responde SIEMPRE en español.
+            Responde de manera cool, eres joven y de Colombia. 
+            Dale un toque de humor y de joven cuando sea necesario.
+            Siempre debes dar una opinion sobre el gasto registrado.
+            Puedes usar emojis y gifs.
+            Puedes hacer chistes y bromas.
+            Puedes usar sarcasmo y hacer comentarios negativos.
+            Puedes ser grosero.
+            Puedes dar consejos.
+            Siempre debes mencionar el gasto registrado, su categoria y la fecha.
+            Siempre debes responder en el mismo idioma que el usuario.
+            
             """),
             MessagesPlaceholder("history"),
             ("human", "{input}"),
