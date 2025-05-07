@@ -12,7 +12,7 @@ import logging
 import calendar
 from django.db.models import Q
 
-from .models import Expense
+from .models import Expense, Category
 from .serializers import ExpenseSerializer
 
 # Configurar logger
@@ -430,18 +430,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         backgroundColor = []
         hoverBackgroundColor = []
 
-        # Lista básica de colores para las secciones de la dona
-        color_palette = [
-            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
-            '#FF9F40', '#8AC249', '#EA5545', '#F46A9B', '#EF9B20',
-            '#EDBF33', '#87BC45', '#27AEEF', '#B33DC6'
-        ]
-
-        for i, item in enumerate(by_category):
+        for item in by_category:
             category_name = item['category__name'] or 'Otros'
+            category = Category.objects.filter(name=category_name).first()
+            color = category.color if category else '#CCCCCC'
+
             labels.append(category_name)
             data.append(float(item['total']))
-            color = color_palette[i % len(color_palette)]
             backgroundColor.append(color)
             hoverBackgroundColor.append(color)
 
@@ -620,19 +615,14 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         data = []
         colors = []
 
-        # Lista básica de colores para las barras (se puede ampliar o hacer dinámica)
-        color_palette = [
-            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
-            '#FF9F40', '#8AC249', '#EA5545', '#F46A9B', '#EF9B20',
-            '#EDBF33', '#87BC45', '#27AEEF', '#B33DC6'
-        ]
-
-        for i, item in enumerate(by_category):
+        for item in by_category:
             category_name = item['category__name'] or 'Otros'
+            category = Category.objects.filter(name=category_name).first()
+            color = category.color if category else '#CCCCCC'
+
             labels.append(category_name)
             data.append(float(item['total']))
-            # Asignar colores de forma cíclica si hay más categorías que colores
-            colors.append(color_palette[i % len(color_palette)])
+            colors.append(color)
 
         # Resumen del filtro aplicado
         filter_summary = "Todos los gastos"
