@@ -277,11 +277,11 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         return Response(weekly_data)
 
     @action(detail=False, methods=['get'])
-    def filtered_expenses(self, request):
+    def donut_chart_data(self, request):
         """
-        Obtiene gastos filtrados por categoría y rango de fecha
+        Obtiene gastos filtrados por categoría y rango de fecha, con formato para gráfica de dona.
 
-        GET /api/expenses/filtered_expenses/
+        GET /api/expenses/donut_chart_data/
 
         Parámetros:
         - category_id: ID de la categoría (opcional, si no se proporciona, se incluyen todas las categorías)
@@ -289,9 +289,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                      'current_week', 'previous_week', 'current_year', 'previous_year', 'custom')
         - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
         - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
+        - limit: Número máximo de categorías a mostrar (opcional, por defecto muestra todas)
         """
         logger.info(
-            f"Endpoint /filtered_expenses/ accedido por usuario: {request.user}")
+            f"Endpoint /donut_chart_data/ accedido por usuario: {request.user}")
 
         # Obtener queryset base (filtrado por usuario)
         queryset = self.get_queryset()
@@ -399,9 +400,14 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             logger.warning(
                 f"No hay gastos para el usuario {request.user} con los filtros aplicados")
             return Response({
-                'categories': [],
-                'totals': [],
-                'expenses': []
+                'labels': [],
+                'datasets': [{
+                    'data': [],
+                    'backgroundColor': [],
+                    'hoverBackgroundColor': []
+                }],
+                'filter_summary': "Sin datos",
+                'total_amount': 0
             })
 
         # Agrupar por categoría y calcular totales
@@ -409,17 +415,40 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             total=Sum('amount')
         ).order_by('-total')
 
-        # Transformar a formato para gráficos
-        categories = []
-        totals = []
-        for item in by_category:
-            category_name = item['category__name'] or 'Otros'
-            categories.append(category_name)
-            totals.append(float(item['total']))
+        # Limitar el número de categorías si se solicita
+        limit = request.query_params.get('limit')
+        if limit:
+            try:
+                limit = int(limit)
+                by_category = by_category[:limit]
+            except ValueError:
+                pass  # Ignorar si no es un entero válido
 
-        # Obtener lista detallada de gastos
+        # Transformar a formato para gráficos de dona (compatible con Chart.js)
+        labels = []
+        data = []
+        backgroundColor = []
+        hoverBackgroundColor = []
+
+        # Lista básica de colores para las secciones de la dona
+        color_palette = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
+            '#FF9F40', '#8AC249', '#EA5545', '#F46A9B', '#EF9B20',
+            '#EDBF33', '#87BC45', '#27AEEF', '#B33DC6'
+        ]
+
+        for i, item in enumerate(by_category):
+            category_name = item['category__name'] or 'Otros'
+            labels.append(category_name)
+            data.append(float(item['total']))
+            color = color_palette[i % len(color_palette)]
+            backgroundColor.append(color)
+            hoverBackgroundColor.append(color)
+
+        # Obtener lista simplificada de gastos para detalles
         expenses = self.get_serializer(
-            queryset.order_by('-timestamp'),
+            # Mostrar solo los 10 más recientes
+            queryset.order_by('-timestamp')[:10],
             many=True
         ).data
 
@@ -428,10 +457,205 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         if date_filter != 'all' and start_date and end_date:
             filter_summary = f"Gastos del {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
 
-        return Response({
-            'categories': categories,
-            'totals': totals,
-            'expenses': expenses,
+        # Formato adaptado para gráfica de dona con Chart.js
+        response_data = {
+            'labels': labels,
+            'datasets': [{
+                'data': data,
+                'backgroundColor': backgroundColor,
+                'hoverBackgroundColor': hoverBackgroundColor
+            }],
             'filter_summary': filter_summary,
-            'total_amount': sum(totals)
-        })
+            'total_amount': sum(data),
+            'recent_expenses': expenses  # Incluir algunos gastos recientes para detalles
+        }
+
+        return Response(response_data)
+
+    @action(detail=False, methods=['get'])
+    def bar_chart_data(self, request):
+        """
+        Obtiene datos para una gráfica de barras de gastos por categoría, con las mismas
+        opciones de filtrado que donut_chart_data.
+
+        GET /api/expenses/bar_chart_data/
+
+        Parámetros:
+        - category_id: ID de la categoría (opcional, si no se proporciona, se incluyen todas las categorías)
+        - date_filter: Filtro de fecha (opcional, valores: 'all', 'today', 'yesterday', 'current_month', 'previous_month', 
+                     'current_week', 'previous_week', 'current_year', 'previous_year', 'custom')
+        - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
+        - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
+        - limit: Número máximo de categorías a mostrar (opcional, por defecto muestra todas)
+        """
+        logger.info(
+            f"Endpoint /bar_chart_data/ accedido por usuario: {request.user}")
+
+        # Obtener queryset base (filtrado por usuario)
+        queryset = self.get_queryset()
+
+        # Filtrar por categoría si se proporciona
+        category_id = request.query_params.get('category_id')
+        if category_id:
+            try:
+                category_id = int(category_id)
+                queryset = queryset.filter(category_id=category_id)
+                logger.info(f"Filtrando por categoría: {category_id}")
+            except ValueError:
+                return Response(
+                    {"error": "ID de categoría inválido"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Aplicar filtro de fecha
+        date_filter = request.query_params.get('date_filter', 'all')
+        today = timezone.now().date()
+
+        if date_filter == 'today':
+            # Hoy
+            start_date = today
+            end_date = today
+
+        elif date_filter == 'yesterday':
+            # Ayer
+            start_date = today - timedelta(days=1)
+            end_date = start_date
+
+        elif date_filter == 'current_month':
+            # Mes actual
+            start_date = today.replace(day=1)
+            next_month = today.month + 1 if today.month < 12 else 1
+            next_month_year = today.year if today.month < 12 else today.year + 1
+            end_date = datetime(next_month_year, next_month,
+                                1).date() - timedelta(days=1)
+
+        elif date_filter == 'previous_month':
+            # Mes anterior
+            first_day_current = today.replace(day=1)
+            last_day_previous = first_day_current - timedelta(days=1)
+            start_date = last_day_previous.replace(day=1)
+            end_date = last_day_previous
+
+        elif date_filter == 'current_week':
+            # Semana actual (lunes a domingo)
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+
+        elif date_filter == 'previous_week':
+            # Semana anterior (lunes a domingo)
+            start_date = today - timedelta(days=today.weekday() + 7)
+            end_date = start_date + timedelta(days=6)
+
+        elif date_filter == 'current_year':
+            # Año actual
+            start_date = today.replace(month=1, day=1)
+            end_date = today.replace(month=12, day=31)
+
+        elif date_filter == 'previous_year':
+            # Año anterior
+            start_date = datetime(today.year - 1, 1, 1).date()
+            end_date = datetime(today.year - 1, 12, 31).date()
+
+        elif date_filter == 'custom':
+            # Filtro personalizado
+            try:
+                start_date = datetime.strptime(
+                    request.query_params.get('start_date'),
+                    '%Y-%m-%d'
+                ).date()
+                end_date = datetime.strptime(
+                    request.query_params.get('end_date'),
+                    '%Y-%m-%d'
+                ).date()
+
+                if start_date > end_date:
+                    return Response(
+                        {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # 'all' o cualquier otro valor: sin filtro de fecha
+            start_date = None
+            end_date = None
+
+        # Aplicar filtro de fecha al queryset
+        if start_date and end_date:
+            logger.info(
+                f"Filtrando por rango de fecha: {start_date} a {end_date}")
+            queryset = queryset.filter(
+                timestamp__date__gte=start_date,
+                timestamp__date__lte=end_date
+            )
+
+        # Si no hay gastos, devolver respuesta vacía
+        if not queryset.exists():
+            logger.warning(
+                f"No hay gastos para el usuario {request.user} con los filtros aplicados")
+            return Response({
+                'labels': [],
+                'datasets': []
+            })
+
+        # Agrupar por categoría y calcular totales
+        by_category = queryset.values('category__name').annotate(
+            total=Sum('amount')
+        ).order_by('-total')
+
+        # Limitar el número de categorías si se solicita
+        limit = request.query_params.get('limit')
+        if limit:
+            try:
+                limit = int(limit)
+                by_category = by_category[:limit]
+            except ValueError:
+                pass  # Ignorar si no es un entero válido
+
+        # Transformar a formato para gráficas de barras (compatible con Chart.js)
+        labels = []
+        data = []
+        colors = []
+
+        # Lista básica de colores para las barras (se puede ampliar o hacer dinámica)
+        color_palette = [
+            '#FF6384', '#36A2EB', '#FFCE56', '#4BC0C0', '#9966FF',
+            '#FF9F40', '#8AC249', '#EA5545', '#F46A9B', '#EF9B20',
+            '#EDBF33', '#87BC45', '#27AEEF', '#B33DC6'
+        ]
+
+        for i, item in enumerate(by_category):
+            category_name = item['category__name'] or 'Otros'
+            labels.append(category_name)
+            data.append(float(item['total']))
+            # Asignar colores de forma cíclica si hay más categorías que colores
+            colors.append(color_palette[i % len(color_palette)])
+
+        # Resumen del filtro aplicado
+        filter_summary = "Todos los gastos"
+        if date_filter != 'all' and start_date and end_date:
+            filter_summary = f"Gastos del {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
+
+        # Formato listo para usar en Chart.js
+        response_data = {
+            'labels': labels,
+            'datasets': [{
+                'label': 'Gastos por categoría',
+                'data': data,
+                'backgroundColor': colors,
+                'borderColor': colors,
+                'borderWidth': 1
+            }],
+            'filter_summary': filter_summary,
+            'total_amount': sum(data),
+            'recent_expenses': self.get_serializer(
+                # Mostrar solo los 10 más recientes
+                queryset.order_by('-timestamp')[:10],
+                many=True
+            ).data
+        }
+
+        return Response(response_data)
