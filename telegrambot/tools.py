@@ -16,8 +16,8 @@ from categories.models import Category
 from .serializasers import ExpenseData
 from .currencies import is_valid_currency
 # Import embeddings service
-import calendar
 from datetime import datetime, timedelta
+from django.db import models
 
 embeddings = OpenAIEmbeddings(
     api_key=settings.OPENAI_API_KEY,
@@ -403,3 +403,72 @@ def search_expenses_by_text(user_external_id: str, search_text: str) -> List[Dic
         'note': expense.note,
         'raw_message': expense.raw_message
     } for expense in expenses[:5]]  # Limitar a 5 resultados
+
+
+@tool
+def get_expenses_by_category(user_external_id: str, category: str, start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Obtiene los gastos de una categoría específica en un rango de fechas.
+    Si no se especifican fechas, devuelve todos los gastos de la categoría.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+        query = Expense.objects.filter(
+            user=user, category_str__iexact=category)
+
+        if start_date:
+            query = query.filter(spent_at__gte=start_date)
+        if end_date:
+            query = query.filter(spent_at__lte=end_date)
+
+        # Calcular el total
+        total = query.aggregate(total=models.Sum('amount'))['total'] or 0
+
+        # Obtener los gastos
+        expenses = query.order_by('-spent_at')
+
+        return {
+            'total': float(total),
+            'currency': user.default_currency,
+            'expenses': [{
+                'id': str(expense.id),
+                'amount': float(expense.amount),
+                'currency': expense.currency,
+                'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+                'note': expense.note,
+                'raw_message': expense.raw_message
+            } for expense in expenses]
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener gastos por categoría: {e}")
+        return {'error': str(e)}
+
+
+@tool
+def get_top_categories(user_external_id: str, start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Obtiene las categorías con mayores gastos en un rango de fechas.
+    Si no se especifican fechas, devuelve todas las categorías.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+        query = Expense.objects.filter(user=user)
+
+        if start_date:
+            query = query.filter(spent_at__gte=start_date)
+        if end_date:
+            query = query.filter(spent_at__lte=end_date)
+
+        # Agrupar por categoría y sumar montos
+        categories = query.values('category_str').annotate(
+            total=models.Sum('amount')
+        ).order_by('-total')
+
+        return [{
+            'category': cat['category_str'],
+            'total': float(cat['total']),
+            'currency': user.default_currency
+        } for cat in categories]
+    except Exception as e:
+        logger.error(f"Error al obtener top categorías: {e}")
+        return {'error': str(e)}

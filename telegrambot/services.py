@@ -28,6 +28,8 @@ from telegrambot.tools import (
     get_expenses_by_user,
     get_expense_by_id,
     search_expenses_by_text,
+    get_expenses_by_category,
+    get_top_categories,
 )
 
 from telegrambot.utils import get_existing_categories
@@ -130,7 +132,7 @@ async def process_message(user: User, raw_text: str) -> str:
             get_expense_by_id,
         ]
 
-        # Agregar la herramienta de búsqueda con el ID del usuario
+        # Agregar herramientas que requieren user_external_id
         @tool
         def search_expenses(search_text: str) -> List[Dict[str, Any]]:
             """Busca gastos que coincidan con el texto de búsqueda."""
@@ -143,7 +145,35 @@ async def process_message(user: User, raw_text: str) -> str:
                 logger.error(f"Error al buscar gastos: {e}")
                 return []
 
-        tools.append(search_expenses)
+        @tool
+        def get_category_expenses(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+            """Obtiene los gastos de una categoría específica en un rango de fechas."""
+            try:
+                return get_expenses_by_category.invoke({
+                    "user_external_id": user.external_id,
+                    "category": category,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener gastos por categoría: {e}")
+                return {'error': str(e)}
+
+        @tool
+        def get_top_expense_categories(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+            """Obtiene las categorías con mayores gastos en un rango de fechas."""
+            try:
+                return get_top_categories.invoke({
+                    "user_external_id": user.external_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener top categorías: {e}")
+                return {'error': str(e)}
+
+        tools.extend([search_expenses, get_category_expenses,
+                     get_top_expense_categories])
 
         # Esperamos el resultado de la función asíncrona
         existing_categories = await get_existing_categories()
@@ -178,6 +208,27 @@ async def process_message(user: User, raw_text: str) -> str:
                 11.1 Usa search_expenses_by_text para encontrar el gasto
                 11.2 Si encuentra el gasto, usa delete_expense para eliminarlo
                 11.3 Si no encuentra el gasto, pide más detalles
+            12. Si el usuario hace consultas sobre sus gastos:
+                12.1 Para consultar gastos por categoría en un período:
+                    - Usa get_category_expenses pasando la categoría y las fechas opcionales
+                    - Si no se especifica fecha, usa get_current_date para la fecha actual
+                    - Si se menciona "este mes", calcula el primer día del mes actual
+                12.2 Para consultar las categorías con mayores gastos:
+                    - Usa get_top_expense_categories con las fechas opcionales
+                    - Si no se especifica fecha, muestra todas las categorías
+                    - Ordena los resultados de mayor a menor gasto
+                12.3 Para búsquedas semánticas:
+                    - Usa search_expenses SOLO cuando el usuario busque un gasto específico por descripción o detalles
+                    - NO uses search_expenses para consultas de período (esta semana, este mes, etc.)
+                    - Para consultas de período, usa get_top_expense_categories con las fechas correspondientes
+                12.4 Para consultas de período:
+                    - Si el usuario pregunta "cuánto gasté esta semana/mes/etc":
+                        * Usa get_top_expense_categories con las fechas del período
+                        * Calcula el total sumando los montos de todas las categorías
+                        * Muestra un resumen por categoría y el total general
+                    - Si el usuario pregunta por una categoría específica en un período:
+                        * Usa get_category_expenses con la categoría y las fechas del período
+                        * Muestra el total y los gastos individuales
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.
@@ -189,6 +240,11 @@ async def process_message(user: User, raw_text: str) -> str:
             Puedes dar consejos.
             Siempre debes mencionar el gasto registrado, su categoria y la fecha.
             Siempre debes responder en el mismo idioma que el usuario.
+            
+            IMPORTANTE: 
+            - Usa get_top_expense_categories para consultas de período (esta semana, este mes, etc.)
+            - Usa search_expenses SOLO para buscar gastos específicos por descripción
+            - Las herramientas ya incluyen el ID del usuario actual
             
             """),
             MessagesPlaceholder("history"),
@@ -206,7 +262,7 @@ async def process_message(user: User, raw_text: str) -> str:
         try:
             result = await asyncio.wait_for(
                 executor.ainvoke({"input": raw_text}),
-                timeout=30.0  # 30 segundos de timeout
+                timeout=60.0  # 60 segundos de timeout
             )
             return result["output"]
         except asyncio.TimeoutError:
