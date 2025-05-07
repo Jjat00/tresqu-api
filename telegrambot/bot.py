@@ -46,8 +46,8 @@ def get_or_create_chat(chat_id):
             logger.warning(
                 f"Conexión cerrada, intento {retry_count} de reconexión para chat_id={chat_id}")
 
-            # Cerrar todas las conexiones para forzar una reconexión
-            connections.close_all()
+            # Con el pool de conexiones, no necesitamos cerrar manualmente
+            # simplemente reintentamos después de un tiempo
 
             if retry_count < max_retries:
                 # Esperar con backoff exponencial
@@ -95,8 +95,7 @@ def create_message(chat, message_id, message_type, text):
             logger.warning(
                 f"Conexión cerrada, intento {retry_count} de reconexión para create_message")
 
-            # Cerrar todas las conexiones para forzar una reconexión
-            connections.close_all()
+            # Con el pool de conexiones, no necesitamos cerrar manualmente
 
             if retry_count < max_retries:
                 # Esperar con backoff exponencial
@@ -164,8 +163,7 @@ def get_chat_user(chat_id):
             logger.warning(
                 f"Conexión cerrada, intento {retry_count} de reconexión para get_chat_user")
 
-            # Cerrar todas las conexiones para forzar una reconexión
-            connections.close_all()
+            # Con el pool de conexiones, no necesitamos cerrar manualmente
 
             if retry_count < max_retries:
                 # Esperar con backoff exponencial
@@ -199,7 +197,8 @@ def get_all_telegram_chats():
             retry_count += 1
             logger.warning(
                 f"Conexión cerrada, intento {retry_count} de reconexión para get_all_telegram_chats")
-            connections.close_all()
+
+            # Con el pool de conexiones, no necesitamos cerrar manualmente
 
             if retry_count < max_retries:
                 time.sleep(backoff_time)

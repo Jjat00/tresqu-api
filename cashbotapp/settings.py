@@ -15,8 +15,12 @@ from pathlib import Path
 import os
 from dotenv import load_dotenv
 import dj_database_url
+import logging
 # Cargar variables de entorno desde .env
 load_dotenv()
+
+# Configurar logging
+logger = logging.getLogger(__name__)
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -102,14 +106,14 @@ DATABASES = {
     "default": dj_database_url.config(
         default=os.getenv(
             "DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cashbot"),
-        conn_max_age=600,
+        conn_max_age=0,  # Desactivamos el manejo de conexiones de Django
         ssl_require=True,
         conn_health_checks=True,
-        engine='django.db.backends.postgresql'
+        engine='dj_db_conn_pool.backends.postgresql'
     )
 }
 
-# Configuración adicional para manejo de conexiones
+# Configuración normal de PostgreSQL
 DATABASES['default']['OPTIONS'] = {
     'application_name': 'cashbot',
     'connect_timeout': 30,
@@ -118,6 +122,23 @@ DATABASES['default']['OPTIONS'] = {
     'keepalives_interval': 10,
     'keepalives_count': 5,
 }
+
+# Configuración específica del pool (separada de las opciones normales)
+DATABASES['default']['POOL_OPTIONS'] = {
+    'POOL_SIZE': 20,         # Número máximo de conexiones en el pool
+    'MAX_OVERFLOW': 10,      # Conexiones adicionales permitidas cuando el pool está lleno
+    # Tiempo en segundos para reciclar conexiones (30 minutos)
+    'RECYCLE': 1800,
+}
+
+# Imprimir configuración del pool directamente
+print("="*50)
+print("CONFIGURACIÓN DEL POOL DE CONEXIONES A LA BASE DE DATOS:")
+print(f"Pool size: {DATABASES['default']['POOL_OPTIONS']['POOL_SIZE']}")
+print(f"Max overflow: {DATABASES['default']['POOL_OPTIONS']['MAX_OVERFLOW']}")
+print(
+    f"Recycle time: {DATABASES['default']['POOL_OPTIONS']['RECYCLE']} segundos")
+print("="*50)
 
 # Configuración de API de Supabase
 SUPABASE_URL = os.getenv("SUPABASE_URL")

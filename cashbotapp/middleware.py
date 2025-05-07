@@ -9,8 +9,8 @@ logger = logging.getLogger(__name__)
 class DatabaseConnectionMiddleware:
     """
     Middleware para manejar conexiones a la base de datos
-    - Cierra conexiones al final de cada solicitud
-    - Maneja errores de conexión cerrada
+    - Maneja errores de conexión cerrada o expirada
+    - Ya no cierra conexiones al final de cada solicitud porque ahora usamos pool
     """
 
     def __init__(self, get_response):
@@ -22,9 +22,8 @@ class DatabaseConnectionMiddleware:
         try:
             response = self.get_response(request)
         except InterfaceError as e:
-            logger.warning(f"Conexión a base de datos cerrada: {e}")
-            # Cerrar todas las conexiones para forzar nueva conexión en próximas peticiones
-            connections.close_all()
+            logger.warning(f"Error de interfaz con la base de datos: {e}")
+            # No cerramos las conexiones manualmente, dejamos que el pool lo maneje
             # Re-intentar solicitud una vez
             try:
                 response = self.get_response(request)
@@ -35,9 +34,6 @@ class DatabaseConnectionMiddleware:
             # Registrar otras excepciones, pero no hacer nada especial
             logger.error(f"Error en middleware: {e}")
             raise
-        finally:
-            # Cerrar todas las conexiones al finalizar la solicitud
-            connections.close_all()
 
         return response
 
