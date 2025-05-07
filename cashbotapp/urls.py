@@ -24,6 +24,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/', include('expenses.urls'), name='expenses'),
     path('api/', include('users.urls'), name='users'),
+    path('api/', include('income.urls'), name='income'),
     path('telegram/', include('telegrambot.urls'), name='telegram'),
     # JWT auth
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),

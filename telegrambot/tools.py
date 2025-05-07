@@ -13,7 +13,7 @@ from expenses.models import Expense
 from users.models import User
 from categories.models import Category
 # serializasers
-from .serializasers import ExpenseData
+from .serializasers import ExpenseData, IncomeData
 from .currencies import is_valid_currency
 # Import embeddings service
 from datetime import datetime, timedelta
@@ -472,3 +472,456 @@ def get_top_categories(user_external_id: str, start_date: str | None = None, end
     except Exception as e:
         logger.error(f"Error al obtener top categorías: {e}")
         return {'error': str(e)}
+
+
+class IncomeList(BaseModel):
+    """Lista de ingresos detectados en un solo mensaje."""
+    incomes: List[IncomeData]
+
+
+@tool()
+async def parse_income(text: str) -> dict:
+    """
+    Analiza un mensaje para extraer un ingreso.
+    Devuelve dict o {'error': …} si no hay datos suficientes.
+    """
+    structured_llm = llm.with_structured_output(
+        IncomeData, method="function_calling")
+
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", """
+        Eres un asistente financiero experto en extraer información de ingresos.
+        Extrae un ingreso y devuélvelo como IncomeData.
+        Si el texto menciona un ingreso, extrae la información solicitada.
+        Si no hay información suficiente, haz tu mejor estimación.
+        Si el texto no menciona ningún ingreso (como saludos), genera un error.
+        
+        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+        "la semana pasada", etc., debes identificarlas correctamente para establecer
+        la fecha del ingreso. Usa la fecha actual como referencia.
+        
+        Por ejemplo:
+        - "ayer recibí un pago de 200K" debe registrarse con la fecha de ayer
+        - "el sábado me pagaron 100k por un trabajo" debe registrarse con la fecha del sábado más reciente
+        """),
+        ("human", "{text}")
+    ])
+
+    try:
+        chain = prompt | structured_llm
+        result = await chain.ainvoke({"text": text})
+        return dict(result)
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+async def parse_incomes(text: str) -> Dict[str, Any]:
+    """Extrae VARIOS ingresos."""
+    chain = (ChatPromptTemplate.from_messages([
+        ("system", """
+        Eres un asistente financiero experto en extraer información de ingresos.
+        Extrae todos los ingresos y devuélvelos como una lista de IncomeData.
+        Si el texto menciona ingresos, extrae la información solicitada.
+        Si no hay información suficiente, haz tu mejor estimación.
+        Si el texto no menciona ningún ingreso (como saludos), genera un error.
+        
+        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+        "la semana pasada", etc., debes identificarlas correctamente para establecer
+        la fecha del ingreso. Usa la fecha actual como referencia.
+        """),
+        ("human", "{text}")
+    ]) | llm.with_structured_output(
+        IncomeList, method="function_calling"))
+    try:
+        result: IncomeList = await chain.ainvoke({"text": text})
+        return result.model_dump()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def create_income(
+    user_external_id: str,
+    amount: float,
+    currency: str,
+    category: str,
+    received_at: str | None = None,
+    note: str | None = ""
+) -> str:
+    """
+    Registra un ingreso para el usuario especificado.
+
+    Args:
+        user_external_id: ID externo del usuario
+        amount: Cantidad de ingreso
+        currency: Moneda (USD, EUR, COP, etc.)
+        category: Categoría del ingreso
+        received_at: Fecha en formato YYYY-MM-DD (opcional)
+        note: Nota adicional (opcional)
+
+    Returns:
+        Mensaje de confirmación
+    """
+    try:
+        from income.models import Income
+        from users.models import User
+        from categories.models import Category
+        from django.utils import timezone
+        import json
+        from datetime import datetime
+
+        # Por seguridad limitamos los valores aceptados
+        if amount <= 0:
+            return f"Error: El monto del ingreso debe ser positivo."
+
+        if not is_valid_currency(currency):
+            return f"Error: Moneda {currency} no reconocida."
+
+        # Obtener el usuario
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return f"Error: Usuario no encontrado."
+
+        # Obtener o crear la categoría
+        category_obj, created = Category.objects.get_or_create(
+            name=category.title())
+
+        # Fecha de recepción
+        if received_at:
+            try:
+                received_date = datetime.strptime(
+                    received_at, "%Y-%m-%d").date()
+            except ValueError:
+                received_date = timezone.now().date()
+        else:
+            received_date = timezone.now().date()
+
+        # Crear el objeto Income
+        income = Income.objects.create(
+            user=user,
+            amount=amount,
+            currency=currency,
+            category=category_obj,
+            category_str=category.title(),
+            timestamp=timezone.now(),
+            received_at=received_date,
+            note=note,
+            raw_message=json.dumps({
+                "amount": amount,
+                "currency": currency,
+                "category": category,
+                "received_at": received_at,
+                "note": note
+            })
+        )
+
+        # Generar embedding para la búsqueda semántica
+        try:
+            search_text = f"{category} {note} {amount} {currency} {received_at}"
+            income.embedding = embeddings.embed_query(search_text)
+            income.save()
+        except Exception as e:
+            logger.error(f"Error generando embedding para ingreso: {e}")
+
+        return f"Ingreso registrado: {amount} {currency} en {category.title()} ({received_date})"
+
+    except Exception as e:
+        return f"Error al registrar el ingreso: {str(e)}"
+
+
+@tool
+def update_income(income_id: str, amount: float, currency: str, category: str, received_at: str | None = None, note: str | None = ""):
+    """
+    Actualiza un ingreso existente.
+    """
+    try:
+        from income.models import Income
+        from categories.models import Category
+        from datetime import datetime
+        import json
+
+        income = Income.objects.filter(id=income_id).first()
+        if not income:
+            return f"Error: Ingreso con ID {income_id} no encontrado."
+
+        category_obj, created = Category.objects.get_or_create(
+            name=category.title())
+
+        income.amount = amount
+        income.currency = currency
+        income.category = category_obj
+        income.category_str = category.title()
+
+        if received_at:
+            try:
+                income.received_at = datetime.strptime(
+                    received_at, "%Y-%m-%d").date()
+            except ValueError:
+                pass
+
+        income.note = note
+
+        # Actualizar el raw_message
+        income.raw_message = json.dumps({
+            "amount": amount,
+            "currency": currency,
+            "category": category,
+            "received_at": received_at,
+            "note": note
+        })
+
+        # Actualizar embedding
+        try:
+            search_text = f"{category} {note} {amount} {currency} {received_at}"
+            income.embedding = embeddings.embed_query(search_text)
+        except Exception as e:
+            logger.error(f"Error actualizando embedding para ingreso: {e}")
+
+        income.save()
+        return f"Ingreso actualizado: {amount} {currency} en {category.title()}"
+
+    except Exception as e:
+        return f"Error al actualizar el ingreso: {str(e)}"
+
+
+@tool
+def delete_income(income_id: str):
+    """
+    Elimina un ingreso por su ID.
+    """
+    try:
+        from income.models import Income
+        income = Income.objects.filter(id=income_id).first()
+        if not income:
+            return f"Error: Ingreso con ID {income_id} no encontrado."
+
+        details = f"{income.amount} {income.currency} en {income.category_str if income.category_str else (income.category.name if income.category else 'Sin categoría')}"
+        income.delete()
+        return f"Ingreso eliminado: {details}"
+    except Exception as e:
+        return f"Error al eliminar el ingreso: {str(e)}"
+
+
+@tool
+def get_incomes_by_user(user_external_id: str, start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Obtiene todos los ingresos de un usuario en un rango de fechas.
+    """
+    try:
+        from income.models import Income
+        from users.models import User
+        from datetime import datetime
+
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return []
+
+        query = Income.objects.filter(user=user)
+
+        if start_date:
+            try:
+                start = datetime.strptime(start_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__gte=start)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end = datetime.strptime(end_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__lte=end)
+            except ValueError:
+                pass
+
+        incomes = query.order_by('-received_at')
+        return [
+            {
+                "id": str(income.id),
+                "amount": float(income.amount),
+                "currency": income.currency,
+                "category": income.category.name if income.category else income.category_str,
+                "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
+                "note": income.note
+            }
+            for income in incomes
+        ]
+    except Exception as e:
+        logger.error(f"Error obteniendo ingresos del usuario: {e}")
+        return []
+
+
+@tool
+def get_income_by_id(income_id: str) -> Dict[str, Any]:
+    """
+    Obtiene los detalles de un ingreso por su ID.
+    """
+    try:
+        from income.models import Income
+        income = Income.objects.filter(id=income_id).first()
+        if not income:
+            return {"error": f"Ingreso con ID {income_id} no encontrado."}
+
+        return {
+            "id": str(income.id),
+            "amount": float(income.amount),
+            "currency": income.currency,
+            "category": income.category.name if income.category else income.category_str,
+            "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
+            "note": income.note
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@tool
+def search_incomes_by_text(user_external_id: str, search_text: str) -> List[Dict[str, Any]]:
+    """
+    Busca ingresos que coincidan con el texto de búsqueda.
+    """
+    try:
+        from income.models import Income
+        from users.models import User
+
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return []
+
+        # Generamos embedding del texto de búsqueda
+        search_embedding = embeddings.embed_query(search_text)
+
+        # Buscamos ingresos similares
+        similar_incomes = Income.find_similar(user, search_embedding)
+
+        return [
+            {
+                "id": str(income.id),
+                "amount": float(income.amount),
+                "currency": income.currency,
+                "category": income.category.name if income.category else income.category_str,
+                "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
+                "note": income.note
+            }
+            for income in similar_incomes
+        ]
+    except Exception as e:
+        logger.error(f"Error buscando ingresos por texto: {e}")
+        return []
+
+
+@tool
+def get_incomes_by_category(user_external_id: str, category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+    """
+    Obtiene los ingresos de una categoría específica en un rango de fechas.
+    """
+    try:
+        from income.models import Income
+        from users.models import User
+        from categories.models import Category
+        from datetime import datetime
+        from django.db.models import Sum
+
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return {"error": "Usuario no encontrado"}
+
+        # Buscar la categoría
+        categories = Category.objects.filter(name__icontains=category)
+        if not categories.exists():
+            return {"error": f"Categoría {category} no encontrada"}
+
+        # Preparar filtros
+        query = Income.objects.filter(
+            user=user,
+            category__in=categories
+        )
+
+        if start_date:
+            try:
+                start = datetime.strptime(start_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__gte=start)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end = datetime.strptime(end_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__lte=end)
+            except ValueError:
+                pass
+
+        # Calcular total y obtener ingresos
+        total = query.aggregate(Sum('amount'))['amount__sum'] or 0
+        incomes = query.order_by('-received_at')
+
+        return {
+            "category": category,
+            "total": float(total),
+            "currency": user.default_currency,
+            "incomes": [
+                {
+                    "id": str(income.id),
+                    "amount": float(income.amount),
+                    "currency": income.currency,
+                    "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
+                    "note": income.note
+                }
+                for income in incomes
+            ]
+        }
+    except Exception as e:
+        logger.error(f"Error obteniendo ingresos por categoría: {e}")
+        return {"error": str(e)}
+
+
+@tool
+def get_top_income_categories(user_external_id: str, start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Obtiene las categorías con mayores ingresos en un rango de fechas.
+    """
+    try:
+        from income.models import Income
+        from users.models import User
+        from datetime import datetime
+        from django.db.models import Sum
+
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return []
+
+        # Preparar filtros
+        query = Income.objects.filter(user=user)
+
+        if start_date:
+            try:
+                start = datetime.strptime(start_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__gte=start)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end = datetime.strptime(end_date, "%Y-%m-%d").date()
+                query = query.filter(received_at__lte=end)
+            except ValueError:
+                pass
+
+        # Agrupar por categoría y sumar montos
+        result = []
+        categories = query.values(
+            'category__name', 'category_str'
+        ).annotate(
+            total=Sum('amount')
+        ).order_by('-total')
+
+        for cat in categories:
+            category_name = cat['category__name'] or cat['category_str'] or 'Sin categoría'
+            result.append({
+                "category": category_name,
+                "total": float(cat['total']),
+                "currency": user.default_currency
+            })
+
+        return result
+    except Exception as e:
+        logger.error(f"Error obteniendo top categorías de ingresos: {e}")
+        return []

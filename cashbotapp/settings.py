@@ -50,6 +50,7 @@ INSTALLED_APPS = [
     'categories',
     'telegrambot',
     'corsheaders',
+    'income'
 ]
 
 REST_FRAMEWORK = {

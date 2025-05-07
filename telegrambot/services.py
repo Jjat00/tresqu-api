@@ -30,6 +30,17 @@ from telegrambot.tools import (
     search_expenses_by_text,
     get_expenses_by_category,
     get_top_categories,
+    # Herramientas de ingresos
+    parse_income,
+    parse_incomes,
+    create_income,
+    update_income,
+    delete_income,
+    get_incomes_by_user,
+    get_income_by_id,
+    search_incomes_by_text,
+    get_incomes_by_category,
+    get_top_income_categories,
 )
 
 from telegrambot.utils import get_existing_categories
@@ -39,7 +50,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.1,
+llm = ChatOpenAI(model="gpt-4o", temperature=0.0,
                  api_key=settings.OPENAI_API_KEY)
 
 # Cliente de OpenAI para transcripción de audio
@@ -98,6 +109,35 @@ def make_create_expense_tool(user_external_id: str):
     return create_expense_for_user
 
 
+def make_create_income_tool(user_external_id: str):
+    """
+    Devuelve un StructuredTool que NO expone user_external_id;
+    el ID vive en el cierre (closure).
+    """
+
+    @tool
+    def create_income_for_user(
+        amount: float,
+        currency: str,
+        category: str,
+        received_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Registra un ingreso en la base de datos y confirma el registro."""
+        return create_income.invoke(
+            {
+                "user_external_id": user_external_id,
+                "amount": amount,
+                "currency": currency,
+                "category": category,
+                "received_at": received_at,
+                "note": note,
+            }
+        )
+
+    return create_income_for_user
+
+
 async def transcribe_audio(audio_file_path: str) -> str:
     """
     Transcribe un archivo de audio usando la API de OpenAI
@@ -121,14 +161,20 @@ async def process_message(user: User, raw_text: str) -> str:
         tools = [
             get_current_date,
             parse_expense,
+            parse_income,
             is_greeting,
             make_create_expense_tool(user.external_id),
+            make_create_income_tool(user.external_id),
             parse_expenses,
+            parse_incomes,
             get_or_create_category,
             parse_relative_date,
             update_expense,
+            update_income,
             delete_expense,
+            delete_income,
             get_expense_by_id,
+            get_income_by_id,
         ]
 
         # Agregar herramientas que requieren user_external_id
@@ -146,6 +192,19 @@ async def process_message(user: User, raw_text: str) -> str:
                 return []
 
         @tool
+        def get_user_incomes(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+            """Obtiene todos los ingresos del usuario en un rango de fechas opcional."""
+            try:
+                return get_incomes_by_user.invoke({
+                    "user_external_id": user.external_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener ingresos del usuario: {e}")
+                return []
+
+        @tool
         def search_expenses(search_text: str) -> List[Dict[str, Any]]:
             """Busca gastos que coincidan con el texto de búsqueda."""
             try:
@@ -155,6 +214,18 @@ async def process_message(user: User, raw_text: str) -> str:
                 })
             except Exception as e:
                 logger.error(f"Error al buscar gastos: {e}")
+                return []
+
+        @tool
+        def search_incomes(search_text: str) -> List[Dict[str, Any]]:
+            """Busca ingresos que coincidan con el texto de búsqueda."""
+            try:
+                return search_incomes_by_text.invoke({
+                    "user_external_id": user.external_id,
+                    "search_text": search_text
+                })
+            except Exception as e:
+                logger.error(f"Error al buscar ingresos: {e}")
                 return []
 
         @tool
@@ -172,6 +243,20 @@ async def process_message(user: User, raw_text: str) -> str:
                 return {'error': str(e)}
 
         @tool
+        def get_category_incomes(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+            """Obtiene los ingresos de una categoría específica en un rango de fechas."""
+            try:
+                return get_incomes_by_category.invoke({
+                    "user_external_id": user.external_id,
+                    "category": category,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener ingresos por categoría: {e}")
+                return {'error': str(e)}
+
+        @tool
         def get_top_expense_categories(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
             """Obtiene las categorías con mayores gastos en un rango de fechas."""
             try:
@@ -181,11 +266,29 @@ async def process_message(user: User, raw_text: str) -> str:
                     "end_date": end_date
                 })
             except Exception as e:
-                logger.error(f"Error al obtener top categorías: {e}")
+                logger.error(f"Error al obtener top categorías de gastos: {e}")
                 return {'error': str(e)}
 
-        tools.extend([get_user_expenses, search_expenses, get_category_expenses,
-                     get_top_expense_categories])
+        @tool
+        def get_top_income_categories_for_user(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+            """Obtiene las categorías con mayores ingresos en un rango de fechas."""
+            try:
+                return get_top_income_categories.invoke({
+                    "user_external_id": user.external_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(
+                    f"Error al obtener top categorías de ingresos: {e}")
+                return {'error': str(e)}
+
+        tools.extend([
+            get_user_expenses, get_user_incomes,
+            search_expenses, search_incomes,
+            get_category_expenses, get_category_incomes,
+            get_top_expense_categories, get_top_income_categories_for_user
+        ])
 
         # Esperamos el resultado de la función asíncrona
         existing_categories = await get_existing_categories()
@@ -193,11 +296,13 @@ async def process_message(user: User, raw_text: str) -> str:
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
-            Eres un asistente financiero experto en clasificar gastos.
+            Eres un asistente financiero experto en clasificar gastos e ingresos.
             Las categorías disponibles son: {categories_str}
 
             INSTRUCCIONES:
             1. Si detectas un saludo corto ⇒ responde con un saludo.
+            
+            PARA GASTOS:
             2. Si hay UN solo gasto ⇒ usa parse_expense y luego create_expense.
             3. Si el mensaje contiene MÁS de un gasto (separado por "y", "," o ";"…) ⇒
                 3.1 Usa parse_expenses.
@@ -209,58 +314,82 @@ async def process_message(user: User, raw_text: str) -> str:
                asume que se refiere al día más reciente en el pasado, no al próximo.
             5. Si falta fecha ⇒ usa get_current_date.
             6. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
-            7. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
-            8. Clasifica el gasto en una de las categorías proporcionadas.
-            9. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
-            10. Si el usuario quiere editar un gasto:
-                10.1 Usa search_expenses_by_text para encontrar el gasto que quiere editar
-                10.2 Si encuentra el gasto, usa update_expense para modificarlo
-                10.3 Si no encuentra el gasto, pide más detalles
-            11. Si el usuario quiere eliminar un gasto:
-                11.1 Usa search_expenses_by_text para encontrar el gasto
-                11.2 Si encuentra el gasto, usa delete_expense para eliminarlo
-                11.3 Si no encuentra el gasto, pide más detalles
-            12. Si el usuario hace consultas sobre sus gastos:
-                12.1 Para consultar gastos por categoría en un período:
-                    - Usa get_category_expenses pasando la categoría y las fechas opcionales
+            
+            PARA INGRESOS:
+            7. Si hay un solo ingreso ⇒ usa parse_income y luego create_income.
+            8. Si el mensaje contiene MÁS de un ingreso (separado por "y", "," o ";"…) ⇒
+                8.1 Usa parse_incomes.
+                8.2 Recorre cada elemento del array devuelto y llama a create_income
+                    para cada ingreso individual.
+            9. Si identificas referencias temporales para ingresos ⇒ usa parse_relative_date
+               para convertirlas en fechas específicas antes de crear el ingreso.
+            10. Si falta fecha ⇒ usa get_current_date.
+            11. Si falta moneda ⇒ create_income asignará la moneda por defecto.
+            
+            PARA AMBOS:
+            12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
+            13. Clasifica el movimiento en una de las categorías proporcionadas.
+            14. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
+            
+            EDICIÓN Y ELIMINACIÓN:
+            15. Si el usuario quiere editar un gasto:
+                15.1 Usa search_expenses para encontrar el gasto que quiere editar
+                15.2 Si encuentra el gasto, usa update_expense para modificarlo
+                15.3 Si no encuentra el gasto, pide más detalles
+            16. Si el usuario quiere eliminar un gasto:
+                16.1 Usa search_expenses para encontrar el gasto
+                16.2 Si encuentra el gasto, usa delete_expense para eliminarlo
+                16.3 Si no encuentra el gasto, pide más detalles
+            17. Si el usuario quiere editar un ingreso:
+                17.1 Usa search_incomes para encontrar el ingreso que quiere editar
+                17.2 Si encuentra el ingreso, usa update_income para modificarlo
+                17.3 Si no encuentra el ingreso, pide más detalles
+            18. Si el usuario quiere eliminar un ingreso:
+                18.1 Usa search_incomes para encontrar el ingreso
+                18.2 Si encuentra el ingreso, usa delete_income para eliminarlo
+                18.3 Si no encuentra el ingreso, pide más detalles
+            
+            CONSULTAS:
+            19. Si el usuario hace consultas sobre sus gastos o ingresos:
+                19.1 Para consultar por categoría en un período:
+                    - Usa get_category_expenses o get_category_incomes según corresponda
                     - Si no se especifica fecha, usa get_current_date para la fecha actual
                     - Si se menciona "este mes", calcula el primer día del mes actual
-                12.2 Para consultar las categorías con mayores gastos:
-                    - Usa get_top_expense_categories con las fechas opcionales
+                19.2 Para consultar las categorías con mayores movimientos:
+                    - Usa get_top_expense_categories o get_top_income_categories_for_user según corresponda
                     - Si no se especifica fecha, muestra todas las categorías
-                    - Ordena los resultados de mayor a menor gasto
-                12.3 Para búsquedas semánticas:
-                    - Usa search_expenses SOLO cuando el usuario busque un gasto específico por descripción o detalles
-                    - NO uses search_expenses para consultas de período (esta semana, este mes, etc.)
-                    - Para consultas de período, usa get_top_expense_categories con las fechas correspondientes
-                12.4 Para consultas de período:
-                    - Si el usuario pregunta "cuánto gasté esta semana/mes/etc":
-                        * Usa get_top_expense_categories con las fechas del período
+                    - Ordena los resultados de mayor a menor
+                19.3 Para búsquedas semánticas:
+                    - Usa search_expenses o search_incomes SOLO cuando el usuario busque un movimiento específico
+                    - NO uses estas funciones para consultas de período (esta semana, este mes, etc.)
+                19.4 Para consultas de período:
+                    - Si el usuario pregunta "cuánto gasté/ingresé esta semana/mes/etc":
+                        * Usa get_top_expense_categories o get_top_income_categories_for_user
                         * Calcula el total sumando los montos de todas las categorías
                         * Muestra un resumen por categoría y el total general
-                    - Si el usuario pregunta por una categoría específica en un período:
-                        * Usa get_category_expenses con la categoría y las fechas del período
-                        * Muestra el total y los gastos individuales
-                12.5 Para listar todos los gastos del usuario:
-                    * Usa get_user_expenses con las fechas opcionales del período
-                    * Si no se especifica fecha, muestra todos los gastos
+                19.5 Para listar todos los movimientos del usuario:
+                    * Usa get_user_expenses o get_user_incomes según corresponda
+                    * Si no se especifica fecha, muestra todos los movimientos
+
+            IMPORTANTE:
+            - Siempre determina correctamente si el mensaje se refiere a un GASTO o a un INGRESO
+            - Para gastos, usa spent_at como fecha
+            - Para ingresos, usa received_at como fecha
+            - La palabra clave para detectar ingresos es: recibí, me pagaron, ingresé, gané, etc.
+            - La palabra clave para detectar gastos es: gasté, pagué, compré, etc.
+            - Si no puedes determinar si es gasto o ingreso, pregúntale al usuario
+            - Las herramientas ya incluyen el ID del usuario actual
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.
-            Siempre debes dar una opinion sobre el gasto registrado.
+            Siempre debes dar una opinión sobre el movimiento registrado.
             Puedes usar emojis y gifs.
             Puedes hacer chistes y bromas.
             Puedes usar sarcasmo y hacer comentarios negativos.
             Puedes ser grosero.
             Puedes dar consejos.
-            Siempre debes mencionar el gasto registrado, su categoria y la fecha.
+            Siempre debes mencionar el movimiento registrado, su categoria y la fecha.
             Siempre debes responder en el mismo idioma que el usuario.
-            
-            IMPORTANTE: 
-            - Usa get_top_expense_categories para consultas de período (esta semana, este mes, etc.)
-            - Usa search_expenses SOLO para buscar gastos específicos por descripción
-            - Las herramientas ya incluyen el ID del usuario actual
-            
             """),
             MessagesPlaceholder("history"),
             ("human", "{input}"),
