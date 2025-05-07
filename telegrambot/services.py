@@ -128,11 +128,23 @@ async def process_message(user: User, raw_text: str) -> str:
             parse_relative_date,
             update_expense,
             delete_expense,
-            get_expenses_by_user,
             get_expense_by_id,
         ]
 
         # Agregar herramientas que requieren user_external_id
+        @tool
+        def get_user_expenses(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+            """Obtiene todos los gastos del usuario en un rango de fechas opcional."""
+            try:
+                return get_expenses_by_user.invoke({
+                    "user_external_id": user.external_id,
+                    "start_date": start_date,
+                    "end_date": end_date
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener gastos del usuario: {e}")
+                return []
+
         @tool
         def search_expenses(search_text: str) -> List[Dict[str, Any]]:
             """Busca gastos que coincidan con el texto de búsqueda."""
@@ -172,7 +184,7 @@ async def process_message(user: User, raw_text: str) -> str:
                 logger.error(f"Error al obtener top categorías: {e}")
                 return {'error': str(e)}
 
-        tools.extend([search_expenses, get_category_expenses,
+        tools.extend([get_user_expenses, search_expenses, get_category_expenses,
                      get_top_expense_categories])
 
         # Esperamos el resultado de la función asíncrona
@@ -229,6 +241,9 @@ async def process_message(user: User, raw_text: str) -> str:
                     - Si el usuario pregunta por una categoría específica en un período:
                         * Usa get_category_expenses con la categoría y las fechas del período
                         * Muestra el total y los gastos individuales
+                12.5 Para listar todos los gastos del usuario:
+                    * Usa get_user_expenses con las fechas opcionales del período
+                    * Si no se especifica fecha, muestra todos los gastos
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.
@@ -262,7 +277,7 @@ async def process_message(user: User, raw_text: str) -> str:
         try:
             result = await asyncio.wait_for(
                 executor.ainvoke({"input": raw_text}),
-                timeout=60.0  # 60 segundos de timeout
+                timeout=120.0  # 120 segundos de timeout
             )
             return result["output"]
         except asyncio.TimeoutError:
