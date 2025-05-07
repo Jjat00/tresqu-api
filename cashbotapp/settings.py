@@ -275,3 +275,9 @@ CORS_ALLOW_HEADERS = [
     'x-csrftoken',
     'x-requested-with',
 ]
+
+# Configuración de administradores de Telegram
+# Los IDs de usuario de Telegram que pueden enviar mensajes masivos
+TELEGRAM_ADMIN_IDS = [
+    7519177293,  # Reemplaza esto con tu ID de usuario de Telegram
+]

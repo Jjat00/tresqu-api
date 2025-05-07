@@ -5,6 +5,7 @@ from asgiref.sync import sync_to_async
 import time
 import tempfile
 import os
+import asyncio
 from django.db import transaction, connections, connection, InterfaceError
 
 from django.conf import settings
@@ -23,6 +24,7 @@ logger = logging.getLogger(__name__)
 # Definir estados para la conversación
 ESPERANDO_TELEFONO = 0
 ESPERANDO_MONEDA = 1
+ESPERANDO_MENSAJE_BROADCAST = 2
 
 
 # Funciones síncronas para operaciones de base de datos
@@ -181,6 +183,43 @@ def get_chat_user(chat_id):
             return None, None
 
 
+def get_all_telegram_chats():
+    """Obtiene todos los chats de Telegram que tienen un usuario asociado"""
+    max_retries = 3
+    retry_count = 0
+    backoff_time = 0.5
+
+    while retry_count < max_retries:
+        try:
+            with transaction.atomic():
+                chats = TelegramChat.objects.filter(
+                    user__isnull=False).select_related('user')
+                return [chat for chat in chats]  # Esto fuerza la evaluación
+        except InterfaceError:
+            retry_count += 1
+            logger.warning(
+                f"Conexión cerrada, intento {retry_count} de reconexión para get_all_telegram_chats")
+            connections.close_all()
+
+            if retry_count < max_retries:
+                time.sleep(backoff_time)
+                backoff_time *= 2
+                continue
+            else:
+                logger.error(
+                    f"No se pudo reconectar después de {max_retries} intentos")
+                raise
+        except Exception as e:
+            logger.error(f"Error al obtener todos los chats: {e}")
+            raise
+
+
+def is_admin_user(user_id):
+    """Verifica si un usuario es administrador basado en la configuración"""
+    admin_ids = getattr(settings, 'TELEGRAM_ADMIN_IDS', [])
+    return str(user_id) in [str(admin_id) for admin_id in admin_ids]
+
+
 # Conversión a funciones asíncronas
 get_or_create_chat_async = sync_to_async(get_or_create_chat)
 create_message_async = sync_to_async(create_message)
@@ -190,6 +229,8 @@ create_user_async = sync_to_async(create_user)
 update_chat_user_async = sync_to_async(update_chat_user)
 update_user_currency_async = sync_to_async(update_user_currency)
 get_chat_user_async = sync_to_async(get_chat_user)
+get_all_telegram_chats_async = sync_to_async(get_all_telegram_chats)
+is_admin_user_async = sync_to_async(is_admin_user)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -752,6 +793,126 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
 
 
+async def start_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Inicia el proceso para enviar mensajes a todos los usuarios."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    # Verificar si el usuario es administrador
+    is_admin = await is_admin_user_async(user.id)
+
+    if not is_admin:
+        await update.message.reply_text(
+            "Lo siento, solo los administradores pueden enviar mensajes masivos a los usuarios."
+        )
+        return ConversationHandler.END
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        update.message.text
+    )
+
+    message = (
+        "Estás a punto de enviar un mensaje a todos los usuarios registrados.\n"
+        "Por favor, escribe el mensaje que deseas enviar:\n\n"
+        "Puedes incluir:\n"
+        "- Texto simple\n"
+        "- Emojis 😊\n"
+        "- Formato *negrita*, _cursiva_, `código`\n\n"
+        "Para cancelar este proceso, escribe /cancel"
+    )
+
+    await update.message.reply_text(message)
+
+    # Registrar respuesta
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        message
+    )
+
+    return ESPERANDO_MENSAJE_BROADCAST
+
+
+async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Envía el mensaje a todos los usuarios registrados."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    broadcast_message = update.message.text
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        broadcast_message
+    )
+
+    # Enviar mensaje de confirmación
+    confirm_message = "Enviando mensaje a todos los usuarios. Por favor, espera..."
+    await update.message.reply_text(confirm_message)
+
+    # Enviar mensaje a todos los usuarios
+    chats = await get_all_telegram_chats_async()
+    sent_count = 0
+    error_count = 0
+
+    for telegram_chat in chats:
+        try:
+            # No enviar al administrador que está haciendo el broadcast
+            if str(telegram_chat.chat_id) != str(chat_id):
+                await context.bot.send_message(
+                    chat_id=telegram_chat.chat_id,
+                    text=f"📣 *Mensaje de CashBot*\n\n{broadcast_message}",
+                    parse_mode="Markdown"
+                )
+
+                # Registrar mensaje enviado en la base de datos
+                await create_message_async(
+                    telegram_chat,
+                    "broadcast",
+                    "outgoing",
+                    broadcast_message
+                )
+
+                sent_count += 1
+
+                # Pequeña pausa para evitar limitaciones de la API de Telegram
+                await asyncio.sleep(0.1)
+        except Exception as e:
+            logger.error(
+                f"Error al enviar mensaje a {telegram_chat.chat_id}: {e}")
+            error_count += 1
+
+    # Mensaje de resumen
+    summary = (
+        f"✅ Mensaje enviado a {sent_count} usuarios.\n"
+        f"❌ Errores al enviar a {error_count} usuarios."
+    )
+
+    await update.message.reply_text(summary)
+
+    # Registrar resumen
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        summary
+    )
+
+    return ConversationHandler.END
+
+
 def setup_bot():
     """Configura y devuelve la aplicación del bot."""
     if not settings.TELEGRAM_BOT_TOKEN:
@@ -780,6 +941,19 @@ def setup_bot():
         fallbacks=[CommandHandler("cancel", cancel)],
     )
     application.add_handler(conv_handler)
+
+    # Manejador de conversación para broadcast
+    broadcast_handler = ConversationHandler(
+        entry_points=[CommandHandler("broadcast", start_broadcast)],
+        states={
+            ESPERANDO_MENSAJE_BROADCAST: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND,
+                               send_broadcast_message)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)],
+    )
+    application.add_handler(broadcast_handler)
 
     # Mensajes de voz
     application.add_handler(MessageHandler(
