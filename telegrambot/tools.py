@@ -287,3 +287,119 @@ def create_expense(
         f"📅 Fecha: {date}\n"
         f"{'📝 Nota: ' + note if note else ''}"
     )
+
+
+@tool
+def update_expense(expense_id: str, amount: float, currency: str, category: str, spent_at: str | None = None, note: str | None = ""):
+    """Actualiza un gasto en la base de datos."""
+    try:
+        expense = Expense.objects.get(id=expense_id)
+
+        # Normalizar el nombre de la categoría
+        category_name = category.strip().capitalize()
+
+        # Buscar o crear la categoría
+        category_obj = None
+        try:
+            category_obj = Category.objects.get(name=category_name)
+        except Category.DoesNotExist:
+            # Si no existe, solo usamos el nombre como category_str
+            pass
+
+        expense.amount = amount
+        expense.currency = currency
+        expense.category = category_obj
+        expense.category_str = category_name
+        if spent_at:
+            expense.spent_at = datetime.strptime(spent_at, "%Y-%m-%d").date()
+        if note:
+            expense.note = note
+
+        expense.save()
+        return f"✅ ¡Gasto actualizado!\n"
+    except Exception as e:
+        logger.error(f"Error al actualizar gasto: {e}")
+        return f"❌ Error al actualizar el gasto: {str(e)}"
+
+
+@tool
+def delete_expense(expense_id: str):
+    """Elimina un gasto de la base de datos."""
+    try:
+        expense = Expense.objects.get(id=expense_id)
+        expense.delete()
+        return f"✅ ¡Gasto eliminado!\n"
+    except Exception as e:
+        logger.error(f"Error al eliminar gasto: {e}")
+        return f"❌ Error al eliminar el gasto: {str(e)}"
+
+
+@tool
+def get_expenses_by_user(user_external_id: str):
+    """Obtiene todos los gastos de un usuario."""
+    try:
+        user = User.objects.get(external_id=user_external_id)
+        expenses = Expense.objects.filter(user=user)
+        return [{
+            'id': str(expense.id),
+            'amount': expense.amount,
+            'currency': expense.currency,
+            'category': expense.category_str,
+            'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+            'note': expense.note,
+            'raw_message': expense.raw_message
+        } for expense in expenses]
+    except Exception as e:
+        logger.error(f"Error al obtener gastos: {e}")
+        return []
+
+
+@tool
+def get_expense_by_id(expense_id: str):
+    """Obtiene un gasto por su ID."""
+    try:
+        expense = Expense.objects.get(id=expense_id)
+        return {
+            'id': str(expense.id),
+            'amount': expense.amount,
+            'currency': expense.currency,
+            'category': expense.category_str,
+            'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+            'note': expense.note,
+            'raw_message': expense.raw_message
+        }
+    except Exception as e:
+        logger.error(f"Error al obtener gasto: {e}")
+        return None
+
+
+@tool
+def search_expenses_by_text(user_external_id: str, search_text: str) -> List[Dict[str, Any]]:
+    """
+    Busca gastos que coincidan con el texto de búsqueda.
+    Devuelve una lista de gastos que coinciden con el texto.
+    """
+    user = User.objects.get(external_id=user_external_id)
+
+    # Buscar en el texto del mensaje original y en la nota
+    expenses = Expense.objects.filter(
+        user=user,
+        raw_message__icontains=search_text
+    ) | Expense.objects.filter(
+        user=user,
+        note__icontains=search_text
+    )
+
+    # Ordenar por fecha más reciente
+    expenses = expenses.order_by('-spent_at', '-timestamp')
+
+    # Convertir a lista de diccionarios
+    return [{
+        'id': str(expense.id),
+        'amount': expense.amount,
+        'currency': expense.currency,
+        'category': expense.category_str,
+        'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+        'note': expense.note,
+        'raw_message': expense.raw_message
+    } for expense in expenses[:5]]  # Limitar a 5 resultados

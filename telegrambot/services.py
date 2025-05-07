@@ -3,6 +3,9 @@ from langchain.memory import ConversationBufferWindowMemory
 from telegrambot.utils import fetch_last_messages
 import logging
 from openai import OpenAI
+from typing import List, Dict, Any
+import asyncio
+from datetime import datetime
 
 from django.conf import settings
 from users.models import User
@@ -20,6 +23,11 @@ from telegrambot.tools import (
     parse_expenses,
     get_or_create_category,
     parse_relative_date,
+    update_expense,
+    delete_expense,
+    get_expenses_by_user,
+    get_expense_by_id,
+    search_expenses_by_text,
 )
 
 from telegrambot.utils import get_existing_categories
@@ -38,7 +46,10 @@ openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 
 async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
     mem = ConversationBufferWindowMemory(
-        k=10, memory_key="history", return_messages=True
+        k=10,
+        memory_key="history",
+        return_messages=True,
+        output_key="output"
     )
     async for msg in fetch_last_messages(user_id):
         mem.chat_memory.add_message(msg)
@@ -113,7 +124,26 @@ async def process_message(user: User, raw_text: str) -> str:
             parse_expenses,
             get_or_create_category,
             parse_relative_date,
+            update_expense,
+            delete_expense,
+            get_expenses_by_user,
+            get_expense_by_id,
         ]
+
+        # Agregar la herramienta de búsqueda con el ID del usuario
+        @tool
+        def search_expenses(search_text: str) -> List[Dict[str, Any]]:
+            """Busca gastos que coincidan con el texto de búsqueda."""
+            try:
+                return search_expenses_by_text.invoke({
+                    "user_external_id": user.external_id,
+                    "search_text": search_text
+                })
+            except Exception as e:
+                logger.error(f"Error al buscar gastos: {e}")
+                return []
+
+        tools.append(search_expenses)
 
         # Esperamos el resultado de la función asíncrona
         existing_categories = await get_existing_categories()
@@ -140,6 +170,14 @@ async def process_message(user: User, raw_text: str) -> str:
             7. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
             8. Clasifica el gasto en una de las categorías proporcionadas.
             9. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
+            10. Si el usuario quiere editar un gasto:
+                10.1 Usa search_expenses_by_text para encontrar el gasto que quiere editar
+                10.2 Si encuentra el gasto, usa update_expense para modificarlo
+                10.3 Si no encuentra el gasto, pide más detalles
+            11. Si el usuario quiere eliminar un gasto:
+                11.1 Usa search_expenses_by_text para encontrar el gasto
+                11.2 Si encuentra el gasto, usa delete_expense para eliminarlo
+                11.3 Si no encuentra el gasto, pide más detalles
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.
@@ -161,12 +199,19 @@ async def process_message(user: User, raw_text: str) -> str:
         # 3. memoria con los últimos 10 mensajes desde la BD
         memory = await build_memory(user.id)
 
-        # 4. ejecutor
+        # 4. ejecutor con timeout
         executor = build_agent(tools, prompt, memory)
 
-        # 5. invocación
-        result = await executor.ainvoke({"input": raw_text})
-        return result["output"]
+        # 5. invocación con manejo de timeout
+        try:
+            result = await asyncio.wait_for(
+                executor.ainvoke({"input": raw_text}),
+                timeout=30.0  # 30 segundos de timeout
+            )
+            return result["output"]
+        except asyncio.TimeoutError:
+            logger.error("Timeout al procesar mensaje")
+            return "Lo siento, la operación tomó demasiado tiempo. Por favor, intenta de nuevo con un mensaje más corto o específico."
 
     except Exception as e:
         logger.error(f"Error al procesar mensaje: {e}")
