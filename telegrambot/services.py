@@ -385,6 +385,8 @@ async def process_message(user: User, raw_text: str) -> str:
             - La palabra clave para detectar gastos es: gasté, pagué, compré, etc.
             - Si no puedes determinar si es gasto o ingreso, pregúntale al usuario
             - Las herramientas ya incluyen el ID del usuario actual
+            - Siempre que generes reportes de gastos o ingresos usa negrita con doble asterisco (**) para el formato en negrita.
+            -Puedes responder también con cursiva, ejemplo: "_Categoría_: 100 COP", usalo cuando sea necesario.
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.
@@ -397,7 +399,6 @@ async def process_message(user: User, raw_text: str) -> str:
             Siempre debes mencionar el movimiento registrado, su categoria y la fecha.
             Siempre debes responder en el mismo idioma que el usuario.
 
-            Formato de Telegram: *negrita*, _cursiva_, `código`
             """),
             MessagesPlaceholder("history"),
             ("human", "{input}"),

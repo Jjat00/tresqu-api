@@ -373,7 +373,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Procesar mensaje
         response = await process_message(chat_user, user_message_text)
 
-        await update.message.reply_text(response)
+        await update.message.reply_text(response, parse_mode="Markdown")
 
         # Registrar respuesta
         await create_message_async(
@@ -762,7 +762,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
 
             # Enviar la respuesta
-            await update.message.reply_text(response)
+            await update.message.reply_text(response, parse_mode="Markdown")
 
             # Registrar respuesta
             await create_message_async(
