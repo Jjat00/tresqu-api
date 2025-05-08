@@ -241,7 +241,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     chat, created = await get_or_create_chat_async(chat_id)
 
     welcome_message = (
-        f"¡Hola {user.first_name}! Soy CashBot, tu asistente de finanzas personales. "
+        f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
         f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
         f"Para comenzar, necesitas registrarte con tu número de teléfono. "
         f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
@@ -872,7 +872,7 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
             if str(telegram_chat.chat_id) != str(chat_id):
                 await context.bot.send_message(
                     chat_id=telegram_chat.chat_id,
-                    text=f"📣 *Mensaje de CashBot*\n\n{broadcast_message}",
+                    text=f"📣 *Mensaje de Tresqu*\n\n{broadcast_message}",
                     parse_mode="Markdown"
                 )
 
