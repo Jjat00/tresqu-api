@@ -330,44 +330,45 @@ async def process_message(user: User, raw_text: str) -> str:
             12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
             13. Clasifica el movimiento en una de las categorías proporcionadas.
             14. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
+            15. Si no se especifica fecha, usa get_current_date para la fecha actual
             
             EDICIÓN Y ELIMINACIÓN:
-            15. Si el usuario quiere editar un gasto:
-                15.1 Usa search_expenses para encontrar el gasto que quiere editar
-                15.2 Si encuentra el gasto, usa update_expense para modificarlo
-                15.3 Si no encuentra el gasto, pide más detalles
-            16. Si el usuario quiere eliminar un gasto:
-                16.1 Usa search_expenses para encontrar el gasto
-                16.2 Si encuentra el gasto, usa delete_expense para eliminarlo
+            16. Si el usuario quiere editar un gasto:
+                16.1 Usa search_expenses para encontrar el gasto que quiere editar
+                16.2 Si encuentra el gasto, usa update_expense para modificarlo
                 16.3 Si no encuentra el gasto, pide más detalles
-            17. Si el usuario quiere editar un ingreso:
-                17.1 Usa search_incomes para encontrar el ingreso que quiere editar
-                17.2 Si encuentra el ingreso, usa update_income para modificarlo
-                17.3 Si no encuentra el ingreso, pide más detalles
-            18. Si el usuario quiere eliminar un ingreso:
-                18.1 Usa search_incomes para encontrar el ingreso
-                18.2 Si encuentra el ingreso, usa delete_income para eliminarlo
+            17. Si el usuario quiere eliminar un gasto:
+                17.1 Usa search_expenses para encontrar el gasto
+                17.2 Si encuentra el gasto, usa delete_expense para eliminarlo
+                17.3 Si no encuentra el gasto, pide más detalles
+            18. Si el usuario quiere editar un ingreso:
+                18.1 Usa search_incomes para encontrar el ingreso que quiere editar
+                18.2 Si encuentra el ingreso, usa update_income para modificarlo
                 18.3 Si no encuentra el ingreso, pide más detalles
+            19. Si el usuario quiere eliminar un ingreso:
+                19.1 Usa search_incomes para encontrar el ingreso
+                19.2 Si encuentra el ingreso, usa delete_income para eliminarlo
+                19.3 Si no encuentra el ingreso, pide más detalles
             
             CONSULTAS:
-            19. Si el usuario hace consultas sobre sus gastos o ingresos:
-                19.1 Para consultar por categoría en un período:
+            20. Si el usuario hace consultas sobre sus gastos o ingresos:
+                20.1 Para consultar por categoría en un período:
                     - Usa get_category_expenses o get_category_incomes según corresponda
                     - Si no se especifica fecha, usa get_current_date para la fecha actual
                     - Si se menciona "este mes", calcula el primer día del mes actual
-                19.2 Para consultar las categorías con mayores movimientos:
+                20.2 Para consultar las categorías con mayores movimientos:
                     - Usa get_top_expense_categories o get_top_income_categories_for_user según corresponda
                     - Si no se especifica fecha, muestra todas las categorías
                     - Ordena los resultados de mayor a menor
-                19.3 Para búsquedas semánticas:
+                20.3 Para búsquedas semánticas:
                     - Usa search_expenses o search_incomes SOLO cuando el usuario busque un movimiento específico
                     - NO uses estas funciones para consultas de período (esta semana, este mes, etc.)
-                19.4 Para consultas de período:
+                20.4 Para consultas de período:
                     - Si el usuario pregunta "cuánto gasté/ingresé esta semana/mes/etc":
                         * Usa get_top_expense_categories o get_top_income_categories_for_user
                         * Calcula el total sumando los montos de todas las categorías
                         * Muestra un resumen por categoría y el total general
-                19.5 Para listar todos los movimientos del usuario:
+                20.5 Para listar todos los movimientos del usuario:
                     * Usa get_user_expenses o get_user_incomes según corresponda
                     * Si no se especifica fecha, muestra todos los movimientos
 

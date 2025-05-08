@@ -105,15 +105,21 @@ WSGI_APPLICATION = 'cashbotapp.wsgi.application'
 DATABASES = {
     "default": dj_database_url.config(
         default=os.getenv(
-            "DATABASE_URL", "postgres://postgres:postgres@localhost:5432/cashbot"),
-        conn_max_age=0,  # Desactivamos el manejo de conexiones de Django
-        ssl_require=True,
+            "DATABASE_URL", DATABASE_URL),
+        conn_max_age=60,  # Mantener conexiones vivas por 60 segundos
+        ssl_require=not DEBUG,  # SSL requerido solo en producción
         conn_health_checks=True,
-        engine='dj_db_conn_pool.backends.postgresql'
     )
 }
 
+DATABASES["default"]["ENGINE"] = "django.db.backends.postgresql"
+
+
 # Configuración normal de PostgreSQL
+# En desarrollo preferimos SSL, en producción lo requerimos
+ssl_mode = 'prefer' if DEBUG else 'require'
+logger.info(f"Modo SSL configurado como: {ssl_mode} (DEBUG={DEBUG})")
+
 DATABASES['default']['OPTIONS'] = {
     'application_name': 'cashbot',
     'connect_timeout': 30,
@@ -121,23 +127,17 @@ DATABASES['default']['OPTIONS'] = {
     'keepalives_idle': 30,
     'keepalives_interval': 10,
     'keepalives_count': 5,
+    'sslmode': ssl_mode,
 }
 
-# Configuración específica del pool (separada de las opciones normales)
-DATABASES['default']['POOL_OPTIONS'] = {
-    'POOL_SIZE': 20,         # Número máximo de conexiones en el pool
-    'MAX_OVERFLOW': 10,      # Conexiones adicionales permitidas cuando el pool está lleno
-    # Tiempo en segundos para reciclar conexiones (30 minutos)
-    'RECYCLE': 1800,
-}
-
-# Imprimir configuración del pool directamente
+# Imprimir configuración de la conexión
 print("="*50)
-print("CONFIGURACIÓN DEL POOL DE CONEXIONES A LA BASE DE DATOS:")
-print(f"Pool size: {DATABASES['default']['POOL_OPTIONS']['POOL_SIZE']}")
-print(f"Max overflow: {DATABASES['default']['POOL_OPTIONS']['MAX_OVERFLOW']}")
+print("CONFIGURACIÓN DE CONEXIÓN A LA BASE DE DATOS SUPABASE:")
+print(f"Connection max age: {DATABASES['default']['CONN_MAX_AGE']} segundos")
 print(
-    f"Recycle time: {DATABASES['default']['POOL_OPTIONS']['RECYCLE']} segundos")
+    f"SSL: {DATABASES['default']['OPTIONS'].get('sslmode', 'No configurado')}")
+print(
+    f"Keepalives: {DATABASES['default']['OPTIONS'].get('keepalives', 'No configurado')}")
 print("="*50)
 
 # Configuración de API de Supabase

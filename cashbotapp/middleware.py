@@ -1,58 +1,51 @@
 import logging
+import time
 import json
+from django.db import connection
 from django.utils.deprecation import MiddlewareMixin
-from django.db import connections, InterfaceError
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger('cashbotapp')
 
 
-class DatabaseConnectionMiddleware:
-    """
-    Middleware para manejar conexiones a la base de datos
-    - Maneja errores de conexión cerrada o expirada
-    - Ya no cierra conexiones al final de cada solicitud porque ahora usamos pool
-    """
+class DatabaseConnectionMiddleware(MiddlewareMixin):
+    """Middleware para gestionar y monitorear conexiones a la base de datos"""
 
-    def __init__(self, get_response):
-        self.get_response = get_response
+    def process_request(self, request):
+        # Almacenar el tiempo de inicio para el cálculo de duración
+        request.db_start_time = time.time()
+        return None
 
-    def __call__(self, request):
-        # Código que se ejecuta antes de la vista
-        response = None
-        try:
-            response = self.get_response(request)
-        except InterfaceError as e:
-            logger.warning(f"Error de interfaz con la base de datos: {e}")
-            # No cerramos las conexiones manualmente, dejamos que el pool lo maneje
-            # Re-intentar solicitud una vez
-            try:
-                response = self.get_response(request)
-            except Exception as e2:
-                logger.error(f"Error en segundo intento de respuesta: {e2}")
-                raise
-        except Exception as e:
-            # Registrar otras excepciones, pero no hacer nada especial
-            logger.error(f"Error en middleware: {e}")
-            raise
+    def process_response(self, request, response):
+        # Si la solicitud es rápida, podemos cerrar la conexión para liberar recursos
+        if hasattr(request, 'db_start_time'):
+            duration = time.time() - request.db_start_time
+            # Si la duración es mayor a 1 segundo, registramos como consulta lenta
+            if duration > 1.0:
+                logger.warning(
+                    f"Consulta lenta detectada: {duration:.2f}s - {request.path}")
+
+            # Para solicitudes API que no sean de streaming, cerramos la conexión
+            if request.path.startswith('/api/') and not request.path.startswith('/api/stream/'):
+                connection.close()
+                logger.debug(
+                    f"Conexión cerrada después de solicitud: {request.path}")
 
         return response
 
 
-class AuthLoggingMiddleware:
-    """
-    Middleware para registrar información de autenticación
-    """
+class AuthLoggingMiddleware(MiddlewareMixin):
+    """Middleware para registrar intentos de autenticación"""
 
-    def __init__(self, get_response):
-        self.get_response = get_response
-
-    def __call__(self, request):
-        # Código que se ejecuta antes de la vista
-        response = self.get_response(request)
-
-        # Código que se ejecuta después de la vista
-        if hasattr(request, 'user') and request.user.is_authenticated:
+    def process_request(self, request):
+        # Registrar información de autenticación
+        if request.path.startswith('/api/token/') or request.path.startswith('/api/user/login/'):
             logger.info(
-                f"Usuario autenticado: {request.user.username} (ID: {request.user.id})")
+                f"Intento de autenticación desde {request.META.get('REMOTE_ADDR')}")
+        return None
 
+    def process_response(self, request, response):
+        # Registrar resultados de autenticación
+        if (request.path.startswith('/api/token/') or request.path.startswith('/api/user/login/')) and response.status_code != 200:
+            logger.warning(
+                f"Fallo de autenticación desde {request.META.get('REMOTE_ADDR')}")
         return response
