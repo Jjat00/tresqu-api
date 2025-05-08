@@ -43,7 +43,8 @@ class ExpenseList(BaseModel):
 @tool
 def get_current_date() -> str:
     """Devuelve la fecha actual en formato YYYY‑MM‑DD."""
-    return datetime.now().strftime("%Y-%m-%d")
+    # Asegurémonos de usar timezone para tener en cuenta la zona horaria configurada
+    return timezone.now().strftime("%Y-%m-%d")
 
 
 @tool
@@ -142,9 +143,14 @@ async def parse_expense(text: str) -> dict:
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del gasto. Usa la fecha actual como referencia.
         
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
+        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
+        y el sistema usará automáticamente la fecha actual.
+        
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
+        - "compré mi cena a 20k" debe usar la fecha actual
         """),
         ("human", "{text}")
     ])
@@ -171,6 +177,10 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         Si el mensaje incluye referencias temporales como "ayer", "el martes", 
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del gasto. Usa la fecha actual como referencia.
+        
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
+        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
+        y el sistema usará automáticamente la fecha actual.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(
@@ -500,9 +510,14 @@ async def parse_income(text: str) -> dict:
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del ingreso. Usa la fecha actual como referencia.
         
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
+        NO debes generar una fecha arbitraria. Deja el campo received_at como NULL 
+        y el sistema usará automáticamente la fecha actual.
+        
         Por ejemplo:
-        - "ayer recibí un pago de 200K" debe registrarse con la fecha de ayer
-        - "el sábado me pagaron 100k por un trabajo" debe registrarse con la fecha del sábado más reciente
+        - "ayer recibí un pago a 20K" debe registrarse con la fecha de ayer
+        - "el sábado me pagaron 100k" debe registrarse con la fecha del sábado más reciente
+        - "recibí mi sueldo de 2M" debe dejarse sin fecha (null) para usar la fecha actual automáticamente
         """),
         ("human", "{text}")
     ])
@@ -529,6 +544,10 @@ async def parse_incomes(text: str) -> Dict[str, Any]:
         Si el mensaje incluye referencias temporales como "ayer", "el martes", 
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del ingreso. Usa la fecha actual como referencia.
+        
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
+        NO debes generar una fecha arbitraria. Deja el campo received_at como NULL 
+        y el sistema usará automáticamente la fecha actual.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(
