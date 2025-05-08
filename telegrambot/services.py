@@ -41,6 +41,7 @@ from telegrambot.tools import (
     search_incomes_by_text,
     get_incomes_by_category,
     get_top_income_categories,
+    get_or_create_income_category,
 )
 
 from telegrambot.utils import get_existing_categories
@@ -124,6 +125,10 @@ def make_create_income_tool(user_external_id: str):
         note: str | None = "",
     ) -> str:
         """Registra un ingreso en la base de datos y confirma el registro."""
+        # Primero crear la categoría de ingreso si no existe
+        get_or_create_income_category.invoke({"name": category})
+
+        # Luego registrar el ingreso
         return create_income.invoke(
             {
                 "user_external_id": user_external_id,
@@ -391,6 +396,8 @@ async def process_message(user: User, raw_text: str) -> str:
             Puedes dar consejos.
             Siempre debes mencionar el movimiento registrado, su categoria y la fecha.
             Siempre debes responder en el mismo idioma que el usuario.
+
+            Formato de Telegram: *negrita*, _cursiva_, `código`
             """),
             MessagesPlaceholder("history"),
             ("human", "{input}"),

@@ -238,6 +238,45 @@ def get_or_create_category(name: str) -> Dict[str, str]:
 
 
 @tool
+def get_or_create_income_category(name: str) -> Dict[str, str]:
+    """
+    Crea una nueva categoría de ingreso en la base de datos.
+    Útil cuando un usuario registra un ingreso con una categoría que no existe.
+    Devuelve un diccionario con el resultado de la operación.
+    """
+    try:
+        from income.models import IncomeCategory
+
+        # Normalizar el nombre (primera letra mayúscula, resto minúsculas)
+        normalized_name = name.strip().capitalize()
+
+        # Verificar si ya existe
+        if IncomeCategory.objects.filter(name=normalized_name).exists():
+            category = IncomeCategory.objects.get(name=normalized_name)
+            return {
+                "status": "info",
+                "message": f"La categoría de ingreso '{normalized_name}' ya existe",
+                "id": str(category.id)
+            }
+
+        # Crear nueva categoría
+        category, created = IncomeCategory.objects.get_or_create(
+            name=normalized_name)
+
+        return {
+            "status": "success",
+            "message": f"Categoría de ingreso '{normalized_name}' creada exitosamente",
+            "id": str(category.id)
+        }
+    except Exception as e:
+        logger.error(f"Error al crear categoría de ingreso: {e}")
+        return {
+            "status": "error",
+            "message": f"Error al crear categoría de ingreso: {str(e)}"
+        }
+
+
+@tool
 def create_expense(
     user_external_id: str,
     amount: float,
@@ -583,9 +622,8 @@ def create_income(
         Mensaje de confirmación
     """
     try:
-        from income.models import Income
+        from income.models import Income, IncomeCategory
         from users.models import User
-        from categories.models import Category
         from django.utils import timezone
         import json
         from datetime import datetime
@@ -602,8 +640,8 @@ def create_income(
         if not user:
             return f"Error: Usuario no encontrado."
 
-        # Obtener o crear la categoría
-        category_obj, created = Category.objects.get_or_create(
+        # Obtener o crear la categoría de ingreso
+        category_obj, created = IncomeCategory.objects.get_or_create(
             name=category.title())
 
         # Fecha de recepción
@@ -655,8 +693,7 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
     Actualiza un ingreso existente.
     """
     try:
-        from income.models import Income
-        from categories.models import Category
+        from income.models import Income, IncomeCategory
         from datetime import datetime
         import json
 
@@ -664,7 +701,7 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
         if not income:
             return f"Error: Ingreso con ID {income_id} no encontrado."
 
-        category_obj, created = Category.objects.get_or_create(
+        category_obj, created = IncomeCategory.objects.get_or_create(
             name=category.title())
 
         income.amount = amount
@@ -833,9 +870,8 @@ def get_incomes_by_category(user_external_id: str, category: str, start_date: st
     Obtiene los ingresos de una categoría específica en un rango de fechas.
     """
     try:
-        from income.models import Income
+        from income.models import Income, IncomeCategory
         from users.models import User
-        from categories.models import Category
         from datetime import datetime
         from django.db.models import Sum
 
@@ -844,7 +880,7 @@ def get_incomes_by_category(user_external_id: str, category: str, start_date: st
             return {"error": "Usuario no encontrado"}
 
         # Buscar la categoría
-        categories = Category.objects.filter(name__icontains=category)
+        categories = IncomeCategory.objects.filter(name__icontains=category)
         if not categories.exists():
             return {"error": f"Categoría {category} no encontrada"}
 

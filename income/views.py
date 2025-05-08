@@ -6,8 +6,16 @@ from django.db.models import Sum
 from datetime import datetime, timedelta
 from django.utils import timezone
 
-from .models import Income
-from .serializers import IncomeSerializer
+from .models import Income, IncomeCategory
+from .serializers import IncomeSerializer, IncomeCategorySerializer
+
+
+class IncomeCategoryViewSet(viewsets.ModelViewSet):
+    serializer_class = IncomeCategorySerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return IncomeCategory.objects.all()
 
 
 class IncomeViewSet(viewsets.ModelViewSet):
