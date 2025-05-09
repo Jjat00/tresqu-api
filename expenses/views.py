@@ -39,13 +39,18 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         return Expense.objects.filter(user=self.request.user)
 
     def _get_user_timezone(self, request):
-        """Obtiene la zona horaria del usuario desde los parámetros o usa el predeterminado"""
-        # El parámetro debe ser un string de zona horaria válido o un offset en horas
+        """Obtiene la zona horaria del usuario con el siguiente orden de prioridad:
+        1. Parámetro de la petición (temporal, sobrescribe las otras)
+        2. Configuración guardada del usuario
+        3. Valor por defecto (America/Bogota)
+        """
+        # Prioridad 1: Parámetro en la petición
         tz_param = request.query_params.get('timezone')
         if tz_param:
             try:
                 # Intenta interpretar como nombre de zona horaria (ej. 'America/Bogota')
                 user_timezone = pytz.timezone(tz_param)
+                return user_timezone
             except pytz.exceptions.UnknownTimeZoneError:
                 try:
                     # Intenta interpretar como offset numérico (ej. '-5')
@@ -54,14 +59,22 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                     # Crear zona horaria con el offset
                     user_timezone = pytz.FixedOffset(
                         offset.total_seconds() // 60)
+                    return user_timezone
                 except ValueError:
-                    # Si hay error, usar predeterminado
-                    user_timezone = DEFAULT_TIMEZONE
-        else:
-            # Si no se proporciona, usar predeterminado (UTC-5)
-            user_timezone = DEFAULT_TIMEZONE
+                    # Si hay error, continuar con la siguiente prioridad
+                    pass
 
-        return user_timezone
+        # Prioridad 2: Zona horaria guardada del usuario
+        if request.user and request.user.is_authenticated:
+            try:
+                user_timezone = pytz.timezone(request.user.timezone)
+                return user_timezone
+            except (pytz.exceptions.UnknownTimeZoneError, AttributeError):
+                # Si hay error o el usuario no tiene timezone configurado, continuar
+                pass
+
+        # Valor por defecto
+        return DEFAULT_TIMEZONE
 
     def _get_local_datetime(self, request):
         """Obtiene la fecha y hora actual en la zona horaria del usuario"""

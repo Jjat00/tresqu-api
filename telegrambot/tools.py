@@ -18,6 +18,7 @@ from .currencies import is_valid_currency
 # Import embeddings service
 from datetime import datetime, timedelta
 from django.db import models
+import pytz
 
 embeddings = OpenAIEmbeddings(
     api_key=settings.OPENAI_API_KEY,
@@ -41,20 +42,40 @@ class ExpenseList(BaseModel):
 
 
 @tool
-def get_current_date() -> str:
-    """Devuelve la fecha actual en formato YYYY‑MM‑DD."""
-    # Asegurémonos de usar timezone para tener en cuenta la zona horaria configurada
+def get_current_date(user_external_id: str = None) -> str:
+    """Devuelve la fecha actual en formato YYYY‑MM‑DD, considerando la zona horaria del usuario."""
+    # Si se proporciona un ID de usuario, usar su zona horaria
+    if user_external_id:
+        try:
+            user = User.objects.get(external_id=user_external_id)
+            user_tz = pytz.timezone(user.timezone)
+            return timezone.now().astimezone(user_tz).strftime("%Y-%m-%d")
+        except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
+            logger.warning(f"Error al obtener zona horaria del usuario: {e}")
+
+    # Si no hay usuario o hubo error, usar UTC
     return timezone.now().strftime("%Y-%m-%d")
 
 
 @tool
-def parse_relative_date(date_text: str) -> str:
+def parse_relative_date(date_text: str, user_external_id: str = None) -> str:
     """
     Convierte una referencia temporal relativa (ayer, el sábado, etc.) en una fecha específica.
-    Toma como referencia la fecha actual.
+    Toma como referencia la fecha actual en la zona horaria del usuario si está disponible.
     Devuelve la fecha en formato YYYY-MM-DD.
     """
-    today = datetime.now()
+    # Obtener la fecha actual en la zona horaria del usuario
+    if user_external_id:
+        try:
+            user = User.objects.get(external_id=user_external_id)
+            user_tz = pytz.timezone(user.timezone)
+            today = timezone.now().astimezone(user_tz).replace(tzinfo=None)
+        except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
+            logger.warning(f"Error al obtener zona horaria del usuario: {e}")
+            today = datetime.now()
+    else:
+        today = datetime.now()
+
     date_text = date_text.lower().strip()
 
     # Referencias básicas

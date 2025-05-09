@@ -7,6 +7,7 @@ import tempfile
 import os
 import asyncio
 from django.db import transaction, connections, connection, InterfaceError
+import pytz
 
 from django.conf import settings
 from users.models import User
@@ -25,6 +26,7 @@ logger = logging.getLogger(__name__)
 ESPERANDO_TELEFONO = 0
 ESPERANDO_MONEDA = 1
 ESPERANDO_MENSAJE_BROADCAST = 2
+ESPERANDO_ZONA_HORARIA = 3  # Nuevo estado
 
 
 # Funciones síncronas para operaciones de base de datos
@@ -232,6 +234,120 @@ get_all_telegram_chats_async = sync_to_async(get_all_telegram_chats)
 is_admin_user_async = sync_to_async(is_admin_user)
 
 
+# Añadir funciones síncronas para manejar la zona horaria
+def update_user_timezone(user, timezone_str):
+    """Actualiza la zona horaria del usuario"""
+    user.timezone = timezone_str
+    user.save()
+    return user
+
+
+# Añadir a las funciones asíncronas
+update_user_timezone_async = sync_to_async(update_user_timezone)
+
+
+# Zonas horarias principales para América Latina y algunas ciudades importantes
+COMMON_TIMEZONES = [
+    ('America/Bogota', 'Colombia, Ecuador, Perú, Panamá (UTC-5)'),
+    ('America/Mexico_City', 'México (UTC-6)'),
+    ('America/Santiago', 'Chile (UTC-4/UTC-3)'),
+    ('America/Argentina/Buenos_Aires', 'Argentina (UTC-3)'),
+    ('America/Caracas', 'Venezuela (UTC-4)'),
+    ('America/La_Paz', 'Bolivia (UTC-4)'),
+    ('America/Lima', 'Perú (UTC-5)'),
+    ('America/Sao_Paulo', 'Brasil - São Paulo (UTC-3)'),
+    ('Europe/Madrid', 'España (UTC+1/UTC+2)'),
+    ('America/New_York', 'Estados Unidos - Este (UTC-5/UTC-4)'),
+    ('America/Los_Angeles', 'Estados Unidos - Oeste (UTC-8/UTC-7)'),
+]
+
+
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Permite al usuario seleccionar o actualizar su zona horaria"""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+
+    # Obtener el usuario de la base de datos
+    user_id, db_user = await get_chat_user_async(chat_id)
+
+    if not db_user:
+        await update.message.reply_text(
+            "Primero debes registrarte para configurar tu zona horaria. "
+            "Usa el comando /registrar para comenzar."
+        )
+        return ConversationHandler.END
+
+    # Crear un teclado con las zonas horarias principales
+    keyboard = []
+    for tz_code, tz_name in COMMON_TIMEZONES:
+        keyboard.append([InlineKeyboardButton(
+            tz_name, callback_data=f"tz:{tz_code}")])
+
+    # Añadir un botón para cancelar
+    keyboard.append([InlineKeyboardButton(
+        "Cancelar", callback_data="tz:cancel")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await update.message.reply_text(
+        f"👋 Hola {user.first_name}!\n\n"
+        f"Selecciona tu zona horaria para mostrar las fechas y horas correctamente:",
+        reply_markup=reply_markup
+    )
+
+    return ESPERANDO_ZONA_HORARIA
+
+
+async def handle_timezone_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Procesa la selección de zona horaria del usuario"""
+    query = update.callback_query
+    await query.answer()
+
+    # Extraer la zona horaria seleccionada del callback_data
+    callback_data = query.data
+
+    if callback_data == "tz:cancel":
+        await query.edit_message_text("Operación cancelada.")
+        return ConversationHandler.END
+
+    timezone_code = callback_data.replace("tz:", "")
+
+    # Obtener el usuario
+    chat_id = update.effective_chat.id
+    user_id, db_user = await get_chat_user_async(chat_id)
+
+    if not db_user:
+        await query.edit_message_text(
+            "No se pudo actualizar tu zona horaria. Por favor, registrate primero."
+        )
+        return ConversationHandler.END
+
+    # Actualizar la zona horaria del usuario
+    try:
+        # Verificar que la zona horaria es válida
+        pytz.timezone(timezone_code)
+
+        # Actualizar en la base de datos
+        updated_user = await update_user_timezone_async(db_user, timezone_code)
+
+        # Encontrar el nombre descriptivo de la zona horaria
+        tz_name = next(
+            (name for code, name in COMMON_TIMEZONES if code == timezone_code), timezone_code)
+
+        await query.edit_message_text(
+            f"✅ Tu zona horaria ha sido actualizada a:\n"
+            f"{tz_name}\n\n"
+            f"Ahora todas las fechas y horas se mostrarán correctamente según tu ubicación."
+        )
+    except Exception as e:
+        logger.error(f"Error al actualizar la zona horaria: {e}")
+        await query.edit_message_text(
+            f"❌ No se pudo actualizar tu zona horaria. Por favor, intenta nuevamente."
+        )
+
+    return ConversationHandler.END
+
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Envía un mensaje cuando se emite el comando /start."""
     user = update.effective_user
@@ -249,23 +365,31 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         f"en todas nuestras plataformas, incluyendo futuras integraciones con WhatsApp."
     )
 
+    # Verificar si el usuario ya está registrado
+    user_id, db_user = await get_chat_user_async(chat_id)
+
+    # Enviar el mensaje de bienvenida
     await update.message.reply_text(welcome_message)
 
-    # Registrar el mensaje enviado
-    await create_message_async(
-        chat,
-        str(update.message.message_id),
-        "incoming",
-        update.message.text
-    )
+    # Si el usuario está registrado pero no tiene zona horaria configurada, preguntar
+    if db_user and not hasattr(db_user, 'timezone'):
+        # Crear un teclado con las zonas horarias principales
+        keyboard = []
+        for tz_code, tz_name in COMMON_TIMEZONES:
+            keyboard.append([InlineKeyboardButton(
+                tz_name, callback_data=f"tz:{tz_code}")])
 
-    # Registrar respuesta
-    await create_message_async(
-        chat,
-        "system",
-        "outgoing",
-        welcome_message
-    )
+        # Añadir un botón para cancelar
+        keyboard.append([InlineKeyboardButton(
+            "Cancelar", callback_data="tz:cancel")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "Para ofrecerte una mejor experiencia, necesito saber tu zona horaria. "
+            "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
+            reply_markup=reply_markup
+        )
 
 
 async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -551,88 +675,74 @@ async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, currency_code: str) -> int:
-    """Completa el proceso de registro con la información recopilada."""
-    if update.callback_query:
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        message_obj = update.callback_query.message
-    else:
-        chat_id = update.effective_chat.id
-        user = update.effective_user
-        message_obj = update.message
+    """Completa el proceso de registro y configura la moneda predeterminada."""
+    user = update.effective_user
+    chat_id = update.effective_chat.id
+    phone_number = context.user_data.get('phone_number')
 
-    phone_number = context.user_data.get("phone_number")
-    external_id = f"telegram_{user.id}"
+    if not phone_number:
+        await update.message.reply_text(
+            "No se encontró un número de teléfono. Por favor, inicia el registro nuevamente con /registrar."
+        )
+        return ConversationHandler.END
 
     # Obtener o crear el chat
-    chat, _ = await get_or_create_chat_async(chat_id)
+    chat, created = await get_or_create_chat_async(chat_id)
 
-    # Verificar si existe un usuario con este número de teléfono
-    existing_user = await get_user_by_phone_number_async(phone_number)
+    # Buscar si ya existe un usuario con este número de teléfono
+    db_user = await get_user_by_phone_number_async(phone_number)
 
-    if existing_user:
-        # Si el usuario ya existe, asociar el chat con ese usuario y actualizar moneda
-        await update_chat_user_async(chat, existing_user)
-        await update_user_currency_async(existing_user, currency_code)
-        message = (
-            f"¡Tu cuenta ha sido conectada exitosamente!\n"
-            f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
+    # Si no existe, crear un nuevo usuario
+    if not db_user:
+        db_user = await create_user_async(
+            external_id=str(user.id),
+            platform="telegram",
+            first_name=user.first_name,
+            username=user.username,
+            phone_number=phone_number,
+            default_currency=currency_code
         )
-        logger.info(
-            f"Usuario reconectado con moneda {currency_code}: {phone_number}")
+        action = "creada"
     else:
-        # Verificar si ya existe un usuario con este external_id
-        existing_user_by_id = await get_user_by_external_id_async(external_id)
+        # Si existe, actualizar la moneda predeterminada
+        db_user = await update_user_currency_async(db_user, currency_code)
+        action = "actualizada"
 
-        if existing_user_by_id:
-            # Si existe un usuario con este ID, actualizar su número y moneda
-            existing_user_by_id.phone_number = phone_number
-            existing_user_by_id.default_currency = currency_code
-            await sync_to_async(existing_user_by_id.save)()
-            await update_chat_user_async(chat, existing_user_by_id)
-            message = (
-                f"¡Tu cuenta ha sido actualizada con tu número de teléfono y moneda predeterminada!\n"
-                f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
-            )
-            logger.info(
-                f"Usuario actualizado con número y moneda {currency_code}: {phone_number}")
-        else:
-            # Crear nuevo usuario con número de teléfono y moneda
-            try:
-                new_user = await create_user_async(
-                    external_id,
-                    "telegram",
-                    user.first_name,
-                    user.username,
-                    phone_number,
-                    currency_code
-                )
-                await update_chat_user_async(chat, new_user)
-                message = (
-                    f"¡Tu cuenta ha sido creada exitosamente!\n"
-                    f"Has seleccionado {currency_code} ({get_currency_name(currency_code)}) como tu moneda predeterminada."
-                )
-                logger.info(
-                    f"Nuevo usuario creado con número y moneda {currency_code}: {phone_number}")
-            except Exception as e:
-                logger.error(f"Error al crear usuario: {e}")
-                message = "Lo siento, ocurrió un error al crear tu cuenta. Por favor, intenta de nuevo más tarde."
+    # Asociar el usuario al chat
+    await update_chat_user_async(chat, db_user)
 
-    # Enviar mensaje de confirmación
-    if update.callback_query:
-        await update.callback_query.edit_message_text(message)
-    else:
-        await message_obj.reply_text(message, reply_markup=ReplyKeyboardRemove())
-
-    # Registrar respuesta
-    await create_message_async(
-        chat,
-        "system",
-        "outgoing",
-        message
+    await update.message.reply_text(
+        f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
+        f"Moneda predeterminada: {currency_code} ({get_currency_name(currency_code)})\n\n"
+        f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
+        f"- \"Gasté 50 en comida\"\n"
+        f"- \"Compré café por 3.5\"\n"
+        f"- \"Pagué la cuenta de luz, 75\"\n\n"
+        f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda"
     )
 
-    # Finalizar la conversación
+    # Preguntar por la zona horaria si no está configurada
+    if not hasattr(db_user, 'timezone') or not db_user.timezone:
+        # Crear un teclado con las zonas horarias principales
+        keyboard = []
+        for tz_code, tz_name in COMMON_TIMEZONES:
+            keyboard.append([InlineKeyboardButton(
+                tz_name, callback_data=f"tz:{tz_code}")])
+
+        # Añadir un botón para cancelar
+        keyboard.append([InlineKeyboardButton(
+            "Más tarde", callback_data="tz:cancel")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await update.message.reply_text(
+            "Para finalizar, por favor selecciona tu zona horaria. "
+            "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
+            reply_markup=reply_markup
+        )
+
+        return ESPERANDO_ZONA_HORARIA
+
     return ConversationHandler.END
 
 
@@ -913,54 +1023,70 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
 
 
 def setup_bot():
-    """Configura y devuelve la aplicación del bot."""
-    if not settings.TELEGRAM_BOT_TOKEN:
-        logger.error(
-            "¡Token de bot no configurado! Revisa la variable TELEGRAM_BOT_TOKEN")
-        raise ValueError("Token de Telegram no configurado")
-
-    logger.info("Inicializando bot de Telegram")
+    """Configura la aplicación del bot con todos los manejadores"""
+    # Configurar el token desde settings.py
     application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
 
-    # Comandos básicos
-    application.add_handler(CommandHandler("start", start))
-
-    # Manejador de conversación para registro
+    # Registrar el conversation handler para el registro
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("registrar", register_user)],
         states={
-            ESPERANDO_TELEFONO: [MessageHandler(filters.CONTACT, handle_contact)],
+            ESPERANDO_TELEFONO: [
+                MessageHandler(filters.CONTACT, handle_contact),
+            ],
             ESPERANDO_MONEDA: [
                 CallbackQueryHandler(
-                    handle_currency_selection, pattern=r"^currency_"),
+                    handle_currency_selection, pattern=r"^[A-Z]{3}$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
                                handle_currency_text),
             ],
+            ESPERANDO_ZONA_HORARIA: [
+                CallbackQueryHandler(
+                    handle_timezone_selection, pattern=r"^tz:"),
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancelar", cancel)],
     )
     application.add_handler(conv_handler)
 
-    # Manejador de conversación para broadcast
+    # Registrar el conversation handler para broadcast (admin)
     broadcast_handler = ConversationHandler(
         entry_points=[CommandHandler("broadcast", start_broadcast)],
         states={
             ESPERANDO_MENSAJE_BROADCAST: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               send_broadcast_message)
+                               send_broadcast_message),
             ],
         },
-        fallbacks=[CommandHandler("cancel", cancel)],
+        fallbacks=[CommandHandler("cancelar", cancel)],
     )
     application.add_handler(broadcast_handler)
+
+    # Manejar el comando /timezone independientemente
+    timezone_handler = ConversationHandler(
+        entry_points=[CommandHandler("timezone", timezone_command)],
+        states={
+            ESPERANDO_ZONA_HORARIA: [
+                CallbackQueryHandler(
+                    handle_timezone_selection, pattern=r"^tz:"),
+            ],
+        },
+        fallbacks=[CommandHandler("cancelar", cancel)],
+    )
+    application.add_handler(timezone_handler)
+
+    # Comandos básicos
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("moneda", register_user))
+    application.add_handler(CommandHandler("help", start))
+    application.add_handler(CommandHandler("ayuda", start))
 
     # Mensajes de voz
     application.add_handler(MessageHandler(
         filters.VOICE, handle_voice_message))
 
-    # Mensajes de texto no comandos
+    # Todos los demás mensajes de texto
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
 
-    logger.info("Bot de Telegram inicializado correctamente")
     return application

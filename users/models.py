@@ -133,6 +133,9 @@ class User(models.Model):
     phone_number = models.CharField(max_length=20, blank=True, null=True)
     default_currency = models.CharField(
         max_length=3, default='USD', help_text="Código ISO 4217 de la moneda por defecto")
+    timezone = models.CharField(
+        max_length=50, default='America/Bogota',
+        help_text="Zona horaria del usuario (ej: America/Bogota, America/New_York)")
     # Campo para almacenar embeddings (opcional)
     embedding = VectorField(dimensions=1536, null=True)
 
