@@ -11,12 +11,16 @@ from datetime import timedelta, datetime
 import logging
 import calendar
 from django.db.models import Q
+import pytz
 
 from .models import Expense, Category
 from .serializers import ExpenseSerializer
 
 # Configurar logger
 logger = logging.getLogger(__name__)
+
+# Zona horaria predeterminada (UTC-5)
+DEFAULT_TIMEZONE = pytz.timezone('America/Bogota')  # Equivalente a UTC-5
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -33,6 +37,71 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         logger.info(f"Usuario autenticado: {self.request.user.id}")
         return Expense.objects.filter(user=self.request.user)
+
+    def _get_user_timezone(self, request):
+        """Obtiene la zona horaria del usuario desde los parámetros o usa el predeterminado"""
+        # El parámetro debe ser un string de zona horaria válido o un offset en horas
+        tz_param = request.query_params.get('timezone')
+        if tz_param:
+            try:
+                # Intenta interpretar como nombre de zona horaria (ej. 'America/Bogota')
+                user_timezone = pytz.timezone(tz_param)
+            except pytz.exceptions.UnknownTimeZoneError:
+                try:
+                    # Intenta interpretar como offset numérico (ej. '-5')
+                    offset_hours = int(tz_param)
+                    offset = timedelta(hours=offset_hours)
+                    # Crear zona horaria con el offset
+                    user_timezone = pytz.FixedOffset(
+                        offset.total_seconds() // 60)
+                except ValueError:
+                    # Si hay error, usar predeterminado
+                    user_timezone = DEFAULT_TIMEZONE
+        else:
+            # Si no se proporciona, usar predeterminado (UTC-5)
+            user_timezone = DEFAULT_TIMEZONE
+
+        return user_timezone
+
+    def _get_local_datetime(self, request):
+        """Obtiene la fecha y hora actual en la zona horaria del usuario"""
+        user_timezone = self._get_user_timezone(request)
+        # Obtener datetime actual en UTC
+        utc_now = timezone.now()
+        # Convertir a la zona horaria del usuario
+        local_now = utc_now.astimezone(user_timezone)
+        return local_now
+
+    def _convert_to_utc(self, local_date, is_end_date=False, user_timezone=None):
+        """
+        Convierte una fecha local a UTC para consultas en la base de datos
+
+        Args:
+            local_date: Fecha en la zona horaria local (solo fecha, sin hora)
+            is_end_date: Si es True, se establece la hora al final del día (23:59:59)
+            user_timezone: La zona horaria del usuario, si es None se usa el predeterminado
+
+        Returns:
+            Fecha y hora en UTC para filtrar correctamente en la base de datos
+        """
+        if user_timezone is None:
+            user_timezone = DEFAULT_TIMEZONE
+
+        # Establecer hora según si es inicio o fin del día
+        if is_end_date:
+            # Fin del día (23:59:59)
+            local_datetime = datetime.combine(local_date, datetime.max.time())
+        else:
+            # Inicio del día (00:00:00)
+            local_datetime = datetime.combine(local_date, datetime.min.time())
+
+        # Asignar zona horaria
+        local_datetime = user_timezone.localize(local_datetime)
+
+        # Convertir a UTC
+        utc_datetime = local_datetime.astimezone(pytz.UTC)
+
+        return utc_datetime
 
     @action(detail=False, methods=['get'])
     def by_category(self, request):
@@ -290,12 +359,19 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
         - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
         - limit: Número máximo de categorías a mostrar (opcional, por defecto muestra todas)
+        - timezone: Zona horaria del usuario (opcional, por defecto 'America/Bogota' o UTC-5)
         """
         logger.info(
             f"Endpoint /donut_chart_data/ accedido por usuario: {request.user}")
 
         # Obtener queryset base (filtrado por usuario)
         queryset = self.get_queryset()
+
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        # Obtener fecha/hora actual en la zona horaria del usuario
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
 
         # Filtrar por categoría si se proporciona
         category_id = request.query_params.get('category_id')
@@ -312,55 +388,137 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         # Aplicar filtro de fecha
         date_filter = request.query_params.get('date_filter', 'all')
-        today = timezone.now().date()
 
         if date_filter == 'today':
-            # Hoy
+            # Hoy (en la zona horaria del usuario)
             start_date = today
             end_date = today
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
 
         elif date_filter == 'yesterday':
-            # Ayer
+            # Ayer (en la zona horaria del usuario)
             start_date = today - timedelta(days=1)
             end_date = start_date
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
 
         elif date_filter == 'current_month':
-            # Mes actual
+            # Mes actual (en la zona horaria del usuario)
             start_date = today.replace(day=1)
-            next_month = today.month + 1 if today.month < 12 else 1
-            next_month_year = today.year if today.month < 12 else today.year + 1
+            if today.month == 12:
+                next_month = 1
+                next_month_year = today.year + 1
+            else:
+                next_month = today.month + 1
+                next_month_year = today.year
+
             end_date = datetime(next_month_year, next_month,
                                 1).date() - timedelta(days=1)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_month':
-            # Mes anterior
+            # Mes anterior (en la zona horaria del usuario)
             first_day_current = today.replace(day=1)
             last_day_previous = first_day_current - timedelta(days=1)
             start_date = last_day_previous.replace(day=1)
             end_date = last_day_previous
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'current_week':
-            # Semana actual (lunes a domingo)
+            # Semana actual (lunes a domingo en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_week':
-            # Semana anterior (lunes a domingo)
+            # Semana anterior (en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday() + 7)
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'current_year':
-            # Año actual
+            # Año actual (en la zona horaria del usuario)
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_year':
-            # Año anterior
+            # Año anterior (en la zona horaria del usuario)
             start_date = datetime(today.year - 1, 1, 1).date()
             end_date = datetime(today.year - 1, 12, 31).date()
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'custom':
-            # Filtro personalizado
+            # Filtro personalizado (considerando zona horaria del usuario)
             try:
                 start_date = datetime.strptime(
                     request.query_params.get('start_date'),
@@ -376,6 +534,17 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                         {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                # Convertir a UTC para filtrar correctamente
+                start_datetime = self._convert_to_utc(
+                    start_date, False, user_timezone)
+                end_datetime = self._convert_to_utc(
+                    end_date, True, user_timezone)
+
+                queryset = queryset.filter(
+                    timestamp__gte=start_datetime,
+                    timestamp__lte=end_datetime
+                )
             except (ValueError, TypeError):
                 return Response(
                     {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
@@ -385,15 +554,6 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             # 'all' o cualquier otro valor: sin filtro de fecha
             start_date = None
             end_date = None
-
-        # Aplicar filtro de fecha al queryset
-        if start_date and end_date:
-            logger.info(
-                f"Filtrando por rango de fecha: {start_date} a {end_date}")
-            queryset = queryset.filter(
-                timestamp__date__gte=start_date,
-                timestamp__date__lte=end_date
-            )
 
         # Si no hay gastos, devolver respuesta vacía
         if not queryset.exists():
@@ -482,12 +642,19 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
         - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
         - limit: Número máximo de categorías a mostrar (opcional, por defecto muestra todas)
+        - timezone: Zona horaria del usuario (opcional, por defecto 'America/Bogota' o UTC-5)
         """
         logger.info(
             f"Endpoint /bar_chart_data/ accedido por usuario: {request.user}")
 
         # Obtener queryset base (filtrado por usuario)
         queryset = self.get_queryset()
+
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        # Obtener fecha/hora actual en la zona horaria del usuario
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
 
         # Filtrar por categoría si se proporciona
         category_id = request.query_params.get('category_id')
@@ -504,55 +671,137 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         # Aplicar filtro de fecha
         date_filter = request.query_params.get('date_filter', 'all')
-        today = timezone.now().date()
 
         if date_filter == 'today':
-            # Hoy
+            # Hoy (en la zona horaria del usuario)
             start_date = today
             end_date = today
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
 
         elif date_filter == 'yesterday':
-            # Ayer
+            # Ayer (en la zona horaria del usuario)
             start_date = today - timedelta(days=1)
             end_date = start_date
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
 
         elif date_filter == 'current_month':
-            # Mes actual
+            # Mes actual (en la zona horaria del usuario)
             start_date = today.replace(day=1)
-            next_month = today.month + 1 if today.month < 12 else 1
-            next_month_year = today.year if today.month < 12 else today.year + 1
+            if today.month == 12:
+                next_month = 1
+                next_month_year = today.year + 1
+            else:
+                next_month = today.month + 1
+                next_month_year = today.year
+
             end_date = datetime(next_month_year, next_month,
                                 1).date() - timedelta(days=1)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_month':
-            # Mes anterior
+            # Mes anterior (en la zona horaria del usuario)
             first_day_current = today.replace(day=1)
             last_day_previous = first_day_current - timedelta(days=1)
             start_date = last_day_previous.replace(day=1)
             end_date = last_day_previous
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'current_week':
-            # Semana actual (lunes a domingo)
+            # Semana actual (lunes a domingo en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_week':
-            # Semana anterior (lunes a domingo)
+            # Semana anterior (en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday() + 7)
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'current_year':
-            # Año actual
+            # Año actual (en la zona horaria del usuario)
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'previous_year':
-            # Año anterior
+            # Año anterior (en la zona horaria del usuario)
             start_date = datetime(today.year - 1, 1, 1).date()
             end_date = datetime(today.year - 1, 12, 31).date()
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime,
+                timestamp__lte=end_datetime
+            )
+
         elif date_filter == 'custom':
-            # Filtro personalizado
+            # Filtro personalizado (considerando zona horaria del usuario)
             try:
                 start_date = datetime.strptime(
                     request.query_params.get('start_date'),
@@ -568,24 +817,31 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                         {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                # Convertir a UTC para filtrar correctamente
+                start_datetime = self._convert_to_utc(
+                    start_date, False, user_timezone)
+                end_datetime = self._convert_to_utc(
+                    end_date, True, user_timezone)
+
+                queryset = queryset.filter(
+                    timestamp__gte=start_datetime,
+                    timestamp__lte=end_datetime
+                )
             except (ValueError, TypeError):
                 return Response(
                     {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
                     status=status.HTTP_400_BAD_REQUEST
                 )
         else:
-            # 'all' o cualquier otro valor: sin filtro de fecha
-            start_date = None
-            end_date = None
+            # 'all' o cualquier otro valor: usar último año
+            end_date = today
+            start_date = end_date - timedelta(days=365)
 
-        # Aplicar filtro de fecha al queryset
-        if start_date and end_date:
-            logger.info(
-                f"Filtrando por rango de fecha: {start_date} a {end_date}")
-            queryset = queryset.filter(
-                timestamp__date__gte=start_date,
-                timestamp__date__lte=end_date
-            )
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
 
         # Si no hay gastos, devolver respuesta vacía
         if not queryset.exists():
@@ -664,12 +920,19 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
         - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
         - group_by: Agrupación temporal (opcional, valores: 'day', 'week', 'month', por defecto varía según el filtro)
+        - timezone: Zona horaria del usuario (opcional, por defecto 'America/Bogota' o UTC-5)
         """
         logger.info(
             f"Endpoint /line_chart_data/ accedido por usuario: {request.user}")
 
         # Obtener queryset base (filtrado por usuario)
         queryset = self.get_queryset()
+
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        # Obtener fecha/hora actual en la zona horaria del usuario
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
 
         # Filtrar por categoría si se proporciona
         category_id = request.query_params.get('category_id')
@@ -686,55 +949,97 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         # Aplicar filtro de fecha
         date_filter = request.query_params.get('date_filter', 'all')
-        today = timezone.now().date()
 
         if date_filter == 'today':
-            # Hoy
+            # Hoy (en la zona horaria del usuario)
             start_date = today
             end_date = today
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
 
         elif date_filter == 'yesterday':
-            # Ayer
+            # Ayer (en la zona horaria del usuario)
             start_date = today - timedelta(days=1)
             end_date = start_date
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
 
         elif date_filter == 'current_month':
-            # Mes actual
+            # Mes actual (en la zona horaria del usuario)
             start_date = today.replace(day=1)
-            next_month = today.month + 1 if today.month < 12 else 1
-            next_month_year = today.year if today.month < 12 else today.year + 1
+            if today.month == 12:
+                next_month = 1
+                next_month_year = today.year + 1
+            else:
+                next_month = today.month + 1
+                next_month_year = today.year
+
             end_date = datetime(next_month_year, next_month,
                                 1).date() - timedelta(days=1)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'previous_month':
-            # Mes anterior
+            # Mes anterior (en la zona horaria del usuario)
             first_day_current = today.replace(day=1)
             last_day_previous = first_day_current - timedelta(days=1)
             start_date = last_day_previous.replace(day=1)
             end_date = last_day_previous
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'current_week':
-            # Semana actual (lunes a domingo)
+            # Semana actual (lunes a domingo en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'previous_week':
-            # Semana anterior (lunes a domingo)
+            # Semana anterior (en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday() + 7)
             end_date = start_date + timedelta(days=6)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'current_year':
-            # Año actual
+            # Año actual (en la zona horaria del usuario)
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'previous_year':
-            # Año anterior
+            # Año anterior (en la zona horaria del usuario)
             start_date = datetime(today.year - 1, 1, 1).date()
             end_date = datetime(today.year - 1, 12, 31).date()
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         elif date_filter == 'custom':
-            # Filtro personalizado
+            # Filtro personalizado (considerando zona horaria del usuario)
             try:
                 start_date = datetime.strptime(
                     request.query_params.get('start_date'),
@@ -750,6 +1055,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                         {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
                         status=status.HTTP_400_BAD_REQUEST
                     )
+
+                # Convertir a UTC para filtrar correctamente
+                start_datetime = self._convert_to_utc(
+                    start_date, False, user_timezone)
+                end_datetime = self._convert_to_utc(
+                    end_date, True, user_timezone)
+
             except (ValueError, TypeError):
                 return Response(
                     {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
@@ -760,10 +1072,15 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             end_date = today
             start_date = end_date - timedelta(days=365)
 
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
         # Aplicar filtro de fecha al queryset
         queryset = queryset.filter(
-            timestamp__date__gte=start_date,
-            timestamp__date__lte=end_date
+            timestamp__gte=start_datetime,
+            timestamp__lte=end_datetime
         )
 
         # Si no hay gastos, devolver respuesta vacía
@@ -815,11 +1132,14 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 return date.strftime('%b %Y')
 
         # Función para obtener la clave de agrupación temporal
-        def get_time_key(date_time, group):
-            date = date_time.date()
+        def get_time_key(timestamp, group):
+            # Convertir de UTC a zona horaria del usuario para agrupación correcta
+            local_datetime = timestamp.astimezone(user_timezone)
+            date = local_datetime.date()
+
             if group == 'hour':
                 # Redondear a la hora
-                return datetime(date.year, date.month, date.day, date_time.hour, 0, 0)
+                return datetime(date.year, date.month, date.day, local_datetime.hour, 0, 0)
             elif group == 'day':
                 return date
             elif group == 'week':
@@ -838,11 +1158,13 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         if group_by == 'hour' and (end_date - start_date).days <= 1:
             # Horas para hoy o ayer (solo si es un día)
-            start_datetime = datetime.combine(start_date, datetime.min.time())
-            end_datetime = datetime.combine(end_date, datetime.max.time())
-            current = start_datetime
+            start_datetime_local = datetime.combine(
+                start_date, datetime.min.time())
+            end_datetime_local = datetime.combine(
+                end_date, datetime.max.time())
+            current = start_datetime_local
 
-            while current <= end_datetime:
+            while current <= end_datetime_local:
                 label = format_date_label(current, group_by)
                 time_labels.append(label)
                 time_totals[label] = 0
@@ -909,6 +1231,396 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             }],
             'filter_summary': filter_summary,
             'total_amount': round(sum(totals_data), 2)
+        }
+
+        return Response(response_data)
+
+    @action(detail=False, methods=['get'])
+    def stacked_bar_chart_data(self, request):
+        """
+        Obtiene datos para una gráfica de barras apiladas de gastos por categoría y tiempo.
+
+        GET /api/expenses/stacked_bar_chart_data/
+
+        Parámetros:
+        - category_id: ID de la categoría (opcional, si no se proporciona, se incluyen todas las categorías)
+        - date_filter: Filtro de fecha (opcional, valores: 'all', 'today', 'yesterday', 'current_month', 'previous_month', 
+                     'current_week', 'previous_week', 'current_year', 'previous_year', 'custom')
+        - start_date: Fecha de inicio para filtro personalizado (formato: YYYY-MM-DD)
+        - end_date: Fecha de fin para filtro personalizado (formato: YYYY-MM-DD)
+        - limit: Número máximo de categorías a mostrar (opcional, por defecto muestra todas)
+        - group_by: Agrupación temporal (opciones: 'day', 'week', 'month', por defecto ajusta automáticamente)
+        - timezone: Zona horaria del usuario (opcional, por defecto 'America/Bogota' o UTC-5)
+        """
+        logger.info(
+            f"Endpoint /stacked_bar_chart_data/ accedido por usuario: {request.user}")
+
+        # Obtener queryset base (filtrado por usuario)
+        queryset = self.get_queryset()
+
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        # Obtener fecha/hora actual en la zona horaria del usuario
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
+
+        # Filtrar por categoría si se proporciona
+        category_id = request.query_params.get('category_id')
+        if category_id:
+            try:
+                category_id = int(category_id)
+                queryset = queryset.filter(category_id=category_id)
+                logger.info(f"Filtrando por categoría: {category_id}")
+            except ValueError:
+                return Response(
+                    {"error": "ID de categoría inválido"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        # Aplicar filtro de fecha
+        date_filter = request.query_params.get('date_filter', 'all')
+
+        if date_filter == 'today':
+            # Hoy (en la zona horaria del usuario)
+            start_date = today
+            end_date = today
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'yesterday':
+            # Ayer (en la zona horaria del usuario)
+            start_date = today - timedelta(days=1)
+            end_date = start_date
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'current_month':
+            # Mes actual (en la zona horaria del usuario)
+            start_date = today.replace(day=1)
+            if today.month == 12:
+                next_month = 1
+                next_month_year = today.year + 1
+            else:
+                next_month = today.month + 1
+                next_month_year = today.year
+
+            end_date = datetime(next_month_year, next_month,
+                                1).date() - timedelta(days=1)
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'previous_month':
+            # Mes anterior (en la zona horaria del usuario)
+            first_day_current = today.replace(day=1)
+            last_day_previous = first_day_current - timedelta(days=1)
+            start_date = last_day_previous.replace(day=1)
+            end_date = last_day_previous
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'current_week':
+            # Semana actual (lunes a domingo en la zona horaria del usuario)
+            start_date = today - timedelta(days=today.weekday())
+            end_date = start_date + timedelta(days=6)
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'previous_week':
+            # Semana anterior (en la zona horaria del usuario)
+            start_date = today - timedelta(days=today.weekday() + 7)
+            end_date = start_date + timedelta(days=6)
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'current_year':
+            # Año actual (en la zona horaria del usuario)
+            start_date = today.replace(month=1, day=1)
+            end_date = today.replace(month=12, day=31)
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'previous_year':
+            # Año anterior (en la zona horaria del usuario)
+            start_date = datetime(today.year - 1, 1, 1).date()
+            end_date = datetime(today.year - 1, 12, 31).date()
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        elif date_filter == 'custom':
+            # Filtro personalizado (considerando zona horaria del usuario)
+            try:
+                start_date = datetime.strptime(
+                    request.query_params.get('start_date'),
+                    '%Y-%m-%d'
+                ).date()
+                end_date = datetime.strptime(
+                    request.query_params.get('end_date'),
+                    '%Y-%m-%d'
+                ).date()
+
+                if start_date > end_date:
+                    return Response(
+                        {"error": "La fecha de inicio debe ser anterior a la fecha de fin"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Convertir a UTC para filtrar correctamente
+                start_datetime = self._convert_to_utc(
+                    start_date, False, user_timezone)
+                end_datetime = self._convert_to_utc(
+                    end_date, True, user_timezone)
+
+            except (ValueError, TypeError):
+                return Response(
+                    {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # 'all' o cualquier otro valor: usar último año
+            end_date = today
+            start_date = end_date - timedelta(days=365)
+
+            # Convertir a UTC para filtrar correctamente
+            start_datetime = self._convert_to_utc(
+                start_date, False, user_timezone)
+            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        # Aplicar filtro de fecha al queryset
+        queryset = queryset.filter(
+            timestamp__gte=start_datetime,
+            timestamp__lte=end_datetime
+        )
+
+        # Si no hay gastos, devolver respuesta vacía
+        if not queryset.exists():
+            logger.warning(
+                f"No hay gastos para el usuario {request.user} con los filtros aplicados")
+            return Response({
+                'labels': [],
+                'datasets': []
+            })
+
+        # Determinar agrupación temporal según el rango de fecha
+        group_by = request.query_params.get('group_by')
+        if not group_by:
+            # Ajustar agrupación según duración del periodo
+            days_diff = (end_date - start_date).days
+            if days_diff <= 1:
+                group_by = 'hour'
+            elif days_diff <= 31:
+                group_by = 'day'
+            elif days_diff <= 365:
+                group_by = 'week'
+            else:
+                group_by = 'month'
+
+        # Definir función para obtener la clave de agrupación temporal
+        def get_time_key(timestamp, group):
+            # Convertir de UTC a zona horaria del usuario para agrupación correcta
+            local_datetime = timestamp.astimezone(user_timezone)
+            date = local_datetime.date()
+
+            if group == 'hour':
+                return datetime(date.year, date.month, date.day, local_datetime.hour, 0, 0)
+            elif group == 'day':
+                return date
+            elif group == 'week':
+                # Lunes de la semana
+                week_start = date - timedelta(days=date.weekday())
+                return week_start
+            else:  # 'month' (por defecto)
+                return date.replace(day=1)
+
+        # Definir función para formatear la etiqueta de tiempo
+        def format_date_label(date, group):
+            if group == 'hour':
+                return date.strftime('%H:%M')
+            elif group == 'day':
+                return date.strftime('%d/%m')
+            elif group == 'week':
+                # Lunes de la semana
+                week_start = date - timedelta(days=date.weekday())
+                return f"{week_start.strftime('%d/%m')}"
+            else:  # 'month' (por defecto)
+                return date.strftime('%b %Y')
+
+        # Generar períodos de tiempo para el rango de fechas
+        time_periods = []
+        time_labels = []
+
+        if group_by == 'hour' and (end_date - start_date).days <= 1:
+            # Horas para hoy o ayer (solo si es un día)
+            start_datetime_local = datetime.combine(
+                start_date, datetime.min.time())
+            end_datetime_local = datetime.combine(
+                end_date, datetime.max.time())
+            current = start_datetime_local
+
+            while current <= end_datetime_local:
+                time_periods.append(current)
+                time_labels.append(format_date_label(current, group_by))
+                current += timedelta(hours=1)
+
+        elif group_by == 'day':
+            current = start_date
+            while current <= end_date:
+                time_periods.append(current)
+                time_labels.append(format_date_label(current, group_by))
+                current += timedelta(days=1)
+
+        elif group_by == 'week':
+            # Ajustar a lunes
+            current = start_date - timedelta(days=start_date.weekday())
+            while current <= end_date:
+                time_periods.append(current)
+                time_labels.append(format_date_label(current, group_by))
+                current += timedelta(days=7)
+
+        else:  # 'month' (por defecto)
+            current = start_date.replace(day=1)
+            while current <= end_date:
+                time_periods.append(current)
+                time_labels.append(format_date_label(current, group_by))
+
+                # Avanzar al siguiente mes
+                if current.month == 12:
+                    current = datetime(current.year + 1, 1, 1).date()
+                else:
+                    current = datetime(
+                        current.year, current.month + 1, 1).date()
+
+        # Obtener todas las categorías con gastos en el período
+        categories = {}
+        for expense in queryset:
+            category_name = expense.category.name if expense.category else 'Otros'
+            if category_name == '':
+                category_name = 'Otros'
+
+            if category_name not in categories:
+                category = expense.category
+                color = category.color if category else '#CCCCCC'
+                categories[category_name] = {
+                    'name': category_name,
+                    'color': color
+                }
+
+        # Limitar el número de categorías si se solicita
+        limit = request.query_params.get('limit')
+        if limit:
+            try:
+                limit = int(limit)
+                # Obtener las categorías con mayores gastos
+                category_totals = {}
+                for expense in queryset:
+                    category_name = expense.category.name if expense.category else 'Otros'
+                    if category_name == '':
+                        category_name = 'Otros'
+
+                    if category_name not in category_totals:
+                        category_totals[category_name] = 0
+                    category_totals[category_name] += float(expense.amount)
+
+                # Ordenar categorías por total y limitar
+                top_categories = sorted(category_totals.items(
+                ), key=lambda x: x[1], reverse=True)[:limit]
+                top_category_names = [item[0] for item in top_categories]
+
+                # Filtrar las categorías seleccionadas
+                categories = {
+                    name: cat for name, cat in categories.items() if name in top_category_names}
+            except ValueError:
+                pass  # Ignorar si no es un entero válido
+
+        # Crear estructura para agrupar gastos por período y categoría
+        time_category_data = {}
+        for period in time_periods:
+            period_label = format_date_label(period, group_by)
+            time_category_data[period_label] = {
+                cat: 0 for cat in categories.keys()}
+
+        # Clasificar cada gasto en su período y categoría correspondiente
+        for expense in queryset:
+            # Obtener período
+            time_key = get_time_key(expense.timestamp, group_by)
+            period_label = format_date_label(time_key, group_by)
+
+            # Obtener categoría
+            category_name = expense.category.name if expense.category else 'Otros'
+            if category_name == '':
+                category_name = 'Otros'
+
+            # Asignar solo si la categoría está en las seleccionadas
+            if period_label in time_category_data and category_name in categories:
+                time_category_data[period_label][category_name] += float(
+                    expense.amount)
+
+        # Preparar datasets para Chart.js (formato para barras apiladas)
+        datasets = []
+        for category_name, category_info in categories.items():
+            data = []
+            for label in time_labels:
+                if label in time_category_data:
+                    data.append(
+                        round(time_category_data[label][category_name], 2))
+                else:
+                    data.append(0)
+
+            datasets.append({
+                'label': category_name,
+                'data': data,
+                'backgroundColor': category_info['color'],
+                'borderColor': category_info['color'],
+                'borderWidth': 1
+            })
+
+        # Calcular total general
+        total_amount = 0
+        for expense in queryset:
+            category_name = expense.category.name if expense.category else 'Otros'
+            if category_name == '':
+                category_name = 'Otros'
+
+            if category_name in categories:
+                total_amount += float(expense.amount)
+
+        # Resumen del filtro aplicado
+        filter_summary = "Todos los gastos"
+        if date_filter != 'all' and start_date and end_date:
+            filter_summary = f"Gastos del {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
+
+        # Formato final para Chart.js (stacked bar chart)
+        response_data = {
+            'labels': time_labels,
+            'datasets': datasets,
+            'filter_summary': filter_summary,
+            'total_amount': round(total_amount, 2),
+            'group_by': group_by,
+            'recent_expenses': self.get_serializer(
+                queryset.order_by('-timestamp')[:10],
+                many=True
+            ).data
         }
 
         return Response(response_data)
