@@ -510,7 +510,7 @@ def request_verification_code(request):
     if chat:
         try:
             bot_token = settings.TELEGRAM_BOT_TOKEN
-            message = f"Tu código de verificación para CashBot es: *{verification.verification_code}*\n\nEste código expirará en 5 minutos."
+            message = f"Tu código de verificación para Tresqu es: *{verification.verification_code}*\n\nEste código expirará en 5 minutos."
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             data = {

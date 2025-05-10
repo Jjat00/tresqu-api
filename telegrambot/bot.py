@@ -1067,7 +1067,7 @@ def setup_bot():
             ],
             ESPERANDO_MONEDA: [
                 CallbackQueryHandler(
-                    handle_currency_selection, pattern=r"^[A-Z]{3}$"),
+                    handle_currency_selection, pattern=r"^currency_[A-Z]{3}$|^currency_other$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
                                handle_currency_text),
             ],
