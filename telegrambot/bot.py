@@ -10,8 +10,7 @@ from django.db import transaction, connections, connection, InterfaceError
 import pytz
 
 from django.conf import settings
-from users.models import User
-from .models import TelegramChat, TelegramMessage
+from users.models import User, Chat, Message
 from .services import process_message
 from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name
 
@@ -41,7 +40,11 @@ def get_or_create_chat(chat_id):
     while retry_count < max_retries:
         try:
             with transaction.atomic():
-                return TelegramChat.objects.get_or_create(chat_id=str(chat_id))
+                return Chat.objects.get_or_create(
+                    platform='TELEGRAM',
+                    platform_chat_id=str(chat_id),
+                    defaults={'platform': 'TELEGRAM'}
+                )
         except InterfaceError:
             # La conexión se cerró, intentar reconectar
             retry_count += 1
@@ -84,9 +87,9 @@ def create_message(chat, message_id, message_type, text):
     while retry_count < max_retries:
         try:
             with transaction.atomic():
-                return TelegramMessage.objects.create(
+                return Message.objects.create(
                     chat=chat,
-                    message_id=message_id,
+                    platform_message_id=message_id,
                     message_type=message_type,
                     text=text,
                     embedding=embedding
@@ -155,7 +158,8 @@ def get_chat_user(chat_id):
     while retry_count < max_retries:
         try:
             with transaction.atomic():
-                chat = TelegramChat.objects.get(chat_id=str(chat_id))
+                chat = Chat.objects.get(
+                    platform='TELEGRAM', platform_chat_id=str(chat_id))
                 # Hacemos una consulta explícita en lugar de usar chat.user
                 # para evitar problemas con el acceso lazy a relaciones
                 return chat.user_id, User.objects.filter(id=chat.user_id).first() if chat.user_id else None
@@ -176,7 +180,7 @@ def get_chat_user(chat_id):
                 logger.error(
                     f"No se pudo reconectar después de {max_retries} intentos")
                 raise
-        except TelegramChat.DoesNotExist:
+        except Chat.DoesNotExist:
             return None, None
         except Exception as e:
             logger.error(f"Error al obtener usuario de chat: {e}")
@@ -192,7 +196,8 @@ def get_all_telegram_chats():
     while retry_count < max_retries:
         try:
             with transaction.atomic():
-                chats = TelegramChat.objects.filter(
+                chats = Chat.objects.filter(
+                    platform='TELEGRAM',
                     user__isnull=False).select_related('user')
                 return [chat for chat in chats]  # Esto fuerza la evaluación
         except InterfaceError:

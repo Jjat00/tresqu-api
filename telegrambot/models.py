@@ -1,6 +1,12 @@
 from django.db import models
 from pgvector.django import VectorField
-from users.models import User
+from users.models import User, Chat, Message
+
+# Imports para facilitar la migración y compatibilidad
+# Los modelos TelegramChat y TelegramMessage están ahora obsoletos
+# Usar Chat y Message de users.models en su lugar
+TelegramChat = Chat
+TelegramMessage = Message
 
 # Create your models here.
 

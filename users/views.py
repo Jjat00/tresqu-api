@@ -490,20 +490,20 @@ def request_verification_code(request):
 
     # Intentar encontrar el chat_id de Telegram asociado con este número
     # Esto requiere que el usuario ya haya interactuado con el bot
-    from telegrambot.models import TelegramChat
+    from users.models import Chat
     chat = None
 
     try:
         # Buscar usuario por número de teléfono
         user = User.objects.get(phone_number=phone_number)
         # Buscar chat de Telegram asociado
-        chat = TelegramChat.objects.filter(user=user).first()
+        chat = Chat.objects.filter(platform='TELEGRAM', user=user).first()
 
         if chat:
             # Guardar chat_id en la verificación
-            verification.telegram_chat_id = chat.chat_id
+            verification.telegram_chat_id = chat.platform_chat_id
             verification.save()
-    except (User.DoesNotExist, TelegramChat.DoesNotExist):
+    except (User.DoesNotExist, Chat.DoesNotExist):
         pass
 
     # Si tenemos un chat_id, enviar el código a través del bot de Telegram
@@ -514,7 +514,7 @@ def request_verification_code(request):
 
             url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
             data = {
-                "chat_id": chat.chat_id,
+                "chat_id": chat.platform_chat_id,
                 "text": message,
                 "parse_mode": "Markdown"
             }

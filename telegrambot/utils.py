@@ -1,5 +1,5 @@
 from asgiref.sync import sync_to_async
-from telegrambot.models import TelegramMessage
+from users.models import Message
 from langchain.schema import HumanMessage, AIMessage
 from categories.models import Category
 
@@ -7,7 +7,7 @@ from categories.models import Category
 async def fetch_last_messages(user_id: int, window: int = 10):
     def _query():
         return list(
-            TelegramMessage.objects
+            Message.objects
             .filter(chat__user_id=user_id)
             .order_by("-created_at")[:window]
         )

@@ -12,6 +12,7 @@ import logging
 import calendar
 from django.db.models import Q
 import pytz
+from rest_framework import permissions
 
 from .models import Expense, Category
 from .serializers import ExpenseSerializer
@@ -26,6 +27,7 @@ DEFAULT_TIMEZONE = pytz.timezone('America/Bogota')  # Equivalente a UTC-5
 class ExpenseViewSet(viewsets.ModelViewSet):
     queryset = Expense.objects.all()
     serializer_class = ExpenseSerializer
+    permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
         """Filtrar gastos por el usuario autenticado"""
