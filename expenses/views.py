@@ -1726,3 +1726,59 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             })
 
         return Response(result)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Elimina un gasto específico.
+        DELETE /api/expenses/{id}/
+
+        Respuestas:
+        - 200 OK: Gasto eliminado exitosamente
+        - 400 Bad Request: Error al eliminar el gasto
+        - 404 Not Found: Gasto no encontrado
+        """
+        try:
+            instance = self.get_object()
+
+            # Verificar que el gasto pertenece al usuario actual
+            if instance.user != request.user:
+                logger.warning(
+                    f"Usuario {request.user} intentando eliminar gasto {instance.id} que no le pertenece")
+                return Response(
+                    {"error": "No tienes permiso para eliminar este gasto"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Guardar información del gasto antes de eliminarlo para el log
+            expense_info = {
+                'id': instance.id,
+                'amount': instance.amount,
+                'currency': instance.currency,
+                'category': instance.category.name if instance.category else 'Sin categoría',
+                'description': instance.description
+            }
+
+            logger.info(
+                f"Usuario {request.user} eliminando gasto: {expense_info}")
+
+            # Eliminar el gasto
+            self.perform_destroy(instance)
+
+            return Response({
+                "message": "Gasto eliminado exitosamente",
+                "deleted_expense": expense_info
+            }, status=status.HTTP_200_OK)
+
+        except Expense.DoesNotExist:
+            logger.warning(
+                f"Intento de eliminar gasto inexistente: {kwargs.get('pk')}")
+            return Response(
+                {"error": "El gasto no existe"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            logger.error(f"Error al eliminar gasto: {str(e)}")
+            return Response(
+                {"error": f"No se pudo eliminar el gasto: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )

@@ -219,8 +219,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 start_date, False, user_timezone)
             queryset = queryset.filter(timestamp__gte=start_datetime)
 
-        # Calcular totales por categoría
-        summary = queryset.values('category__name', 'currency').annotate(
+        # Calcular totales por categoría incluyendo el ID
+        summary = queryset.values('id', 'category__name', 'currency').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -1727,3 +1727,67 @@ class IncomeViewSet(viewsets.ModelViewSet):
         }
 
         return Response(response_data)
+
+    def destroy(self, request, *args, **kwargs):
+        """
+        Elimina un ingreso específico.
+        DELETE /api/incomes/{id}/
+
+        Respuestas:
+        - 200 OK: Ingreso eliminado exitosamente
+        - 400 Bad Request: Error al eliminar el ingreso
+        - 403 Forbidden: No tienes permiso para eliminar este ingreso
+        - 404 Not Found: Ingreso no encontrado
+        """
+        income_id = kwargs.get('pk')
+        logger.info(f"Intentando eliminar ingreso con ID: {income_id}")
+
+        try:
+            # Verificar si el ingreso existe
+            try:
+                instance = Income.objects.get(id=income_id)
+                logger.info(f"Ingreso encontrado: {instance.id}")
+            except Income.DoesNotExist:
+                logger.warning(
+                    f"No se encontró el ingreso con ID: {income_id}")
+                return Response(
+                    {"error": f"No existe un ingreso con el ID {income_id}"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+
+            # Verificar que el ingreso pertenece al usuario actual
+            if instance.user != request.user:
+                logger.warning(
+                    f"Usuario {request.user} intentando eliminar ingreso {instance.id} que no le pertenece")
+                return Response(
+                    {"error": "No tienes permiso para eliminar este ingreso"},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+            # Guardar información del ingreso antes de eliminarlo para el log
+            income_info = {
+                'id': instance.id,
+                'amount': instance.amount,
+                'currency': instance.currency,
+                'category': instance.category.name if instance.category else 'Sin categoría',
+                'description': instance.description
+            }
+
+            logger.info(
+                f"Usuario {request.user} eliminando ingreso: {income_info}")
+
+            # Eliminar el ingreso
+            instance.delete()
+            logger.info(f"Ingreso {income_id} eliminado exitosamente")
+
+            return Response({
+                "message": "Ingreso eliminado exitosamente",
+                "deleted_income": income_info
+            }, status=status.HTTP_200_OK)
+
+        except Exception as e:
+            logger.error(f"Error al eliminar ingreso {income_id}: {str(e)}")
+            return Response(
+                {"error": f"Error al eliminar el ingreso: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
