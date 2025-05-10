@@ -8,28 +8,48 @@ import random
 class IncomeCategory(models.Model):
     # Categorías predefinidas para ingresos
     PREDEFINED_CATEGORIES = [
-        'Salario', 'Inversiones', 'Intereses', 'Dividendos', 'Alquiler',
-        'Freelance', 'Reembolsos', 'Ventas', 'Regalos', 'Premios',
-        'Pensión', 'Subsidios', 'Bonos', 'Comisiones', 'Becas'
+        'Salario o Trabajo Fijo', 'Trabajo Independiente o Freelance', 'Negocios o Emprendimientos',
+        'Inversiones', 'Alquileres y Activos', 'Regalías y Derechos',
+        'Apoyos o Subsidios', 'Premios y Sorteos', 'Venta de Bienes'
     ]
 
     # Colores predefinidos para las categorías
     DEFAULT_COLORS = {
-        'Salario': '#36A2EB',
-        'Inversiones': '#FFCE56',
-        'Intereses': '#4BC0C0',
-        'Dividendos': '#9966FF',
-        'Alquiler': '#FF9F40',
-        'Freelance': '#8AC249',
-        'Reembolsos': '#EA5545',
-        'Ventas': '#F46A9B',
-        'Regalos': '#EF9B20',
-        'Premios': '#EDBF33',
-        'Pensión': '#87BC45',
-        'Subsidios': '#27AEEF',
-        'Bonos': '#B33DC6',
-        'Comisiones': '#FF6384',
-        'Becas': '#4BC0C0'
+        'Salario o Trabajo Fijo': '#1E40AF',
+        'Trabajo Independiente o Freelance': '#3B82F6',
+        'Negocios o Emprendimientos': '#0F766E',
+        'Inversiones': '#10B981',
+        'Alquileres y Activos': '#78350F',
+        'Regalías y Derechos': '#8B5CF6',
+        'Apoyos o Subsidios': '#F59E0B',
+        'Premios y Sorteos': '#DC2626',
+        'Venta de Bienes': '#A16207'
+    }
+
+    # Descripciones predefinidas para las categorías
+    DEFAULT_DESCRIPTIONS = {
+        'Salario o Trabajo Fijo': 'Ingresos provenientes de empleos formales o contratos fijos.',
+        'Trabajo Independiente o Freelance': 'Ingresos por trabajos por cuenta propia o por proyectos.',
+        'Negocios o Emprendimientos': 'Ingresos generados por negocios propios.',
+        'Inversiones': 'Rendimientos obtenidos por instrumentos financieros.',
+        'Alquileres y Activos': 'Ingresos pasivos generados por propiedades o activos.',
+        'Regalías y Derechos': 'Ingresos por propiedad intelectual o contenido.',
+        'Apoyos o Subsidios': 'Ingresos no laborales provenientes de ayudas externas.',
+        'Premios y Sorteos': 'Ingresos ocasionales por suerte o concursos.',
+        'Venta de Bienes': 'Ingresos por venta de objetos personales o activos.'
+    }
+
+    # Ejemplos predefinidos para las categorías
+    DEFAULT_EXAMPLES = {
+        'Salario o Trabajo Fijo': 'Nómina, contratos laborales, trabajo a tiempo completo',
+        'Trabajo Independiente o Freelance': 'Servicios profesionales, diseño, asesorías, honorarios',
+        'Negocios o Emprendimientos': 'Ventas, e-commerce, microempresa',
+        'Inversiones': 'Dividendos, acciones, cripto, rendimientos bancarios',
+        'Alquileres y Activos': 'Arriendos, leasing, renting',
+        'Regalías y Derechos': 'Regalías por música, libros, patentes',
+        'Apoyos o Subsidios': 'Subsidios estatales, becas, ayudas familiares',
+        'Premios y Sorteos': 'Loterías, rifas, juegos de azar',
+        'Venta de Bienes': 'Venta de carro, muebles, tecnología'
     }
 
     # Paleta de colores para nuevas categorías
@@ -42,6 +62,8 @@ class IncomeCategory(models.Model):
     name = models.CharField(max_length=100, unique=True)
     color = models.CharField(
         max_length=7, default='#CCCCCC')  # Formato hexadecimal
+    description = models.TextField(blank=True, null=True)
+    example = models.TextField(blank=True, null=True)
     metadata = models.JSONField(blank=True, null=True)
 
     @classmethod
@@ -53,6 +75,16 @@ class IncomeCategory(models.Model):
     def get_default_color(cls, category_name):
         """Retorna el color por defecto para una categoría"""
         return cls.DEFAULT_COLORS.get(category_name, '#CCCCCC')
+
+    @classmethod
+    def get_default_description(cls, category_name):
+        """Retorna la descripción por defecto para una categoría"""
+        return cls.DEFAULT_DESCRIPTIONS.get(category_name, '')
+
+    @classmethod
+    def get_default_example(cls, category_name):
+        """Retorna el ejemplo por defecto para una categoría"""
+        return cls.DEFAULT_EXAMPLES.get(category_name, '')
 
     @classmethod
     def get_unused_color(cls):
@@ -68,7 +100,7 @@ class IncomeCategory(models.Model):
         return f'#{random.randint(0, 0xFFFFFF):06x}'
 
     def save(self, *args, **kwargs):
-        """Sobrescribe el método save para asignar un color por defecto si no se proporciona uno"""
+        """Sobrescribe el método save para asignar valores por defecto si no se proporcionan"""
         if not self.color or self.color == '#CCCCCC':
             # Primero intentar con el color predefinido
             default_color = self.get_default_color(self.name)
@@ -77,6 +109,13 @@ class IncomeCategory(models.Model):
             else:
                 # Si no hay color predefinido, buscar uno no utilizado
                 self.color = self.get_unused_color()
+
+        if not self.description:
+            self.description = self.get_default_description(self.name)
+
+        if not self.example:
+            self.example = self.get_default_example(self.name)
+
         super().save(*args, **kwargs)
 
     def __str__(self):

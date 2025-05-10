@@ -5,7 +5,7 @@ from .models import Income, IncomeCategory
 class IncomeCategorySerializer(serializers.ModelSerializer):
     class Meta:
         model = IncomeCategory
-        fields = ['id', 'name', 'color', 'metadata']
+        fields = ['id', 'name', 'color', 'description', 'example', 'metadata']
         read_only_fields = ['id']
 
 

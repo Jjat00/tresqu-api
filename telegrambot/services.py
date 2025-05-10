@@ -44,7 +44,7 @@ from telegrambot.tools import (
     get_or_create_income_category,
 )
 
-from telegrambot.utils import get_existing_categories, get_categories_with_details
+from telegrambot.utils import get_existing_categories, get_categories_with_details, get_existing_income_categories
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -123,10 +123,18 @@ def make_create_income_tool(user_external_id: str):
         category: str,
         received_at: str | None = None,
         note: str | None = "",
+        category_description: str | None = None,
+        category_example: str | None = None,
+        category_color: str | None = None
     ) -> str:
         """Registra un ingreso en la base de datos y confirma el registro."""
         # Primero crear la categoría de ingreso si no existe
-        get_or_create_income_category.invoke({"name": category})
+        get_or_create_income_category.invoke({
+            "name": category,
+            "description": category_description,
+            "example": category_example,
+            "color": category_color
+        })
 
         # Luego registrar el ingreso
         return create_income.invoke(
@@ -163,8 +171,31 @@ async def transcribe_audio(audio_file_path: str) -> str:
 async def process_message(user: User, raw_text: str) -> str:
     try:
         # 1. herramientas (incluye create_expense closure)
+        @tool
+        def get_current_date_for_user() -> str:
+            """Obtiene la fecha actual en el formato YYYY-MM-DD, considerando la zona horaria del usuario."""
+            try:
+                return get_current_date.invoke({
+                    "user_external_id": user.external_id
+                })
+            except Exception as e:
+                logger.error(f"Error al obtener la fecha actual: {e}")
+                return datetime.now().strftime("%Y-%m-%d")
+
+        @tool
+        def parse_relative_date_for_user(date_text: str) -> str:
+            """Convierte referencias temporales relativas a fechas específicas."""
+            try:
+                return parse_relative_date.invoke({
+                    "date_text": date_text,
+                    "user_external_id": user.external_id
+                })
+            except Exception as e:
+                logger.error(f"Error al analizar fecha relativa: {e}")
+                return datetime.now().strftime("%Y-%m-%d")
+
         tools = [
-            get_current_date,
+            get_current_date_for_user,
             parse_expense,
             parse_income,
             is_greeting,
@@ -173,7 +204,7 @@ async def process_message(user: User, raw_text: str) -> str:
             parse_expenses,
             parse_incomes,
             get_or_create_category,
-            parse_relative_date,
+            parse_relative_date_for_user,
             update_expense,
             update_income,
             delete_expense,
@@ -299,18 +330,38 @@ async def process_message(user: User, raw_text: str) -> str:
         categories_with_details = await get_categories_with_details()
 
         # Construir información detallada de categorías para el prompt
-        categories_info = []
+        expense_categories_info = []
+        income_categories_info = []
+
         for name, details in categories_with_details.items():
             category_info = f"- {name}: {details['description']} Ejemplos: {details['examples']}"
-            categories_info.append(category_info)
+            if details.get('type') == 'income':
+                income_categories_info.append(category_info)
+            else:
+                expense_categories_info.append(category_info)
 
         # Ordenar alfabéticamente las categorías para el prompt
-        categories_info.sort()
-        categories_detailed_str = "\n".join(categories_info)
+        expense_categories_info.sort()
+        income_categories_info.sort()
+
+        # Crear secciones separadas para el prompt
+        expenses_detailed_str = "CATEGORÍAS DE GASTOS:\n" + \
+            "\n".join(expense_categories_info)
+        incomes_detailed_str = "CATEGORÍAS DE INGRESOS:\n" + \
+            "\n".join(income_categories_info)
+
+        # Combinar ambas secciones
+        categories_detailed_str = f"{expenses_detailed_str}\n\n{incomes_detailed_str}"
 
         # Obtener solo la lista de nombres para mantener la compatibilidad
-        existing_categories = await get_existing_categories()
-        categories_str = ', '.join(existing_categories)
+        existing_expense_categories = await get_existing_categories()
+        existing_income_categories = await get_existing_income_categories()
+
+        expense_categories_str = 'Gastos: ' + \
+            ', '.join(existing_expense_categories)
+        income_categories_str = 'Ingresos: ' + \
+            ', '.join(existing_income_categories)
+        categories_str = f"{expense_categories_str}; {income_categories_str}"
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
@@ -330,11 +381,11 @@ async def process_message(user: User, raw_text: str) -> str:
                 3.1 Usa parse_expenses.
                 3.2 Recorre cada elemento del array devuelto y llama a create_expense
                     para cada gasto individual.
-            4. Si identificas referencias temporales (ayer, el sábado, etc.) ⇒ usa parse_relative_date
+            4. Si identificas referencias temporales (ayer, el sábado, etc.) ⇒ usa parse_relative_date_for_user
                para convertirlas en fechas específicas antes de crear el gasto.
                IMPORTANTE: cuando el usuario menciona un día de la semana (ej: "el sábado gasté"),
                asume que se refiere al día más reciente en el pasado, no al próximo.
-            5. Si falta fecha ⇒ usa get_current_date.
+            5. Si falta fecha ⇒ usa get_current_date_for_user.
             6. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
             
             PARA INGRESOS:
@@ -343,9 +394,9 @@ async def process_message(user: User, raw_text: str) -> str:
                 8.1 Usa parse_incomes.
                 8.2 Recorre cada elemento del array devuelto y llama a create_income
                     para cada ingreso individual.
-            9. Si identificas referencias temporales para ingresos ⇒ usa parse_relative_date
+            9. Si identificas referencias temporales para ingresos ⇒ usa parse_relative_date_for_user
                para convertirlas en fechas específicas antes de crear el ingreso.
-            10. Si falta fecha ⇒ usa get_current_date.
+            10. Si falta fecha ⇒ usa get_current_date_for_user.
             11. Si falta moneda ⇒ create_income asignará la moneda por defecto.
             
             PARA AMBOS:
@@ -357,7 +408,7 @@ async def process_message(user: User, raw_text: str) -> str:
                      según corresponda, proporcionando nombre, descripción, ejemplos y un color hexadecimal atractivo.
                      Elige una descripción breve pero informativa y ejemplos relevantes.
             14. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
-            15. Si no se especifica fecha, usa get_current_date para la fecha actual
+            15. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
             
             EDICIÓN Y ELIMINACIÓN:
             16. Si el usuario quiere editar un gasto:
@@ -381,7 +432,7 @@ async def process_message(user: User, raw_text: str) -> str:
             20. Si el usuario hace consultas sobre sus gastos o ingresos:
                 20.1 Para consultar por categoría en un período:
                     - Usa get_category_expenses o get_category_incomes según corresponda
-                    - Si no se especifica fecha, usa get_current_date para la fecha actual
+                    - Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
                     - Si se menciona "este mes", calcula el primer día del mes actual
                 20.2 Para consultar las categorías con mayores movimientos:
                     - Usa get_top_expense_categories o get_top_income_categories_for_user según corresponda
@@ -399,6 +450,19 @@ async def process_message(user: User, raw_text: str) -> str:
                     * Usa get_user_expenses o get_user_incomes según corresponda
                     * Si no se especifica fecha, muestra todos los movimientos
 
+            CREACIÓN DE CATEGORÍAS DE INGRESOS:
+            21. Al crear nuevas categorías de ingresos con get_or_create_income_category:
+                21.1 Proporciona siempre estos parámetros:
+                    * name: Nombre de la categoría
+                    * description: Descripción breve de la categoría (qué tipo de ingresos incluye)
+                    * example: Ejemplos concretos de ingresos que pertenecen a esta categoría
+                    * color: Color hexadecimal (#RRGGBB) que represente visualmente la categoría
+                21.2 Al registrar un ingreso con create_income_for_user, usa los parámetros adicionales:
+                    * category_description: para la descripción de la categoría
+                    * category_example: para los ejemplos de la categoría
+                    * category_color: para el color de la categoría
+                21.3 Estos campos son importantes para que el usuario pueda entender mejor cada categoría
+
             IMPORTANTE:
             - Siempre determina correctamente si el mensaje se refiere a un GASTO o a un INGRESO
             - Para gastos, usa spent_at como fecha
@@ -412,7 +476,7 @@ async def process_message(user: User, raw_text: str) -> str:
             - Los nombres de las categorías nuevas SIEMPRE deben crearse en el mismo idioma que el usuario está utilizando
             - Las descripciones, ejemplos y notas de gastos/ingresos SIEMPRE deben escribirse en el mismo idioma del usuario
 
-            COLORES PARA CATEGORÍAS:
+            COLORES PARA CATEGORÍAS DE GASTOS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
             - Usa colores que tengan buen contraste y sean coherentes con la temática de la categoría
             - Ejemplos: azul (#1E3A8A) para categorías relacionadas con servicios, verde (#10B981) para alimentación, 

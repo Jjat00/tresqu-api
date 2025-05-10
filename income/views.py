@@ -25,6 +25,80 @@ class IncomeCategoryViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         return IncomeCategory.objects.all()
 
+    def perform_create(self, serializer):
+        """Sobrescribe el método para asegurar que se guarden los nuevos campos"""
+        serializer.save()
+
+    @action(detail=False, methods=['get'])
+    def with_details(self, request):
+        """
+        Devuelve todas las categorías con sus detalles completos (descripción y ejemplos).
+
+        GET /api/income-categories/with_details/
+        """
+        categories = self.get_queryset()
+        data = []
+
+        for category in categories:
+            data.append({
+                'id': category.id,
+                'name': category.name,
+                'color': category.color,
+                'description': category.description or '',
+                'example': category.example or '',
+            })
+
+        return Response(data)
+
+    @action(detail=False, methods=['get'])
+    def colors_map(self, request):
+        """
+        Devuelve un mapa de nombre de categoría -> color para usar en visualizaciones.
+
+        GET /api/income-categories/colors_map/
+        """
+        categories = self.get_queryset()
+        colors_map = {
+            category.name: category.color
+            for category in categories
+        }
+        return Response(colors_map)
+
+    @action(detail=True, methods=['put', 'patch'])
+    def update_details(self, request, pk=None):
+        """
+        Actualiza los detalles específicos de una categoría (descripción, ejemplo, color).
+
+        PUT/PATCH /api/income-categories/{id}/update_details/
+
+        Parámetros:
+        - description: Descripción de la categoría
+        - example: Ejemplos de ingresos para esta categoría
+        - color: Color hexadecimal (formato: #RRGGBB)
+        """
+        try:
+            category = self.get_object()
+
+            # Actualizar campos si están presentes en la solicitud
+            if 'description' in request.data:
+                category.description = request.data['description']
+
+            if 'example' in request.data:
+                category.example = request.data['example']
+
+            if 'color' in request.data:
+                category.color = request.data['color']
+
+            category.save()
+
+            serializer = self.get_serializer(category)
+            return Response(serializer.data)
+        except Exception as e:
+            return Response(
+                {"error": f"Error al actualizar la categoría: {str(e)}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
 
 class IncomeViewSet(viewsets.ModelViewSet):
     serializer_class = IncomeSerializer
@@ -414,13 +488,28 @@ class IncomeViewSet(viewsets.ModelViewSet):
         data = []
         backgroundColor = []
         hoverBackgroundColor = []
+        category_details = []  # Agregar información detallada de categorías
 
         for item in by_category:
             category_name = item['category__name'] or 'Sin categoría'
             category = IncomeCategory.objects.filter(
                 name=category_name).first()
+
             color = category.color if category and hasattr(
                 category, 'color') else '#4CAF50'  # Verde por defecto para ingresos
+
+            # Incluir información adicional de la categoría
+            category_info = {
+                'name': category_name,
+                'color': color,
+                'total': float(item['total']),
+            }
+
+            if category:
+                category_info['description'] = category.description or ''
+                category_info['example'] = category.example or ''
+
+            category_details.append(category_info)
 
             labels.append(category_name)
             data.append(float(item['total']))
@@ -449,7 +538,9 @@ class IncomeViewSet(viewsets.ModelViewSet):
             }],
             'filter_summary': filter_summary,
             'total_amount': sum(data),
-            'recent_incomes': incomes  # Incluir algunos ingresos recientes para detalles
+            'recent_incomes': incomes,  # Incluir algunos ingresos recientes para detalles
+            # Nueva información detallada de categorías
+            'category_details': category_details
         }
 
         return Response(response_data)
@@ -711,6 +802,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
         labels = []
         data = []
         colors = []
+        category_details = []  # Agregar información detallada de categorías
 
         for item in by_category:
             category_name = item['category__name'] or 'Sin categoría'
@@ -718,6 +810,19 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 name=category_name).first()
             color = category.color if category and hasattr(
                 category, 'color') else '#4CAF50'  # Verde por defecto para ingresos
+
+            # Incluir información adicional de la categoría
+            category_info = {
+                'name': category_name,
+                'color': color,
+                'total': float(item['total']),
+            }
+
+            if category:
+                category_info['description'] = category.description or ''
+                category_info['example'] = category.example or ''
+
+            category_details.append(category_info)
 
             labels.append(category_name)
             data.append(float(item['total']))
@@ -744,7 +849,9 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 # Mostrar solo los 10 más recientes
                 queryset.order_by('-timestamp')[:10],
                 many=True
-            ).data
+            ).data,
+            # Nueva información detallada de categorías
+            'category_details': category_details
         }
 
         return Response(response_data)
@@ -1420,6 +1527,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
 
         # Preparar datasets para Chart.js (formato para barras apiladas)
         datasets = []
+        category_metadata = {}  # Metadata adicional para cada categoría
+
         for category_name, category_info in categories.items():
             data = []
             for label in time_labels:
@@ -1436,6 +1545,21 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 'borderColor': category_info['color'],
                 'borderWidth': 1
             })
+
+            # Obtener descripción y ejemplos para la categoría
+            try:
+                category_obj = IncomeCategory.objects.get(name=category_name)
+                category_metadata[category_name] = {
+                    'description': category_obj.description or '',
+                    'example': category_obj.example or '',
+                    'color': category_obj.color
+                }
+            except IncomeCategory.DoesNotExist:
+                category_metadata[category_name] = {
+                    'description': '',
+                    'example': '',
+                    'color': category_info['color']
+                }
 
         # Calcular total general
         total_amount = 0
@@ -1462,7 +1586,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
             'recent_incomes': self.get_serializer(
                 queryset.order_by('-timestamp')[:10],
                 many=True
-            ).data
+            ).data,
+            'category_metadata': category_metadata  # Incluir metadata de categorías
         }
 
         return Response(response_data)

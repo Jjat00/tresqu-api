@@ -42,38 +42,33 @@ class ExpenseList(BaseModel):
 
 
 @tool
-def get_current_date(user_external_id: str = None) -> str:
+def get_current_date(user_external_id: str) -> str:
     """Devuelve la fecha actual en formato YYYY‑MM‑DD, considerando la zona horaria del usuario."""
-    # Si se proporciona un ID de usuario, usar su zona horaria
-    if user_external_id:
-        try:
-            user = User.objects.get(external_id=user_external_id)
-            user_tz = pytz.timezone(user.timezone)
-            return timezone.now().astimezone(user_tz).strftime("%Y-%m-%d")
-        except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
-            logger.warning(f"Error al obtener zona horaria del usuario: {e}")
-
-    # Si no hay usuario o hubo error, usar UTC
-    return timezone.now().strftime("%Y-%m-%d")
+    # Usar el ID de usuario para obtener su zona horaria
+    try:
+        user = User.objects.get(external_id=user_external_id)
+        user_tz = pytz.timezone(user.timezone)
+        return timezone.now().astimezone(user_tz).strftime("%Y-%m-%d")
+    except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
+        logger.warning(f"Error al obtener zona horaria del usuario: {e}")
+        # Si hay error, usar UTC
+        return timezone.now().strftime("%Y-%m-%d")
 
 
 @tool
-def parse_relative_date(date_text: str, user_external_id: str = None) -> str:
+def parse_relative_date(date_text: str, user_external_id: str) -> str:
     """
     Convierte una referencia temporal relativa (ayer, el sábado, etc.) en una fecha específica.
-    Toma como referencia la fecha actual en la zona horaria del usuario si está disponible.
+    Toma como referencia la fecha actual en la zona horaria del usuario.
     Devuelve la fecha en formato YYYY-MM-DD.
     """
     # Obtener la fecha actual en la zona horaria del usuario
-    if user_external_id:
-        try:
-            user = User.objects.get(external_id=user_external_id)
-            user_tz = pytz.timezone(user.timezone)
-            today = timezone.now().astimezone(user_tz).replace(tzinfo=None)
-        except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
-            logger.warning(f"Error al obtener zona horaria del usuario: {e}")
-            today = datetime.now()
-    else:
+    try:
+        user = User.objects.get(external_id=user_external_id)
+        user_tz = pytz.timezone(user.timezone)
+        today = timezone.now().astimezone(user_tz).replace(tzinfo=None)
+    except (User.DoesNotExist, AttributeError, pytz.exceptions.UnknownTimeZoneError) as e:
+        logger.warning(f"Error al obtener zona horaria del usuario: {e}")
         today = datetime.now()
 
     date_text = date_text.lower().strip()
@@ -307,15 +302,16 @@ def get_or_create_category(name: str, description: str | None = None, examples: 
 
 
 @tool
-def get_or_create_income_category(name: str, description: str | None = None, color: str | None = None) -> Dict[str, str]:
+def get_or_create_income_category(name: str, description: str | None = None, example: str | None = None, color: str | None = None) -> Dict[str, str]:
     """
     Crea una nueva categoría de ingreso en la base de datos.
     Útil cuando un usuario registra un ingreso con una categoría que no existe.
-    IMPORTANTE: Siempre usar el mismo idioma que está usando el usuario para el nombre y descripción.
+    IMPORTANTE: Siempre usar el mismo idioma que está usando el usuario para el nombre, descripción y ejemplos.
 
     Args:
         name: Nombre de la categoría
         description: Descripción opcional de la categoría
+        example: Ejemplos opcionales de ingresos para esta categoría
         color: Color hexadecimal opcional (formato: #RRGGBB)
 
     Devuelve un diccionario con el resultado de la operación.
@@ -323,17 +319,23 @@ def get_or_create_income_category(name: str, description: str | None = None, col
     try:
         from income.models import IncomeCategory
 
-        # Normalizar el nombre (primera letra mayúscula, resto minúsculas)
-        normalized_name = name.strip().capitalize()
+        # Normalizar el nombre (primera letra mayúscula de cada palabra)
+        normalized_name = " ".join(word.capitalize()
+                                   for word in name.strip().split())
 
-        # Verificar si ya existe
-        if IncomeCategory.objects.filter(name=normalized_name).exists():
-            category = IncomeCategory.objects.get(name=normalized_name)
+        # Verificar si ya existe (insensible a mayúsculas/minúsculas)
+        existing_category = IncomeCategory.objects.filter(
+            name__iexact=normalized_name).first()
+        if existing_category:
+            category = existing_category
 
             # Actualizar si se proporcionan nuevos valores
             updated = False
             if description and hasattr(category, 'description') and not category.description:
                 category.description = description
+                updated = True
+            if example and hasattr(category, 'example') and not category.example:
+                category.example = example
                 updated = True
             if color and hasattr(category, 'color'):
                 category.color = color
@@ -344,7 +346,7 @@ def get_or_create_income_category(name: str, description: str | None = None, col
 
             return {
                 "status": "info",
-                "message": f"La categoría de ingreso '{normalized_name}' ya existe",
+                "message": f"La categoría de ingreso '{category.name}' ya existe",
                 "id": str(category.id),
                 "color": getattr(category, 'color', None)
             }
@@ -357,6 +359,9 @@ def get_or_create_income_category(name: str, description: str | None = None, col
         # Agregar campos opcionales si el modelo los soporta
         if description and hasattr(IncomeCategory, 'description'):
             category_data["description"] = description
+
+        if example and hasattr(IncomeCategory, 'example'):
+            category_data["example"] = example
 
         if color and hasattr(IncomeCategory, 'color'):
             category_data["color"] = color
@@ -798,9 +803,17 @@ def create_income(
         if not user:
             return f"Error: Usuario no encontrado."
 
-        # Obtener o crear la categoría de ingreso
-        category_obj, created = IncomeCategory.objects.get_or_create(
-            name=category.title())
+        # Normalizar el nombre de la categoría (primera letra mayúscula de cada palabra)
+        normalized_category = " ".join(word.capitalize()
+                                       for word in category.strip().split())
+
+        # Obtener o crear la categoría de ingreso (búsqueda insensible a mayúsculas/minúsculas)
+        category_obj = IncomeCategory.objects.filter(
+            name__iexact=normalized_category).first()
+        if not category_obj:
+            # Si no existe, la creamos
+            category_obj = IncomeCategory.objects.create(
+                name=normalized_category)
 
         # Fecha de recepción
         if received_at:
@@ -818,14 +831,14 @@ def create_income(
             amount=amount,
             currency=currency,
             category=category_obj,
-            category_str=category.title(),
+            category_str=category_obj.name,  # Usar el nombre normalizado de la categoría
             timestamp=timezone.now(),
             received_at=received_date,
             note=note,
             raw_message=json.dumps({
                 "amount": amount,
                 "currency": currency,
-                "category": category,
+                "category": category_obj.name,  # Usar el nombre normalizado
                 "received_at": received_at,
                 "note": note
             })
@@ -833,13 +846,13 @@ def create_income(
 
         # Generar embedding para la búsqueda semántica
         try:
-            search_text = f"{category} {note} {amount} {currency} {received_at}"
+            search_text = f"{category_obj.name} {note} {amount} {currency} {received_at}"
             income.embedding = embeddings.embed_query(search_text)
             income.save()
         except Exception as e:
             logger.error(f"Error generando embedding para ingreso: {e}")
 
-        return f"Ingreso registrado: {amount} {currency} en {category.title()} ({received_date})"
+        return f"Ingreso registrado: {amount} {currency} en {category_obj.name} ({received_date})"
 
     except Exception as e:
         return f"Error al registrar el ingreso: {str(e)}"
@@ -859,13 +872,22 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
         if not income:
             return f"Error: Ingreso con ID {income_id} no encontrado."
 
-        category_obj, created = IncomeCategory.objects.get_or_create(
-            name=category.title())
+        # Normalizar el nombre de la categoría (primera letra mayúscula de cada palabra)
+        normalized_category = " ".join(word.capitalize()
+                                       for word in category.strip().split())
+
+        # Obtener o crear la categoría (búsqueda insensible a mayúsculas/minúsculas)
+        category_obj = IncomeCategory.objects.filter(
+            name__iexact=normalized_category).first()
+        if not category_obj:
+            # Si no existe, la creamos
+            category_obj = IncomeCategory.objects.create(
+                name=normalized_category)
 
         income.amount = amount
         income.currency = currency
         income.category = category_obj
-        income.category_str = category.title()
+        income.category_str = category_obj.name  # Usar el nombre normalizado
 
         if received_at:
             try:
@@ -880,20 +902,20 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
         income.raw_message = json.dumps({
             "amount": amount,
             "currency": currency,
-            "category": category,
+            "category": category_obj.name,  # Usar nombre normalizado
             "received_at": received_at,
             "note": note
         })
 
         # Actualizar embedding
         try:
-            search_text = f"{category} {note} {amount} {currency} {received_at}"
+            search_text = f"{category_obj.name} {note} {amount} {currency} {received_at}"
             income.embedding = embeddings.embed_query(search_text)
         except Exception as e:
             logger.error(f"Error actualizando embedding para ingreso: {e}")
 
         income.save()
-        return f"Ingreso actualizado: {amount} {currency} en {category.title()}"
+        return f"Ingreso actualizado: {amount} {currency} en {category_obj.name}"
 
     except Exception as e:
         return f"Error al actualizar el ingreso: {str(e)}"
