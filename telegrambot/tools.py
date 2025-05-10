@@ -168,6 +168,10 @@ async def parse_expense(text: str) -> dict:
         NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
         y el sistema usará automáticamente la fecha actual.
         
+        IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
+        en el mismo idioma en que fueron proporcionados por el usuario.
+        Nunca traduzcas los nombres de categorías o notas a otro idioma.
+        
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
@@ -202,6 +206,10 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
         NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
         y el sistema usará automáticamente la fecha actual.
+
+        IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
+        en el mismo idioma en que fueron proporcionados por el usuario.
+        Nunca traduzcas los nombres de categorías o notas a otro idioma.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(
@@ -228,6 +236,7 @@ def get_or_create_category(name: str, description: str | None = None, examples: 
     """
     Crea una nueva categoría en la base de datos.
     Útil cuando un usuario registra un gasto con una categoría que no existe.
+    IMPORTANTE: Siempre usar el mismo idioma que está usando el usuario para el nombre, descripción y ejemplos.
 
     Args:
         name: Nombre de la categoría
@@ -302,6 +311,7 @@ def get_or_create_income_category(name: str, description: str | None = None, col
     """
     Crea una nueva categoría de ingreso en la base de datos.
     Útil cuando un usuario registra un ingreso con una categoría que no existe.
+    IMPORTANTE: Siempre usar el mismo idioma que está usando el usuario para el nombre y descripción.
 
     Args:
         name: Nombre de la categoría
@@ -693,6 +703,10 @@ async def parse_income(text: str) -> dict:
         NO debes generar una fecha arbitraria. Deja el campo received_at como NULL 
         y el sistema usará automáticamente la fecha actual.
         
+        IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
+        en el mismo idioma en que fueron proporcionados por el usuario.
+        Nunca traduzcas los nombres de categorías o notas a otro idioma.
+        
         Por ejemplo:
         - "ayer recibí un pago a 20K" debe registrarse con la fecha de ayer
         - "el sábado me pagaron 100k" debe registrarse con la fecha del sábado más reciente
@@ -727,6 +741,10 @@ async def parse_incomes(text: str) -> Dict[str, Any]:
         IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
         NO debes generar una fecha arbitraria. Deja el campo received_at como NULL 
         y el sistema usará automáticamente la fecha actual.
+
+        IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
+        en el mismo idioma en que fueron proporcionados por el usuario.
+        Nunca traduzcas los nombres de categorías o notas a otro idioma.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(

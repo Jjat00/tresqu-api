@@ -409,6 +409,8 @@ async def process_message(user: User, raw_text: str) -> str:
             - Las herramientas ya incluyen el ID del usuario actual
             - Siempre que generes reportes de gastos o ingresos usa negrita con doble asterisco (**) para el formato en negrita. ejemplo: "**Categoría**: 100 COP"
             - Puedes responder también con cursiva, ejemplo: "_Categoría_: 100 COP", usalo cuando sea necesario.
+            - Los nombres de las categorías nuevas SIEMPRE deben crearse en el mismo idioma que el usuario está utilizando
+            - Las descripciones, ejemplos y notas de gastos/ingresos SIEMPRE deben escribirse en el mismo idioma del usuario
 
             COLORES PARA CATEGORÍAS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
