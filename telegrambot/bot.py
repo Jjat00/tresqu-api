@@ -28,6 +28,22 @@ ESPERANDO_MENSAJE_BROADCAST = 2
 ESPERANDO_ZONA_HORARIA = 3  # Nuevo estado
 
 
+# Función de utilidad para normalizar números de teléfono
+def normalize_phone_number(phone_number):
+    """
+    Normaliza un número de teléfono eliminando el signo + al inicio.
+
+    Args:
+        phone_number (str): El número de teléfono a normalizar
+
+    Returns:
+        str: El número normalizado sin el signo +, o None si el input era None
+    """
+    if not phone_number:
+        return None
+    return phone_number.lstrip('+')
+
+
 # Funciones síncronas para operaciones de base de datos
 def get_or_create_chat(chat_id):
     """
@@ -122,16 +138,20 @@ def get_user_by_external_id(external_id):
 
 def get_user_by_phone_number(phone_number):
     """Busca un usuario por número de teléfono"""
-    return User.objects.filter(phone_number=phone_number).first()
+    # Normalizar el número de teléfono (eliminar el signo + si existe)
+    normalized_phone = normalize_phone_number(phone_number)
+    return User.objects.filter(phone_number=normalized_phone).first()
 
 
 def create_user(external_id, platform, first_name, username, phone_number=None, default_currency='USD'):
+    # Normalizar el número de teléfono (eliminar el signo + si existe)
+    normalized_phone = normalize_phone_number(phone_number)
     return User.objects.create(
         external_id=external_id,
         platform=platform,
         first_name=first_name or "",
         username=username or "",
-        phone_number=phone_number,
+        phone_number=normalized_phone,
         default_currency=default_currency
     )
 
@@ -532,6 +552,9 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     contact = update.message.contact
     phone_number = contact.phone_number
 
+    # Normalizar el número de teléfono (eliminar el signo + si existe)
+    normalized_phone = normalize_phone_number(phone_number)
+
     # Verificar que el contacto pertenece al usuario que está haciendo el registro
     if str(contact.user_id) != str(user.id):
         await update.message.reply_text(
@@ -540,7 +563,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return ESPERANDO_TELEFONO
 
-    logger.info(f"Contacto recibido de {user.id}: {phone_number}")
+    logger.info(f"Contacto recibido de {user.id}: {normalized_phone}")
 
     # Obtener o crear el chat
     chat, _ = await get_or_create_chat_async(chat_id)
@@ -553,8 +576,8 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Contacto compartido"
     )
 
-    # Guardar el número de teléfono en el contexto para usarlo después
-    context.user_data["phone_number"] = phone_number
+    # Guardar el número de teléfono normalizado en el contexto para usarlo después
+    context.user_data["phone_number"] = normalized_phone
 
     # Crear botones para monedas comunes
     keyboard = []
@@ -693,6 +716,9 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Obtener o crear el chat
     chat, created = await get_or_create_chat_async(chat_id)
+
+    # Asegurarse de que el número de teléfono esté normalizado
+    phone_number = normalize_phone_number(phone_number)
 
     # Buscar si ya existe un usuario con este número de teléfono
     db_user = await get_user_by_phone_number_async(phone_number)
