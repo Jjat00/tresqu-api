@@ -135,7 +135,10 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             logger.warning(f"No hay gastos para el usuario {request.user}")
             return Response({
                 'categories': [],
-                'totals': []
+                'totals': [],
+                'colors': [],
+                'descriptions': [],
+                'examples': []
             })
 
         result = queryset.values('category__name').annotate(
@@ -145,14 +148,32 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         # Transformar a formato esperado por el frontend
         categories = []
         totals = []
+        colors = []
+        descriptions = []
+        examples = []
+
         for item in result:
             category_name = item['category__name'] or 'Otros'
             categories.append(category_name)
             totals.append(float(item['total']))
 
+            # Obtener información adicional de la categoría
+            category = Category.objects.filter(name=category_name).first()
+            if category:
+                colors.append(category.color)
+                descriptions.append(category.description or '')
+                examples.append(category.examples or '')
+            else:
+                colors.append('#CCCCCC')
+                descriptions.append('')
+                examples.append('')
+
         return Response({
             'categories': categories,
-            'totals': totals
+            'totals': totals,
+            'colors': colors,
+            'descriptions': descriptions,
+            'examples': examples
         })
 
     @action(detail=False, methods=['get'])
@@ -582,7 +603,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                     'hoverBackgroundColor': []
                 }],
                 'filter_summary': "Sin datos",
-                'total_amount': 0
+                'total_amount': 0,
+                'categories_info': []
             })
 
         # Agrupar por categoría y calcular totales
@@ -604,16 +626,27 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         data = []
         backgroundColor = []
         hoverBackgroundColor = []
+        categories_info = []
 
         for item in by_category:
             category_name = item['category__name'] or 'Otros'
             category = Category.objects.filter(name=category_name).first()
             color = category.color if category else '#CCCCCC'
+            description = category.description if category else ''
+            examples = category.examples if category else ''
 
             labels.append(category_name)
             data.append(float(item['total']))
             backgroundColor.append(color)
             hoverBackgroundColor.append(color)
+
+            # Agregar información detallada de la categoría
+            categories_info.append({
+                'name': category_name,
+                'color': color,
+                'description': description,
+                'examples': examples
+            })
 
         # Obtener lista simplificada de gastos para detalles
         expenses = self.get_serializer(
@@ -637,7 +670,9 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             }],
             'filter_summary': filter_summary,
             'total_amount': sum(data),
-            'recent_expenses': expenses  # Incluir algunos gastos recientes para detalles
+            'recent_expenses': expenses,  # Incluir algunos gastos recientes para detalles
+            # Incluir información detallada de las categorías
+            'categories_info': categories_info
         }
 
         return Response(response_data)
@@ -839,10 +874,6 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 end_datetime = self._convert_to_utc(
                     end_date, True, user_timezone)
 
-                queryset = queryset.filter(
-                    timestamp__gte=start_datetime,
-                    timestamp__lte=end_datetime
-                )
             except (ValueError, TypeError):
                 return Response(
                     {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
@@ -864,7 +895,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 f"No hay gastos para el usuario {request.user} con los filtros aplicados")
             return Response({
                 'labels': [],
-                'datasets': []
+                'datasets': [],
+                'categories_info': []
             })
 
         # Agrupar por categoría y calcular totales
@@ -885,15 +917,26 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         labels = []
         data = []
         colors = []
+        categories_info = []
 
         for item in by_category:
             category_name = item['category__name'] or 'Otros'
             category = Category.objects.filter(name=category_name).first()
             color = category.color if category else '#CCCCCC'
+            description = category.description if category else ''
+            examples = category.examples if category else ''
 
             labels.append(category_name)
             data.append(float(item['total']))
             colors.append(color)
+
+            # Agregar información detallada de la categoría
+            categories_info.append({
+                'name': category_name,
+                'color': color,
+                'description': description,
+                'examples': examples
+            })
 
         # Resumen del filtro aplicado
         filter_summary = "Todos los gastos"
@@ -912,6 +955,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             }],
             'filter_summary': filter_summary,
             'total_amount': sum(data),
+            'categories_info': categories_info,
             'recent_expenses': self.get_serializer(
                 # Mostrar solo los 10 más recientes
                 queryset.order_by('-timestamp')[:10],
@@ -1434,7 +1478,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 f"No hay gastos para el usuario {request.user} con los filtros aplicados")
             return Response({
                 'labels': [],
-                'datasets': []
+                'datasets': [],
+                'categories_info': []
             })
 
         # Determinar agrupación temporal según el rango de fecha
@@ -1536,9 +1581,14 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             if category_name not in categories:
                 category = expense.category
                 color = category.color if category else '#CCCCCC'
+                description = category.description if category and category.description else ''
+                examples = category.examples if category and category.examples else ''
+
                 categories[category_name] = {
                     'name': category_name,
-                    'color': color
+                    'color': color,
+                    'description': description,
+                    'examples': examples
                 }
 
         # Limitar el número de categorías si se solicita
@@ -1625,6 +1675,16 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         if date_filter != 'all' and start_date and end_date:
             filter_summary = f"Gastos del {start_date.strftime('%d/%m/%Y')} al {end_date.strftime('%d/%m/%Y')}"
 
+        # Preparar información de categorías para el frontend
+        categories_info = []
+        for category_name, category_data in categories.items():
+            categories_info.append({
+                'name': category_name,
+                'color': category_data['color'],
+                'description': category_data.get('description', ''),
+                'examples': category_data.get('examples', '')
+            })
+
         # Formato final para Chart.js (stacked bar chart)
         response_data = {
             'labels': time_labels,
@@ -1632,6 +1692,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             'filter_summary': filter_summary,
             'total_amount': round(total_amount, 2),
             'group_by': group_by,
+            'categories_info': categories_info,
             'recent_expenses': self.get_serializer(
                 queryset.order_by('-timestamp')[:10],
                 many=True
@@ -1639,3 +1700,29 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         }
 
         return Response(response_data)
+
+    @action(detail=False, methods=['get'])
+    def categories_info(self, request):
+        """
+        Obtiene información completa de todas las categorías disponibles incluyendo colores, descripciones y ejemplos.
+
+        GET /api/expenses/categories_info/
+        """
+        logger.info(
+            f"Endpoint /categories_info/ accedido por usuario: {request.user}")
+
+        # Obtener todas las categorías
+        categories = Category.objects.all().order_by('name')
+
+        # Preparar respuesta con información detallada
+        result = []
+        for category in categories:
+            result.append({
+                'id': category.id,
+                'name': category.name,
+                'color': category.color,
+                'description': category.description or '',
+                'examples': category.examples or ''
+            })
+
+        return Response(result)

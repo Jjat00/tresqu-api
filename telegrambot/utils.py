@@ -36,3 +36,29 @@ def get_existing_categories():
     except Exception as e:
         print(f"Error al obtener categorías: {e}")
         return []
+
+
+@sync_to_async
+def get_categories_with_details():
+    """
+    Obtiene un diccionario con todas las categorías disponibles para gastos
+    incluyendo su descripción y ejemplos.
+
+    Returns:
+        dict: Diccionario donde cada clave es el nombre de la categoría y cada valor
+              es otro diccionario con 'description' y 'examples'.
+    """
+    try:
+        categories = Category.objects.all().values(
+            'name', 'description', 'examples', 'color')
+        result = {}
+        for category in categories:
+            result[category['name']] = {
+                'description': category['description'] or '',
+                'examples': category['examples'] or '',
+                'color': category['color']
+            }
+        return result
+    except Exception as e:
+        print(f"Error al obtener categorías con detalles: {e}")
+        return {}

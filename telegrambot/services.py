@@ -44,7 +44,7 @@ from telegrambot.tools import (
     get_or_create_income_category,
 )
 
-from telegrambot.utils import get_existing_categories
+from telegrambot.utils import get_existing_categories, get_categories_with_details
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -295,14 +295,31 @@ async def process_message(user: User, raw_text: str) -> str:
             get_top_expense_categories, get_top_income_categories_for_user
         ])
 
-        # Esperamos el resultado de la función asíncrona
+        # Obtener las categorías con sus detalles
+        categories_with_details = await get_categories_with_details()
+
+        # Construir información detallada de categorías para el prompt
+        categories_info = []
+        for name, details in categories_with_details.items():
+            category_info = f"- {name}: {details['description']} Ejemplos: {details['examples']}"
+            categories_info.append(category_info)
+
+        # Ordenar alfabéticamente las categorías para el prompt
+        categories_info.sort()
+        categories_detailed_str = "\n".join(categories_info)
+
+        # Obtener solo la lista de nombres para mantener la compatibilidad
         existing_categories = await get_existing_categories()
         categories_str = ', '.join(existing_categories)
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
             Eres un asistente financiero experto en clasificar gastos e ingresos.
-            Las categorías disponibles son: {categories_str}
+            
+            CATEGORÍAS DISPONIBLES:
+            {categories_detailed_str}
+            
+            Lista simplificada de categorías: {categories_str}
 
             INSTRUCCIONES:
             1. Si detectas un saludo corto ⇒ responde con un saludo.
@@ -334,6 +351,11 @@ async def process_message(user: User, raw_text: str) -> str:
             PARA AMBOS:
             12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
             13. Clasifica el movimiento en una de las categorías proporcionadas.
+                13.1 Utiliza las descripciones y ejemplos de las categorías para hacer una clasificación más precisa.
+                13.2 Si dudas entre dos categorías, elige la que mejor se adapte según los ejemplos proporcionados.
+                13.3 Si es necesario crear una nueva categoría, usa get_or_create_category o get_or_create_income_category 
+                     según corresponda, proporcionando nombre, descripción, ejemplos y un color hexadecimal atractivo.
+                     Elige una descripción breve pero informativa y ejemplos relevantes.
             14. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
             15. Si no se especifica fecha, usa get_current_date para la fecha actual
             
@@ -387,6 +409,13 @@ async def process_message(user: User, raw_text: str) -> str:
             - Las herramientas ya incluyen el ID del usuario actual
             - Siempre que generes reportes de gastos o ingresos usa negrita con doble asterisco (**) para el formato en negrita. ejemplo: "**Categoría**: 100 COP"
             - Puedes responder también con cursiva, ejemplo: "_Categoría_: 100 COP", usalo cuando sea necesario.
+
+            COLORES PARA CATEGORÍAS:
+            - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
+            - Usa colores que tengan buen contraste y sean coherentes con la temática de la categoría
+            - Ejemplos: azul (#1E3A8A) para categorías relacionadas con servicios, verde (#10B981) para alimentación, 
+              naranja (#F97316) para transporte, rojo (#DC2626) para préstamos, etc.
+            - Asegúrate de que los colores sean atractivos visualmente
 
             Responde de manera cool, eres joven y de Colombia. 
             Dale un toque de humor y de joven cuando sea necesario.

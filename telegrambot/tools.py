@@ -224,10 +224,17 @@ def is_greeting(text: str) -> bool:
 
 
 @tool
-def get_or_create_category(name: str) -> Dict[str, str]:
+def get_or_create_category(name: str, description: str | None = None, examples: str | None = None, color: str | None = None) -> Dict[str, str]:
     """
     Crea una nueva categoría en la base de datos.
     Útil cuando un usuario registra un gasto con una categoría que no existe.
+
+    Args:
+        name: Nombre de la categoría
+        description: Descripción opcional de la categoría
+        examples: Ejemplos opcionales de gastos para esta categoría
+        color: Color hexadecimal opcional (formato: #RRGGBB)
+
     Devuelve un diccionario con el resultado de la operación.
     """
     try:
@@ -236,19 +243,51 @@ def get_or_create_category(name: str) -> Dict[str, str]:
 
         # Verificar si ya existe
         if Category.objects.filter(name=normalized_name).exists():
+            category = Category.objects.get(name=normalized_name)
+            # Actualizar si se proporcionan nuevos valores
+            updated = False
+            if description and not category.description:
+                category.description = description
+                updated = True
+            if examples and not category.examples:
+                category.examples = examples
+                updated = True
+            if color:
+                category.color = color
+                updated = True
+
+            if updated:
+                category.save()
+
             return {
                 "status": "info",
-                "message": f"La categoría '{normalized_name}' ya existe"
+                "message": f"La categoría '{normalized_name}' ya existe",
+                "id": str(category.id),
+                "color": category.color
             }
 
-        # Crear nueva categoría
-        category, created = Category.objects.get_or_create(
-            name=normalized_name)
+        # Si no hay color, dejamos que el modelo decida usando get_unused_color
+        category_data = {
+            "name": normalized_name,
+        }
+
+        if description:
+            category_data["description"] = description
+
+        if examples:
+            category_data["examples"] = examples
+
+        if color:
+            category_data["color"] = color
+
+        # Crear nueva categoría (el método save del modelo asignará un color si no se proporciona)
+        category = Category.objects.create(**category_data)
 
         return {
             "status": "success",
             "message": f"Categoría '{normalized_name}' creada exitosamente",
-            "id": str(category.id)
+            "id": str(category.id),
+            "color": category.color
         }
     except Exception as e:
         logger.error(f"Error al crear categoría: {e}")
@@ -259,10 +298,16 @@ def get_or_create_category(name: str) -> Dict[str, str]:
 
 
 @tool
-def get_or_create_income_category(name: str) -> Dict[str, str]:
+def get_or_create_income_category(name: str, description: str | None = None, color: str | None = None) -> Dict[str, str]:
     """
     Crea una nueva categoría de ingreso en la base de datos.
     Útil cuando un usuario registra un ingreso con una categoría que no existe.
+
+    Args:
+        name: Nombre de la categoría
+        description: Descripción opcional de la categoría
+        color: Color hexadecimal opcional (formato: #RRGGBB)
+
     Devuelve un diccionario con el resultado de la operación.
     """
     try:
@@ -274,20 +319,45 @@ def get_or_create_income_category(name: str) -> Dict[str, str]:
         # Verificar si ya existe
         if IncomeCategory.objects.filter(name=normalized_name).exists():
             category = IncomeCategory.objects.get(name=normalized_name)
+
+            # Actualizar si se proporcionan nuevos valores
+            updated = False
+            if description and hasattr(category, 'description') and not category.description:
+                category.description = description
+                updated = True
+            if color and hasattr(category, 'color'):
+                category.color = color
+                updated = True
+
+            if updated:
+                category.save()
+
             return {
                 "status": "info",
                 "message": f"La categoría de ingreso '{normalized_name}' ya existe",
-                "id": str(category.id)
+                "id": str(category.id),
+                "color": getattr(category, 'color', None)
             }
 
         # Crear nueva categoría
-        category, created = IncomeCategory.objects.get_or_create(
-            name=normalized_name)
+        category_data = {
+            "name": normalized_name
+        }
+
+        # Agregar campos opcionales si el modelo los soporta
+        if description and hasattr(IncomeCategory, 'description'):
+            category_data["description"] = description
+
+        if color and hasattr(IncomeCategory, 'color'):
+            category_data["color"] = color
+
+        category = IncomeCategory.objects.create(**category_data)
 
         return {
             "status": "success",
             "message": f"Categoría de ingreso '{normalized_name}' creada exitosamente",
-            "id": str(category.id)
+            "id": str(category.id),
+            "color": getattr(category, 'color', None)
         }
     except Exception as e:
         logger.error(f"Error al crear categoría de ingreso: {e}")
@@ -322,16 +392,40 @@ def create_expense(
     else:
         date = timezone.now().date()
 
-    # Normalizar el nombre de la categoría
-    category_name = category.strip().capitalize()
+    # Normalizar el nombre de la categoría para mostrar (primera letra mayúscula)
+    display_category_name = category.strip().capitalize()
 
-    # Buscar la categoría en la base de datos
-    category_obj = None
+    # Buscar la categoría de forma insensible a mayúsculas/minúsculas
     try:
-        category_obj = Category.objects.get(name=category_name)
-    except Category.DoesNotExist:
-        # Si no existe, solo usamos el nombre como category_str
-        pass
+        # Buscar categoría existente (case-insensitive)
+        category_obj = Category.objects.filter(
+            name__iexact=category.strip()).first()
+        if category_obj:
+            # Si existe, usar el nombre exacto de la categoría existente
+            category_name = category_obj.name
+        else:
+            # Si no existe, la vamos a crear con normalize_name
+            category_name = display_category_name
+            # Crear la categoría
+            result = get_or_create_category.invoke({"name": category_name})
+            if result["status"] == "success" or result["status"] == "info":
+                # Obtener la categoría recién creada
+                category_obj = Category.objects.get(name=category_name)
+            else:
+                # Si hubo un error al crear la categoría, registrar el error
+                logger.error(f"Error al crear categoría para gasto: {result}")
+                # Crear una categoría por defecto para evitar gastos sin categoría
+                category_obj, created = Category.objects.get_or_create(name="Otros",
+                                                                       defaults={"description": "Categoría por defecto para gastos sin clasificar",
+                                                                                 "examples": "Gastos varios, misceláneos"})
+                category_name = "Otros"
+    except Exception as e:
+        logger.error(f"Error al buscar/crear categoría: {e}")
+        # Crear una categoría por defecto para evitar gastos sin categoría
+        category_obj, created = Category.objects.get_or_create(name="Otros",
+                                                               defaults={"description": "Categoría por defecto para gastos sin clasificar",
+                                                                         "examples": "Gastos varios, misceláneos"})
+        category_name = "Otros"
 
     # Crear el texto para el embedding
     expense_text = f"Gasto de {amount} {currency} en {category_name} el {date}. {note}"
@@ -365,16 +459,41 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
     try:
         expense = Expense.objects.get(id=expense_id)
 
-        # Normalizar el nombre de la categoría
-        category_name = category.strip().capitalize()
+        # Normalizar el nombre de la categoría para mostrar (primera letra mayúscula)
+        display_category_name = category.strip().capitalize()
 
-        # Buscar o crear la categoría
-        category_obj = None
+        # Buscar la categoría de forma insensible a mayúsculas/minúsculas
         try:
-            category_obj = Category.objects.get(name=category_name)
-        except Category.DoesNotExist:
-            # Si no existe, solo usamos el nombre como category_str
-            pass
+            # Buscar categoría existente (case-insensitive)
+            category_obj = Category.objects.filter(
+                name__iexact=category.strip()).first()
+            if category_obj:
+                # Si existe, usar el nombre exacto de la categoría existente
+                category_name = category_obj.name
+            else:
+                # Si no existe, la vamos a crear con normalize_name
+                category_name = display_category_name
+                # Crear la categoría
+                result = get_or_create_category.invoke({"name": category_name})
+                if result["status"] == "success" or result["status"] == "info":
+                    # Obtener la categoría recién creada
+                    category_obj = Category.objects.get(name=category_name)
+                else:
+                    # Si hubo un error al crear la categoría, registrar el error
+                    logger.error(
+                        f"Error al crear categoría para gasto: {result}")
+                    # Crear una categoría por defecto para evitar gastos sin categoría
+                    category_obj, created = Category.objects.get_or_create(name="Otros",
+                                                                           defaults={"description": "Categoría por defecto para gastos sin clasificar",
+                                                                                     "examples": "Gastos varios, misceláneos"})
+                    category_name = "Otros"
+        except Exception as e:
+            logger.error(f"Error al buscar/crear categoría: {e}")
+            # Crear una categoría por defecto para evitar gastos sin categoría
+            category_obj, created = Category.objects.get_or_create(name="Otros",
+                                                                   defaults={"description": "Categoría por defecto para gastos sin clasificar",
+                                                                             "examples": "Gastos varios, misceláneos"})
+            category_name = "Otros"
 
         expense.amount = amount
         expense.currency = currency
