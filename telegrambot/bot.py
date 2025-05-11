@@ -547,10 +547,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Maneja el contacto recibido y solicita la moneda por defecto."""
+    logger.info("Iniciando handle_contact")
+
     chat_id = update.effective_chat.id
     user = update.effective_user
     contact = update.message.contact
     phone_number = contact.phone_number
+
+    logger.info(
+        f"Contacto recibido - chat_id: {chat_id}, user_id: {user.id}, phone: {phone_number}")
 
     # Normalizar el número de teléfono (eliminar el signo + si existe)
     normalized_phone = normalize_phone_number(phone_number)
@@ -563,7 +568,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return ESPERANDO_TELEFONO
 
-    logger.info(f"Contacto recibido de {user.id}: {normalized_phone}")
+    logger.info(f"Contacto validado para {user.id}: {normalized_phone}")
 
     # Obtener o crear el chat
     chat, _ = await get_or_create_chat_async(chat_id)
@@ -578,32 +583,29 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Guardar el número de teléfono normalizado en el contexto para usarlo después
     context.user_data["phone_number"] = normalized_phone
+    logger.info("Número de teléfono guardado en context.user_data")
 
-    # Crear botones para monedas comunes
+    # Crear botones para monedas comunes usando teclado normal
     keyboard = []
     for i in range(0, len(COMMON_CURRENCIES), 2):
         row = []
         currency = COMMON_CURRENCIES[i]
-        row.append(InlineKeyboardButton(
-            f"{currency['flag']} {currency['code']}",
-            callback_data=f"currency_{currency['code']}"
-        ))
+        row.append(KeyboardButton(f"{currency['flag']} {currency['code']}"))
 
         # Agregar segunda moneda en la fila si existe
         if i + 1 < len(COMMON_CURRENCIES):
             currency2 = COMMON_CURRENCIES[i + 1]
-            row.append(InlineKeyboardButton(
-                f"{currency2['flag']} {currency2['code']}",
-                callback_data=f"currency_{currency2['code']}"
-            ))
+            row.append(KeyboardButton(
+                f"{currency2['flag']} {currency2['code']}"))
 
         keyboard.append(row)
 
     # Agregar botón para especificar otra moneda
-    keyboard.append([InlineKeyboardButton(
-        "Otra moneda", callback_data="currency_other")])
+    keyboard.append([KeyboardButton("Otra moneda")])
+    logger.info("Agregado botón 'Otra moneda'")
 
-    reply_markup = InlineKeyboardMarkup(keyboard)
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
+    logger.info("Teclado normal creado")
 
     message = (
         "¡Gracias! Ahora necesito que selecciones tu moneda predeterminada. "
@@ -612,6 +614,7 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     )
 
     await update.message.reply_text(message, reply_markup=reply_markup)
+    logger.info("Mensaje con teclado enviado")
 
     # Registrar respuesta
     await create_message_async(
@@ -624,50 +627,11 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     return ESPERANDO_MONEDA
 
 
-async def handle_currency_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Maneja la selección de moneda desde los botones inline."""
-    query = update.callback_query
-    await query.answer()
-
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-
-    # Obtener o crear el chat
-    chat, _ = await get_or_create_chat_async(chat_id)
-
-    # Extraer el código de moneda del callback_data
-    callback_data = query.data
-
-    if callback_data == "currency_other":
-        # El usuario quiere especificar otra moneda
-        message = (
-            "Por favor, escribe el código ISO 4217 de tu moneda (3 letras).\n"
-            "Por ejemplo: USD, EUR, GBP, etc."
-        )
-        await query.edit_message_text(text=message)
-
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "system",
-            "outgoing",
-            message
-        )
-
-        return ESPERANDO_MONEDA
-    else:
-        # El usuario ha seleccionado una moneda de la lista
-        currency_code = callback_data.replace("currency_", "")
-
-        # Completar el registro con la moneda seleccionada
-        return await complete_registration(update, context, currency_code)
-
-
 async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Maneja la entrada de texto para el código de moneda."""
     chat_id = update.effective_chat.id
     user = update.effective_user
-    currency_code = update.message.text.strip().upper()
+    text = update.message.text.strip()
 
     # Obtener o crear el chat
     chat, _ = await get_or_create_chat_async(chat_id)
@@ -677,8 +641,21 @@ async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYP
         chat,
         str(update.message.message_id),
         "incoming",
-        currency_code
+        text
     )
+
+    # Si el usuario seleccionó "Otra moneda"
+    if text == "Otra moneda":
+        message = (
+            "Por favor, escribe el código ISO 4217 de tu moneda (3 letras).\n"
+            "Por ejemplo: USD, EUR, GBP, etc."
+        )
+        await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
+        return ESPERANDO_MONEDA
+
+    # Extraer el código de moneda del texto (asumiendo formato "🏦 USD")
+    currency_code = text.split(
+    )[-1].upper() if len(text.split()) > 1 else text.upper()
 
     # Validar el código de moneda
     if not is_valid_currency(currency_code):
@@ -687,15 +664,6 @@ async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYP
             f"Por favor, escribe un código válido de 3 letras como USD, EUR, GBP, etc."
         )
         await update.message.reply_text(message)
-
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "system",
-            "outgoing",
-            message
-        )
-
         return ESPERANDO_MONEDA
 
     # Completar el registro con la moneda proporcionada
@@ -704,11 +672,16 @@ async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, currency_code: str) -> int:
     """Completa el proceso de registro y configura la moneda predeterminada."""
+    logger.info("Iniciando complete_registration")
+
     user = update.effective_user
     chat_id = update.effective_chat.id
     phone_number = context.user_data.get('phone_number')
+    logger.info(
+        f"Procesando registro para chat_id: {chat_id}, user: {user.id}")
 
     if not phone_number:
+        logger.error("No se encontró número de teléfono en context.user_data")
         await update.message.reply_text(
             "No se encontró un número de teléfono. Por favor, inicia el registro nuevamente con /registrar."
         )
@@ -716,65 +689,80 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
 
     # Obtener o crear el chat
     chat, created = await get_or_create_chat_async(chat_id)
+    logger.info("Chat obtenido/creado en complete_registration")
 
     # Asegurarse de que el número de teléfono esté normalizado
     phone_number = normalize_phone_number(phone_number)
+    logger.info(f"Número de teléfono normalizado: {phone_number}")
 
     # Buscar si ya existe un usuario con este número de teléfono
     db_user = await get_user_by_phone_number_async(phone_number)
+    logger.info(f"Usuario existente encontrado: {db_user is not None}")
 
-    # Si no existe, crear un nuevo usuario
-    if not db_user:
-        db_user = await create_user_async(
-            external_id=str(user.id),
-            platform="telegram",
-            first_name=user.first_name,
-            username=user.username,
-            phone_number=phone_number,
-            default_currency=currency_code
-        )
-        action = "creada"
-    else:
-        # Si existe, actualizar la moneda predeterminada
-        db_user = await update_user_currency_async(db_user, currency_code)
-        action = "actualizada"
+    try:
+        # Si no existe, crear un nuevo usuario
+        if not db_user:
+            logger.info("Creando nuevo usuario")
+            db_user = await create_user_async(
+                external_id=str(user.id),
+                platform="telegram",
+                first_name=user.first_name,
+                username=user.username,
+                phone_number=phone_number,
+                default_currency=currency_code
+            )
+            action = "creada"
+        else:
+            # Si existe, actualizar la moneda predeterminada
+            logger.info("Actualizando usuario existente")
+            db_user = await update_user_currency_async(db_user, currency_code)
+            action = "actualizada"
 
-    # Asociar el usuario al chat
-    await update_chat_user_async(chat, db_user)
-
-    await update.message.reply_text(
-        f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
-        f"Moneda predeterminada: {currency_code} ({get_currency_name(currency_code)})\n\n"
-        f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
-        f"- \"Gasté 50 en comida\"\n"
-        f"- \"Compré café por 3.5\"\n"
-        f"- \"Pagué la cuenta de luz, 75\"\n\n"
-        f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda"
-    )
-
-    # Preguntar por la zona horaria si no está configurada
-    if not hasattr(db_user, 'timezone') or not db_user.timezone:
-        # Crear un teclado con las zonas horarias principales
-        keyboard = []
-        for tz_code, tz_name in COMMON_TIMEZONES:
-            keyboard.append([InlineKeyboardButton(
-                tz_name, callback_data=f"tz:{tz_code}")])
-
-        # Añadir un botón para cancelar
-        keyboard.append([InlineKeyboardButton(
-            "Más tarde", callback_data="tz:cancel")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        # Asociar el usuario al chat
+        await update_chat_user_async(chat, db_user)
+        logger.info("Usuario asociado al chat")
 
         await update.message.reply_text(
-            "Para finalizar, por favor selecciona tu zona horaria. "
-            "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
-            reply_markup=reply_markup
+            f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
+            f"Moneda predeterminada: {currency_code} ({get_currency_name(currency_code)})\n\n"
+            f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
+            f"- \"Gasté 50k en comida\"\n"
+            f"- \"Compré café por 35000\"\n"
+            f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+            f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda"
         )
+        logger.info("Mensaje de confirmación enviado")
 
-        return ESPERANDO_ZONA_HORARIA
+        # Preguntar por la zona horaria si no está configurada
+        if not hasattr(db_user, 'timezone') or not db_user.timezone:
+            logger.info("Solicitando zona horaria")
+            # Crear un teclado con las zonas horarias principales
+            keyboard = []
+            for tz_code, tz_name in COMMON_TIMEZONES:
+                keyboard.append([InlineKeyboardButton(
+                    tz_name, callback_data=f"tz:{tz_code}")])
 
-    return ConversationHandler.END
+            # Añadir un botón para cancelar
+            keyboard.append([InlineKeyboardButton(
+                "Más tarde", callback_data="tz:cancel")])
+
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await update.message.reply_text(
+                "Para finalizar, por favor selecciona tu zona horaria. "
+                "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
+                reply_markup=reply_markup
+            )
+
+            return ESPERANDO_ZONA_HORARIA
+
+        return ConversationHandler.END
+    except Exception as e:
+        logger.error(f"Error en complete_registration: {e}")
+        await update.message.reply_text(
+            "Lo siento, hubo un error al completar tu registro. Por favor, intenta nuevamente."
+        )
+        return ConversationHandler.END
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1066,8 +1054,6 @@ def setup_bot():
                 MessageHandler(filters.CONTACT, handle_contact),
             ],
             ESPERANDO_MONEDA: [
-                CallbackQueryHandler(
-                    handle_currency_selection, pattern=r"^currency_[A-Z]{3}$|^currency_other$"),
                 MessageHandler(filters.TEXT & ~filters.COMMAND,
                                handle_currency_text),
             ],
@@ -1077,6 +1063,8 @@ def setup_bot():
             ],
         },
         fallbacks=[CommandHandler("cancelar", cancel)],
+        name="registration_conversation",
+        persistent=False,
     )
     application.add_handler(conv_handler)
 
@@ -1120,4 +1108,27 @@ def setup_bot():
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
 
+    # Agregar manejador de errores
+    application.add_error_handler(error_handler)
+
+    # Agregar manejador de callback query global para debugging
+    application.add_handler(CallbackQueryHandler(debug_callback))
+
     return application
+
+
+async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja los errores que ocurren durante el procesamiento de actualizaciones."""
+    logger.error(f"Error en el bot: {context.error}")
+
+    if update and update.effective_message:
+        await update.effective_message.reply_text(
+            "Lo siento, ha ocurrido un error. Por favor, intenta nuevamente."
+        )
+
+
+async def debug_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manejador de debug para callback queries no manejados."""
+    query = update.callback_query
+    logger.info(f"Callback query no manejado recibido: {query.data}")
+    await query.answer("Callback recibido pero no manejado")
