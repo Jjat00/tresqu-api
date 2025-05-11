@@ -19,6 +19,7 @@ from .currencies import is_valid_currency
 from datetime import datetime, timedelta
 from django.db import models
 import pytz
+import json
 
 embeddings = OpenAIEmbeddings(
     api_key=settings.OPENAI_API_KEY,
@@ -457,7 +458,7 @@ def create_expense(
         category=category_obj, category_str=category_name,
         spent_at=date, note=note,
         timestamp=timezone.now(), embedding=embedding,
-        raw_message=expense_text
+        raw_message=expense_text  # Usar texto plano en lugar de JSON
     )
     return (
         f"✅ ¡Gasto registrado!\n"
@@ -518,6 +519,16 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
             expense.spent_at = datetime.strptime(spent_at, "%Y-%m-%d").date()
         if note:
             expense.note = note
+
+        # Actualizar el raw_message
+        expense_text = f"Gasto de {amount} {currency} en {category_name} el {expense.spent_at}. {note}"
+        expense.raw_message = expense_text  # Usar texto plano en lugar de JSON
+
+        # Actualizar embedding
+        try:
+            expense.embedding = embeddings.embed_query(expense_text)
+        except Exception as e:
+            logger.error(f"Error actualizando embedding para gasto: {e}")
 
         expense.save()
         return f"✅ ¡Gasto actualizado!\n"
@@ -580,33 +591,29 @@ def get_expense_by_id(expense_id: str):
 @tool
 def search_expenses_by_text(user_external_id: str, search_text: str) -> List[Dict[str, Any]]:
     """
-    Busca gastos que coincidan con el texto de búsqueda.
-    Devuelve una lista de gastos que coinciden con el texto.
+    Busca gastos que coincidan con el texto de búsqueda usando embeddings.
     """
-    user = User.objects.get(external_id=user_external_id)
+    try:
+        user = User.objects.get(external_id=user_external_id)
 
-    # Buscar en el texto del mensaje original y en la nota
-    expenses = Expense.objects.filter(
-        user=user,
-        raw_message__icontains=search_text
-    ) | Expense.objects.filter(
-        user=user,
-        note__icontains=search_text
-    )
+        # Generamos embedding del texto de búsqueda
+        search_embedding = embeddings.embed_query(search_text)
 
-    # Ordenar por fecha más reciente
-    expenses = expenses.order_by('-spent_at', '-timestamp')
+        # Buscamos gastos similares
+        similar_expenses = Expense.find_similar(user, search_embedding)
 
-    # Convertir a lista de diccionarios
-    return [{
-        'id': str(expense.id),
-        'amount': expense.amount,
-        'currency': expense.currency,
-        'category': expense.category_str,
-        'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
-        'note': expense.note,
-        'raw_message': expense.raw_message
-    } for expense in expenses[:5]]  # Limitar a 5 resultados
+        return [{
+            'id': str(expense.id),
+            'amount': expense.amount,
+            'currency': expense.currency,
+            'category': expense.category_str,
+            'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+            'note': expense.note,
+            'raw_message': expense.raw_message
+        } for expense in similar_expenses]
+    except Exception as e:
+        logger.error(f"Error buscando gastos por texto: {e}")
+        return []
 
 
 @tool
@@ -826,6 +833,7 @@ def create_income(
             received_date = timezone.now().date()
 
         # Crear el objeto Income
+        income_text = f"Ingreso de {amount} {currency} en {category_obj.name} el {received_date}. {note}"
         income = Income.objects.create(
             user=user,
             amount=amount,
@@ -835,19 +843,12 @@ def create_income(
             timestamp=timezone.now(),
             received_at=received_date,
             note=note,
-            raw_message=json.dumps({
-                "amount": amount,
-                "currency": currency,
-                "category": category_obj.name,  # Usar el nombre normalizado
-                "received_at": received_at,
-                "note": note
-            })
+            raw_message=income_text  # Usar texto plano en lugar de JSON
         )
 
         # Generar embedding para la búsqueda semántica
         try:
-            search_text = f"{category_obj.name} {note} {amount} {currency} {received_at}"
-            income.embedding = embeddings.embed_query(search_text)
+            income.embedding = embeddings.embed_query(income_text)
             income.save()
         except Exception as e:
             logger.error(f"Error generando embedding para ingreso: {e}")
@@ -899,18 +900,12 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
         income.note = note
 
         # Actualizar el raw_message
-        income.raw_message = json.dumps({
-            "amount": amount,
-            "currency": currency,
-            "category": category_obj.name,  # Usar nombre normalizado
-            "received_at": received_at,
-            "note": note
-        })
+        income_text = f"Ingreso de {amount} {currency} en {category_obj.name} el {income.received_at}. {note}"
+        income.raw_message = income_text  # Usar texto plano en lugar de JSON
 
         # Actualizar embedding
         try:
-            search_text = f"{category_obj.name} {note} {amount} {currency} {received_at}"
-            income.embedding = embeddings.embed_query(search_text)
+            income.embedding = embeddings.embed_query(income_text)
         except Exception as e:
             logger.error(f"Error actualizando embedding para ingreso: {e}")
 

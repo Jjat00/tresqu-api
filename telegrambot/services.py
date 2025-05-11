@@ -448,7 +448,10 @@ async def process_message(user: User, raw_text: str) -> str:
                     - Si no se especifica fecha, muestra todas las categorías
                     - Ordena los resultados de mayor a menor
                 20.4 Para búsquedas semánticas:
-                    - Usa search_expenses o search_incomes SOLO cuando el usuario busque un movimiento específico
+                    - Usa search_expenses o search_incomes para buscar movimientos similares
+                    - Estas funciones usan embeddings para encontrar resultados semánticamente relacionados
+                    - Por ejemplo, buscar "comida" encontrará "restaurante", "almuerzo", "cena"
+                    - Por ejemplo, buscar "transporte" encontrará "taxi", "uber", "metro"
                     - NO uses estas funciones para consultas de período (esta semana, este mes, etc.)
                 20.5 Para consultas de período:
                     - Si el usuario pregunta "cuánto gasté/ingresé esta semana/mes/etc":
