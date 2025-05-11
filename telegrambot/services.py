@@ -51,7 +51,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.0,
+llm = ChatOpenAI(model="gpt-4.1", temperature=0.1,
                  api_key=settings.OPENAI_API_KEY)
 
 # Cliente de OpenAI para transcripción de audio
@@ -361,19 +361,16 @@ async def process_message(user: User, raw_text: str) -> str:
             ', '.join(existing_expense_categories)
         income_categories_str = 'Ingresos: ' + \
             ', '.join(existing_income_categories)
-        categories_str = f"{expense_categories_str}; {income_categories_str}"
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
             Eres un asistente financiero experto en clasificar gastos e ingresos.
             
-            CATEGORÍAS DISPONIBLES:
-            {categories_detailed_str}
-            
-            Lista simplificada de categorías: {categories_str}
+            Categorías disponibles para gastos: {expense_categories_str}
+            Categorías disponibles para ingresos: {income_categories_str}
 
             INSTRUCCIONES:
-            1. Si detectas un saludo corto ⇒ responde con un saludo.
+            1. Si detectas un saludo corto ⇒ usa is_greeting y responde con un saludo.
             
             PARA GASTOS:
             2. Si hay UN solo gasto ⇒ usa parse_expense y luego create_expense.
@@ -401,67 +398,84 @@ async def process_message(user: User, raw_text: str) -> str:
             
             PARA AMBOS:
             12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
-            13. Clasifica el movimiento en una de las categorías proporcionadas.
-                13.1 Utiliza las descripciones y ejemplos de las categorías para hacer una clasificación más precisa.
-                13.2 Si dudas entre dos categorías, elige la que mejor se adapte según los ejemplos proporcionados.
-                13.3 Si es necesario crear una nueva categoría, usa get_or_create_category o get_or_create_income_category 
-                     según corresponda, proporcionando nombre, descripción, ejemplos y un color hexadecimal atractivo.
-                     Elige una descripción breve pero informativa y ejemplos relevantes.
-            14. Si ninguna categoría es adecuada, usa get_or_create_category para crear una nueva.
-            15. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
+            13. Clasifica el movimiento en una de las categorías proporcionadas:
+                13.1 PRIMERO: Intenta usar una categoría existente de la lista proporcionada
+                     - Revisa cuidadosamente las categorías disponibles
+                     - Busca la categoría más apropiada basada en la descripción y ejemplos
+                     - Si hay una categoría similar, úsala en lugar de crear una nueva
+                13.2 SOLO SI ES NECESARIO: Si ninguna categoría existente es adecuada:
+                     - Usa get_or_create_category o get_or_create_income_category según corresponda
+                     - Proporciona nombre, descripción, ejemplos y color
+                     - Asegúrate de que la nueva categoría sea realmente necesaria
+                13.3 Si dudas entre dos categorías existentes:
+                     - Elige la que mejor se adapte según los ejemplos proporcionados
+                     - Prefiere categorías más generales sobre específicas
+                     - Si hay una categoría "Otros" o similar, úsala como último recurso
+            14. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
             
             EDICIÓN Y ELIMINACIÓN:
             16. Si el usuario quiere editar un gasto:
-                16.1 Usa search_expenses para encontrar el gasto que quiere editar
-                16.2 Si encuentra el gasto, usa update_expense para modificarlo
-                16.3 Si no encuentra el gasto, pide más detalles
+                16.1 Si menciona un ID específico ⇒ usa get_expense_by_id para verificar que existe
+                16.2 Si no menciona ID pero describe el gasto ⇒ usa search_expenses_by_text
+                16.3 Si encuentra el gasto, usa update_expense para modificarlo
+                16.4 Si no encuentra el gasto, pide más detalles
             17. Si el usuario quiere eliminar un gasto:
-                17.1 Usa search_expenses para encontrar el gasto
-                17.2 Si encuentra el gasto, usa delete_expense para eliminarlo
-                17.3 Si no encuentra el gasto, pide más detalles
+                17.1 Si menciona un ID específico ⇒ usa get_expense_by_id para verificar que existe
+                17.2 Si no menciona ID pero describe el gasto ⇒ usa search_expenses_by_text
+                17.3 Si encuentra el gasto, usa delete_expense para eliminarlo
+                17.4 Si no encuentra el gasto, pide más detalles
             18. Si el usuario quiere editar un ingreso:
-                18.1 Usa search_incomes para encontrar el ingreso que quiere editar
-                18.2 Si encuentra el ingreso, usa update_income para modificarlo
-                18.3 Si no encuentra el ingreso, pide más detalles
+                18.1 Si menciona un ID específico ⇒ usa get_income_by_id para verificar que existe
+                18.2 Si no menciona ID pero describe el ingreso ⇒ usa search_incomes_by_text
+                18.3 Si encuentra el ingreso, usa update_income para modificarlo
+                18.4 Si no encuentra el ingreso, pide más detalles
             19. Si el usuario quiere eliminar un ingreso:
-                19.1 Usa search_incomes para encontrar el ingreso
-                19.2 Si encuentra el ingreso, usa delete_income para eliminarlo
-                19.3 Si no encuentra el ingreso, pide más detalles
+                19.1 Si menciona un ID específico ⇒ usa get_income_by_id para verificar que existe
+                19.2 Si no menciona ID pero describe el ingreso ⇒ usa search_incomes_by_text
+                19.3 Si encuentra el ingreso, usa delete_income para eliminarlo
+                19.4 Si no encuentra el ingreso, pide más detalles
             
             CONSULTAS:
             20. Si el usuario hace consultas sobre sus gastos o ingresos:
-                20.1 Para consultar por categoría en un período:
+                20.1 Para consultar por ID específico:
+                    - Usa get_expense_by_id o get_income_by_id según corresponda
+                20.2 Para consultar por categoría en un período:
                     - Usa get_category_expenses o get_category_incomes según corresponda
                     - Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
                     - Si se menciona "este mes", calcula el primer día del mes actual
-                20.2 Para consultar las categorías con mayores movimientos:
+                20.3 Para consultar las categorías con mayores movimientos:
                     - Usa get_top_expense_categories o get_top_income_categories_for_user según corresponda
                     - Si no se especifica fecha, muestra todas las categorías
                     - Ordena los resultados de mayor a menor
-                20.3 Para búsquedas semánticas:
+                20.4 Para búsquedas semánticas:
                     - Usa search_expenses o search_incomes SOLO cuando el usuario busque un movimiento específico
                     - NO uses estas funciones para consultas de período (esta semana, este mes, etc.)
-                20.4 Para consultas de período:
+                20.5 Para consultas de período:
                     - Si el usuario pregunta "cuánto gasté/ingresé esta semana/mes/etc":
                         * Usa get_top_expense_categories o get_top_income_categories_for_user
                         * Calcula el total sumando los montos de todas las categorías
                         * Muestra un resumen por categoría y el total general
-                20.5 Para listar todos los movimientos del usuario:
+                20.6 Para listar todos los movimientos del usuario:
                     * Usa get_user_expenses o get_user_incomes según corresponda
                     * Si no se especifica fecha, muestra todos los movimientos
+                    * Si se especifica un rango de fechas, filtra por ese rango
 
             CREACIÓN DE CATEGORÍAS DE INGRESOS:
             21. Al crear nuevas categorías de ingresos con get_or_create_income_category:
-                21.1 Proporciona siempre estos parámetros:
+                21.1 SOLO crear una nueva categoría si:
+                    - No existe una categoría similar en la lista proporcionada
+                    - El ingreso no puede clasificarse en ninguna categoría existente
+                    - La categoría es realmente necesaria y no es un caso aislado
+                21.2 Proporciona siempre estos parámetros:
                     * name: Nombre de la categoría
                     * description: Descripción breve de la categoría (qué tipo de ingresos incluye)
                     * example: Ejemplos concretos de ingresos que pertenecen a esta categoría
                     * color: Color hexadecimal (#RRGGBB) que represente visualmente la categoría
-                21.2 Al registrar un ingreso con create_income_for_user, usa los parámetros adicionales:
+                21.3 Al registrar un ingreso con create_income_for_user, usa los parámetros adicionales:
                     * category_description: para la descripción de la categoría
                     * category_example: para los ejemplos de la categoría
                     * category_color: para el color de la categoría
-                21.3 Estos campos son importantes para que el usuario pueda entender mejor cada categoría
+                21.4 Estos campos son importantes para que el usuario pueda entender mejor cada categoría
 
             IMPORTANTE:
             - Siempre determina correctamente si el mensaje se refiere a un GASTO o a un INGRESO
@@ -475,6 +489,8 @@ async def process_message(user: User, raw_text: str) -> str:
             - Puedes responder también con cursiva, ejemplo: "_Categoría_: 100 COP", usalo cuando sea necesario.
             - Los nombres de las categorías nuevas SIEMPRE deben crearse en el mismo idioma que el usuario está utilizando
             - Las descripciones, ejemplos y notas de gastos/ingresos SIEMPRE deben escribirse en el mismo idioma del usuario
+            - PRIORIZA SIEMPRE el uso de categorías existentes sobre la creación de nuevas
+            - Si hay una categoría "Otros" o similar, úsala para casos que no encajan perfectamente en otras categorías
 
             COLORES PARA CATEGORÍAS DE GASTOS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
