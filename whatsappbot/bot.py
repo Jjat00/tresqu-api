@@ -184,6 +184,65 @@ def get_chat_user(phone_number):
             raise
 
 
+# Estados de registro para WhatsApp
+ESTADO_INICIAL = 0
+ESPERANDO_MONEDA = 1
+ESPERANDO_ZONA_HORARIA = 2
+REGISTRO_COMPLETO = 3
+
+# Almacenamiento temporal de estados de usuarios de WhatsApp
+# Formato: {phone_number: {"estado": ESTADO, "datos": {key: value}}}
+whatsapp_user_states = {}
+
+# Monedas comunes (igual que en telegram)
+COMMON_CURRENCIES = [
+    {'code': 'USD', 'name': 'Dólar estadounidense', 'flag': '🇺🇸'},
+    {'code': 'EUR', 'name': 'Euro', 'flag': '🇪🇺'},
+    {'code': 'COP', 'name': 'Peso colombiano', 'flag': '🇨🇴'},
+    {'code': 'MXN', 'name': 'Peso mexicano', 'flag': '🇲🇽'},
+    {'code': 'ARS', 'name': 'Peso argentino', 'flag': '🇦🇷'},
+    {'code': 'CLP', 'name': 'Peso chileno', 'flag': '🇨🇱'},
+    {'code': 'PEN', 'name': 'Sol peruano', 'flag': '🇵🇪'},
+    {'code': 'BRL', 'name': 'Real brasileño', 'flag': '🇧🇷'},
+]
+
+# Zonas horarias comunes
+COMMON_TIMEZONES = [
+    ('America/Bogota', 'Colombia, Ecuador, Perú, Panamá (UTC-5)'),
+    ('America/Mexico_City', 'México (UTC-6)'),
+    ('America/Santiago', 'Chile (UTC-4/UTC-3)'),
+    ('America/Argentina/Buenos_Aires', 'Argentina (UTC-3)'),
+    ('America/Caracas', 'Venezuela (UTC-4)'),
+    ('America/La_Paz', 'Bolivia (UTC-4)'),
+    ('America/Lima', 'Perú (UTC-5)'),
+    ('America/Sao_Paulo', 'Brasil - São Paulo (UTC-3)'),
+    ('Europe/Madrid', 'España (UTC+1/UTC+2)'),
+    ('America/New_York', 'Estados Unidos - Este (UTC-5/UTC-4)'),
+    ('America/Los_Angeles', 'Estados Unidos - Oeste (UTC-8/UTC-7)'),
+]
+
+
+def is_valid_currency(currency_code):
+    """Verifica si un código de moneda es válido"""
+    if not currency_code or len(currency_code) != 3:
+        return False
+
+    # Verificar en la lista de monedas comunes
+    for currency in COMMON_CURRENCIES:
+        if currency['code'] == currency_code:
+            return True
+
+    # Si no está en las comunes, pero tiene formato válido, aceptarlo
+    return currency_code.isalpha() and currency_code.isupper()
+
+
+def update_user_timezone(user, timezone_str):
+    """Actualiza la zona horaria del usuario"""
+    user.timezone = timezone_str
+    user.save()
+    return user
+
+
 async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key):
     """
     Procesa un mensaje entrante de WhatsApp y envía una respuesta
@@ -197,39 +256,178 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
             chat, message_id, "incoming", message_text
         )
 
-        # 3. Obtener el usuario asociado al chat
+        # 3. Verificar si el número está en proceso de registro
+        registro_activo = sender_number in whatsapp_user_states
+        estado_registro = whatsapp_user_states.get(
+            sender_number, {}).get("estado", ESTADO_INICIAL)
+
+        # 4. Obtener el usuario asociado al chat o por número de teléfono
         user_id, user = await sync_to_async(get_chat_user)(sender_number)
 
-        # 4. Si no hay usuario, crear uno nuevo o buscarlo por número de teléfono
         if not user:
-            # Intentar encontrar por número de teléfono primero
+            # Si no hay usuario en el chat, buscar por número de teléfono
             user = await sync_to_async(get_user_by_phone_number)(sender_number)
 
-            if not user:
-                # Crear un nuevo usuario si no existe
-                external_id = f"wa_{sender_number}"
-                name = f"Usuario WhatsApp {sender_number[-4:]}"
-                user = await sync_to_async(create_user)(
-                    external_id=external_id,
-                    platform="WHATSAPP",
-                    first_name=name,
-                    phone_number=sender_number
+            # Si encontramos un usuario existente por número de teléfono, asociarlo al chat
+            if user:
+                await sync_to_async(update_chat_user)(chat, user)
+                logger.info(
+                    f"Usuario existente encontrado por número y asociado al chat: {user}")
+            # Si no hay usuario y no hay registro en curso, iniciar proceso de registro
+            elif not registro_activo:
+                # Iniciar proceso de registro
+                whatsapp_user_states[sender_number] = {
+                    "estado": ESPERANDO_MONEDA,
+                    "datos": {"phone_number": sender_number}
+                }
+
+                # Mensaje de bienvenida y solicitud de moneda
+                monedas_texto = "\n".join(
+                    [f"- {c['flag']} {c['code']} ({c['name']})" for c in COMMON_CURRENCIES])
+
+                response_text = (
+                    f"¡Hola! Soy Cashbot, tu asistente de finanzas personales. "
+                    f"Para comenzar, necesito un poco de información.\n\n"
+                    f"Por favor, indica tu moneda predeterminada respondiendo con el código de 3 letras.\n\n"
+                    f"Opciones comunes:\n{monedas_texto}\n\n"
+                    f"Por ejemplo, escribe 'USD' para dólar estadounidense."
                 )
-                logger.info(f"Nuevo usuario creado: {user}")
 
-            # Asociar el usuario con el chat
-            await sync_to_async(update_chat_user)(chat, user)
+                # Guardar la respuesta en la base de datos
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
 
-        # 5. Procesar el mensaje y obtener respuesta
+                # Enviar la respuesta al usuario
+                success = await send_whatsapp_response(
+                    instance_name=instance_name,
+                    to_number=sender_number,
+                    message=response_text,
+                    server_url=server_url,
+                    api_key=api_key
+                )
+
+                return success, response_text
+
+        # 5. Procesar el estado de registro si está en curso
+        if registro_activo:
+            if estado_registro == ESPERANDO_MONEDA:
+                # Validar código de moneda
+                currency_code = message_text.strip().upper()
+
+                if not is_valid_currency(currency_code):
+                    response_text = (
+                        f"'{currency_code}' no parece ser un código de moneda válido.\n"
+                        f"Por favor, ingresa un código de 3 letras como USD, EUR, COP, etc."
+                    )
+                else:
+                    # Actualizar estado y solicitar zona horaria
+                    whatsapp_user_states[sender_number]["datos"]["currency"] = currency_code
+                    whatsapp_user_states[sender_number]["estado"] = ESPERANDO_ZONA_HORARIA
+
+                    # Preparar opciones de zona horaria
+                    zonas_texto = "\n".join(
+                        [f"{i+1}. {desc}" for i, (code, desc) in enumerate(COMMON_TIMEZONES)])
+
+                    response_text = (
+                        f"¡Excelente! Has elegido {currency_code} como tu moneda predeterminada.\n\n"
+                        f"Ahora, selecciona tu zona horaria respondiendo con el número de la opción:\n\n"
+                        f"{zonas_texto}"
+                    )
+
+                # Guardar y enviar respuesta
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
+
+                success = await send_whatsapp_response(
+                    instance_name=instance_name,
+                    to_number=sender_number,
+                    message=response_text,
+                    server_url=server_url,
+                    api_key=api_key
+                )
+
+                return success, response_text
+
+            elif estado_registro == ESPERANDO_ZONA_HORARIA:
+                # Procesar selección de zona horaria
+                try:
+                    seleccion = int(message_text.strip())
+                    if seleccion < 1 or seleccion > len(COMMON_TIMEZONES):
+                        raise ValueError("Opción fuera de rango")
+
+                    timezone_code = COMMON_TIMEZONES[seleccion-1][0]
+                    timezone_name = COMMON_TIMEZONES[seleccion-1][1]
+
+                    # Completar registro
+                    datos = whatsapp_user_states[sender_number]["datos"]
+                    currency = datos.get("currency", "USD")
+
+                    # Crear usuario (el external_id sigue la misma convención de telegram)
+                    external_id = f"wa_{sender_number}"
+                    name = f"Usuario WhatsApp {sender_number[-4:]}"
+
+                    # Crear el usuario
+                    user = await sync_to_async(create_user)(
+                        external_id=external_id,
+                        platform="WHATSAPP",
+                        first_name=name,
+                        phone_number=sender_number,
+                        default_currency=currency
+                    )
+
+                    # Actualizar zona horaria
+                    user = await sync_to_async(update_user_timezone)(user, timezone_code)
+
+                    # Asociar el usuario con el chat
+                    await sync_to_async(update_chat_user)(chat, user)
+
+                    # Limpiar el estado de registro
+                    del whatsapp_user_states[sender_number]
+
+                    response_text = (
+                        f"¡Registro exitoso! Tu cuenta ha sido configurada correctamente.\n\n"
+                        f"✅ Moneda: {currency}\n"
+                        f"✅ Zona horaria: {timezone_name}\n\n"
+                        f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
+                        f"- \"Gasté 50k en comida\"\n"
+                        f"- \"Compré café por 35000\"\n"
+                        f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+                    )
+
+                except ValueError:
+                    response_text = (
+                        f"Por favor, selecciona una opción válida ingresando solo el número.\n"
+                        f"Por ejemplo, escribe '1' para seleccionar la primera zona horaria."
+                    )
+
+                # Guardar y enviar respuesta
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
+
+                success = await send_whatsapp_response(
+                    instance_name=instance_name,
+                    to_number=sender_number,
+                    message=response_text,
+                    server_url=server_url,
+                    api_key=api_key
+                )
+
+                return success, response_text
+
+        # 6. Si llegamos aquí, el usuario existe o se ha registrado correctamente
+        # Procesar el mensaje y obtener respuesta
         response_text = await process_message(user, message_text)
 
-        # 6. Guardar la respuesta en la base de datos
+        # 7. Guardar la respuesta en la base de datos
         await sync_to_async(create_message)(
             chat, f"response_{message_id}", "outgoing", response_text
         )
 
-        # 7. Enviar la respuesta al usuario
-        success = await sync_to_async(send_whatsapp_response)(
+        # 8. Enviar la respuesta al usuario
+        success = await send_whatsapp_response(
             instance_name=instance_name,
             to_number=sender_number,
             message=response_text,
@@ -250,7 +448,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         return False, f"Error: {str(e)}"
 
 
-def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None):
+async def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None):
     """
     Envía una respuesta a un número de WhatsApp utilizando la API
 
@@ -299,11 +497,20 @@ def send_whatsapp_response(instance_name, to_number, message, server_url=None, a
             "apikey": api_key
         }
 
-        # Realizar la solicitud
+        # Realizar la solicitud de forma asíncrona usando requests con asyncio.to_thread
         try:
             logger.info(f"Enviando mensaje a través de: {api_url}")
-            response = requests.post(
-                api_url, json=payload, headers=headers, timeout=10)
+            import requests
+            import asyncio
+
+            # Función interna que realiza la solicitud HTTP de manera síncrona
+            def send_request():
+                response = requests.post(
+                    api_url, json=payload, headers=headers, timeout=10)
+                return response
+
+            # Ejecutar la función síncrona en un thread separado para no bloquear el evento loop
+            response = await asyncio.to_thread(send_request)
             logger.info(f"Respuesta: Código {response.status_code}")
 
             if response.status_code == 200 or response.status_code == 201:
@@ -326,9 +533,6 @@ def send_whatsapp_response(instance_name, to_number, message, server_url=None, a
             logger.exception(f"Error al enviar mensaje: {str(e)}")
             return False
 
-    except requests.RequestException as e:
-        logger.exception(f"Error de conexión al enviar mensaje: {str(e)}")
-        return False
     except Exception as e:
         logger.exception(f"Error inesperado al enviar mensaje: {str(e)}")
         return False
