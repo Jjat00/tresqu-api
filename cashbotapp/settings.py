@@ -54,7 +54,8 @@ INSTALLED_APPS = [
     'categories',
     'telegrambot',
     'corsheaders',
-    'income'
+    'income',
+    'whatsappbot',
 ]
 
 REST_FRAMEWORK = {
@@ -194,6 +195,22 @@ TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL', '')
 # Configuración de OpenAI
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
+# Configuración de WhatsApp Bot (Evolution API)
+EVOLUTION_API_URL = os.getenv('EVOLUTION_API_URL', '')
+EVOLUTION_API_KEY = os.getenv('EVOLUTION_API_KEY', '')
+GLOBAL_API_KEY = os.getenv('AUTHENTICATION_API_KEY', '')
+WHATSAPP_WEBHOOK_BASE_URL = os.getenv('WHATSAPP_WEBHOOK_BASE_URL', '')
+# Nombre de la instancia predeterminada
+WHATSAPP_DEFAULT_INSTANCE = os.getenv(
+    'WHATSAPP_DEFAULT_INSTANCE', 'Tresqu Test')
+WHATSAPP_DEFAULT_EVENTS = [
+    "QRCODE_UPDATED",
+    "MESSAGES_UPSERT",
+    "MESSAGES_UPDATE",
+    "CONNECTION_UPDATE",
+    "SEND_MESSAGE",
+]
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Cashbot API',
     'DESCRIPTION': 'API para la gestión de Cashbot',
@@ -268,6 +285,11 @@ LOGGING = {
             'propagate': True,
         },
         'users': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+        'whatsappbot': {
             'handlers': ['console', 'file'],
             'level': 'DEBUG',
             'propagate': True,

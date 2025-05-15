@@ -8,7 +8,7 @@ services:
       POSTGRES_PASSWORD: cashbot
       POSTGRES_DB: cashbot
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - db-data:/var/lib/postgresql/data
 
@@ -21,7 +21,7 @@ services:
     depends_on:
       - db
     environment:
-      - DATABASE_URL=postgresql://cashbot:cashbot@db:5432/cashbot
+      - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
       - DEBUG=True
     ports:
       - "8000:8000"
