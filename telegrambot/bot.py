@@ -1121,9 +1121,9 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
     for telegram_chat in chats:
         try:
             # No enviar al administrador que está haciendo el broadcast
-            if str(telegram_chat.chat_id) != str(chat_id):
+            if str(telegram_chat.platform_chat_id) != str(chat_id):
                 await context.bot.send_message(
-                    chat_id=telegram_chat.chat_id,
+                    chat_id=telegram_chat.platform_chat_id,
                     text=f"📣 *Mensaje de Tresqu*\n\n{broadcast_message}",
                     parse_mode="Markdown"
                 )
@@ -1142,7 +1142,7 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
                 await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(
-                f"Error al enviar mensaje a {telegram_chat.chat_id}: {e}")
+                f"Error al enviar mensaje a {telegram_chat.platform_chat_id}: {e}")
             error_count += 1
 
     # Mensaje de resumen
