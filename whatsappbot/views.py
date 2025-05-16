@@ -1,17 +1,29 @@
 from django.shortcuts import render
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
 import json
 import logging
 import asyncio
-
 import requests
+import random
+import string
+import time
+from django.core.cache import cache
+from rest_framework_simplejwt.tokens import RefreshToken
+from users.models import User, SubscriptionPlan
+from users.serializers import UserSerializer
 
 from .bot import handle_whatsapp_message
 
 logger = logging.getLogger(__name__)
+
+# Duración de validez del código de verificación (en segundos)
+VERIFICATION_CODE_TIMEOUT = 300  # 5 minutos
+
+# Prefijo para las claves en caché
+VERIFICATION_CODE_PREFIX = 'whatsapp_verification_code_'
 
 
 @csrf_exempt
@@ -234,3 +246,171 @@ def send_whatsapp_response(instance_name, to_number, message, server_url=None, a
     except Exception as e:
         logger.exception(f"Error inesperado al enviar mensaje: {str(e)}")
         return False
+
+
+def generate_verification_code():
+    """
+    Genera un código de verificación numérico de 6 dígitos
+    """
+    return ''.join(random.choices(string.digits, k=6))
+
+
+@csrf_exempt
+@require_POST
+def send_verification_code(request, instance_name):
+    """
+    Genera y envía un código de verificación al número de WhatsApp proporcionado
+    """
+    try:
+        # Obtener datos de la solicitud
+        data = json.loads(request.body) if request.body else {}
+
+        # Verificar que se proporcionó un número de teléfono
+        phone_number = data.get('phone_number')
+        if not phone_number:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere un número de teléfono"
+            }, status=400)
+
+        # Obtener la URL del servidor y API key (opcional)
+        server_url = data.get('server_url', getattr(
+            settings, 'EVOLUTION_API_URL', 'http://localhost:8080'))
+        api_key = data.get('apikey', getattr(settings, 'GLOBAL_API_KEY', ''))
+
+        # Generar un código de verificación
+        verification_code = generate_verification_code()
+
+        # Almacenar el código en caché con expiración
+        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number}"
+        cache.set(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
+
+        # Preparar el mensaje con el código
+        message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
+
+        # Enviar el código por WhatsApp
+        success = send_whatsapp_response(
+            instance_name=instance_name,
+            to_number=phone_number,
+            message=message,
+            server_url=server_url,
+            api_key=api_key
+        )
+
+        if success:
+            return JsonResponse({
+                "status": "ok",
+                "message": "Código de verificación enviado con éxito",
+                "expires_in": VERIFICATION_CODE_TIMEOUT
+            })
+        else:
+            # Si falla el envío, eliminar el código de la caché
+            cache.delete(cache_key)
+            return JsonResponse({
+                "status": "error",
+                "message": "No se pudo enviar el código de verificación"
+            }, status=500)
+
+    except Exception as e:
+        logger.exception(f"Error al enviar código de verificación: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+
+
+@csrf_exempt
+@require_POST
+def verify_code(request):
+    """
+    Verifica si el código proporcionado coincide con el almacenado para el número
+    y genera tokens JWT si la verificación es exitosa
+    """
+    try:
+        # Obtener datos de la solicitud
+        data = json.loads(request.body) if request.body else {}
+
+        # Verificar que se proporcionaron los campos necesarios
+        phone_number = data.get('phone_number')
+        code = data.get('code')
+
+        if not phone_number or not code:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere número de teléfono y código de verificación"
+            }, status=400)
+
+        # Obtener el código almacenado en caché
+        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number}"
+        stored_code = cache.get(cache_key)
+
+        if not stored_code:
+            return JsonResponse({
+                "status": "error",
+                "message": "El código ha expirado o no existe"
+            }, status=400)
+
+        # Verificar si el código coincide
+        if code == stored_code:
+            # Eliminar el código usado
+            cache.delete(cache_key)
+
+            # Formatear número de teléfono para buscar o crear usuario
+            # Asegurar que el número no tiene el + inicial para la búsqueda
+            if phone_number.startswith('+'):
+                phone_number_clean = phone_number[1:]
+            else:
+                phone_number_clean = phone_number
+
+            # Buscar o crear usuario con este número en WhatsApp
+            external_id = f"wa_{phone_number_clean}"
+
+            try:
+                # Usar directamente la clase User de users.models
+                user = User.objects.get(external_id=external_id)
+                user_action = "login"
+            except User.DoesNotExist:
+                # Obtener el plan de suscripción predeterminado (normalmente BÁSICO con ID=1)
+                default_plan = SubscriptionPlan.objects.get(id=1)
+
+                # Intentar extraer el nombre del usuario desde los datos (si está disponible)
+                user_name = data.get(
+                    'name', f"Usuario de WhatsApp {phone_number_clean}")
+
+                # Crear usuario nuevo con los campos obligatorios
+                user = User.objects.create(
+                    external_id=external_id,
+                    platform="WHATSAPP",
+                    first_name=user_name,
+                    phone_number=phone_number_clean,
+                    subscription_plan=default_plan,
+                    default_currency="COP",  # Moneda predeterminada
+                    timezone="America/Bogota"  # Zona horaria predeterminada
+                )
+                user_action = "register"
+
+            # Generar tokens JWT
+            refresh = RefreshToken.for_user(user)
+
+            # Serializar el usuario para incluirlo en la respuesta
+            user_data = UserSerializer(user).data
+
+            return JsonResponse({
+                "refresh": str(refresh),
+                "access": str(refresh.access_token),
+                "user": user_data,
+                "user_action": user_action,
+                "message": "Inicio de sesión exitoso"
+            })
+        else:
+            return JsonResponse({
+                "status": "error",
+                "message": "Código de verificación incorrecto"
+            }, status=400)
+
+    except Exception as e:
+        logger.exception(f"Error al verificar código: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
