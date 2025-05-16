@@ -362,32 +362,67 @@ def verify_code(request):
             else:
                 phone_number_clean = phone_number
 
-            # Buscar o crear usuario con este número en WhatsApp
-            external_id = f"wa_{phone_number_clean}"
+            # Construir external_id para WhatsApp
+            whatsapp_external_id = f"wa_{phone_number_clean}"
+
+            # Variables para seguimiento
+            user = None
+            user_action = "login"
 
             try:
-                # Usar directamente la clase User de users.models
-                user = User.objects.get(external_id=external_id)
-                user_action = "login"
+                # Primero intentar buscar por external_id específico de WhatsApp
+                user = User.objects.get(external_id=whatsapp_external_id)
+                logger.info(
+                    f"Usuario encontrado por external_id de WhatsApp: {whatsapp_external_id}")
             except User.DoesNotExist:
-                # Obtener el plan de suscripción predeterminado (normalmente BÁSICO con ID=1)
-                default_plan = SubscriptionPlan.objects.get(id=1)
+                # Si no existe, buscar por número de teléfono (puede existir en Telegram)
+                try:
+                    user = User.objects.get(phone_number=phone_number_clean)
+                    logger.info(
+                        f"Usuario encontrado por número de teléfono: {phone_number_clean}")
 
-                # Intentar extraer el nombre del usuario desde los datos (si está disponible)
-                user_name = data.get(
-                    'name', f"Usuario de WhatsApp {phone_number_clean}")
+                    # Actualizar external_id para incluir WhatsApp
+                    # Si es de Telegram, tendrá formato tg_XXXXX, queremos preservar esto y añadir wa_XXXXX
+                    if not user.external_id.startswith("wa_"):
+                        # Guardar el external_id actual (podría ser de Telegram)
+                        old_external_id = user.external_id
 
-                # Crear usuario nuevo con los campos obligatorios
-                user = User.objects.create(
-                    external_id=external_id,
-                    platform="WHATSAPP",
-                    first_name=user_name,
-                    phone_number=phone_number_clean,
-                    subscription_plan=default_plan,
-                    default_currency="COP",  # Moneda predeterminada
-                    timezone="America/Bogota"  # Zona horaria predeterminada
-                )
-                user_action = "register"
+                        # Usar un separador para múltiples plataformas
+                        if "," in user.external_id:
+                            # Ya tiene múltiples plataformas
+                            if whatsapp_external_id not in user.external_id:
+                                # Añadir solo si no existe ya
+                                user.external_id = f"{user.external_id},{whatsapp_external_id}"
+                        else:
+                            # Primera combinación de plataformas
+                            user.external_id = f"{old_external_id},{whatsapp_external_id}"
+
+                        # Si la plataforma era otra, actualizar a multimodo
+                        if user.platform != "WHATSAPP":
+                            user.platform = "MULTIPLTAFORMA"
+
+                        user.save()
+                        logger.info(
+                            f"Usuario actualizado con external_id combinado: {user.external_id}")
+
+                except User.DoesNotExist:
+                    # No existe un usuario con este número, crear uno nuevo
+                    default_plan = SubscriptionPlan.objects.get(id=1)
+                    user_name = data.get(
+                        'name', f"Usuario de WhatsApp {phone_number_clean}")
+
+                    user = User.objects.create(
+                        external_id=whatsapp_external_id,
+                        platform="WHATSAPP",
+                        first_name=user_name,
+                        phone_number=phone_number_clean,
+                        subscription_plan=default_plan,
+                        default_currency="COP",  # Moneda predeterminada
+                        timezone="America/Bogota"  # Zona horaria predeterminada
+                    )
+                    user_action = "register"
+                    logger.info(
+                        f"Nuevo usuario creado con external_id: {whatsapp_external_id}")
 
             # Generar tokens JWT
             refresh = RefreshToken.for_user(user)
