@@ -199,7 +199,6 @@ OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 EVOLUTION_API_URL = os.getenv('EVOLUTION_API_URL', '')
 EVOLUTION_API_KEY = os.getenv('EVOLUTION_API_KEY', '')
 GLOBAL_API_KEY = os.getenv('AUTHENTICATION_API_KEY', '')
-WHATSAPP_WEBHOOK_BASE_URL = os.getenv('WHATSAPP_WEBHOOK_BASE_URL', '')
 # Nombre de la instancia predeterminada
 WHATSAPP_DEFAULT_INSTANCE = os.getenv(
     'WHATSAPP_DEFAULT_INSTANCE', 'Tresqu Test')
