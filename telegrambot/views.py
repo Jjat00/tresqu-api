@@ -19,16 +19,19 @@ def initialize_bot():
     """Inicializa el bot de Telegram si aún no está inicializado."""
     global application, event_loop
     if application is None:
+        # Configurar el bot
         application = setup_bot()
 
-        # Importante: inicializar la aplicación antes de usarla
-        # Creamos un nuevo event loop en lugar de usar asyncio.run
+        # Crear un event loop si no existe
         if event_loop is None:
             event_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(event_loop)
 
-        # Inicializamos la aplicación
+        # Inicializar explícitamente la aplicación
         event_loop.run_until_complete(application.initialize())
+
+        # Marcar que está inicializada para evitar reinicialización
+        application._initialized = True
 
     return application
 
@@ -52,27 +55,37 @@ def telegram_webhook(request):
             print(f"Headers: {request.headers}")
             print(f"Body: {request.body.decode('utf-8')}")
 
-            print('⚠️⚠️', request.body)
-
             # Verificar si hay payload
             if not request.body:
                 return JsonResponse({"status": "error", "message": "No se recibió payload"}, status=400)
 
-            # Inicializar el bot
+            # Inicializar el bot (esto garantiza que la aplicación esté inicializada)
             app = initialize_bot()
 
             # Procesar el update de Telegram
             update_data = json.loads(request.body.decode('utf-8'))
             update = Update.de_json(update_data, app.bot)
 
-            # Usamos el mismo event loop para procesar la actualización
+            # Usar el event loop global
             global event_loop
-            if event_loop is None:
+
+            # Asegurarnos de tener un event loop
+            if event_loop is None or event_loop.is_closed():
                 event_loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(event_loop)
+                # Reinicializar la aplicación si es necesario
+                event_loop.run_until_complete(app.initialize())
 
-            # Procesamos la actualización en el event loop existente
-            event_loop.run_until_complete(app.process_update(update))
+            # Procesar la actualización
+            try:
+                event_loop.run_until_complete(app.process_update(update))
+            except RuntimeError as e:
+                if "not initialized" in str(e):
+                    # Si la aplicación no está inicializada, inicializar y volver a intentar
+                    event_loop.run_until_complete(app.initialize())
+                    event_loop.run_until_complete(app.process_update(update))
+                else:
+                    raise
 
             return JsonResponse({"status": "ok"})
         except json.JSONDecodeError as je:
@@ -145,8 +158,8 @@ def env_debug(request):
         "webhook_url": settings.TELEGRAM_WEBHOOK_URL,
         "openai_key": bool(settings.OPENAI_API_KEY) and f"{settings.OPENAI_API_KEY[:5]}...{settings.OPENAI_API_KEY[-5:]}" if settings.OPENAI_API_KEY else None,
         "debug_mode": settings.DEBUG,
-        "application_initialized": application is not None,
-        "event_loop_initialized": event_loop is not None,
+        "application_initialized": application is not None and hasattr(application, '_initialized'),
+        "event_loop_initialized": event_loop is not None and not event_loop.is_closed(),
     }
 
     return JsonResponse({"status": "ok", "env_info": env_info})

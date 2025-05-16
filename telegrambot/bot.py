@@ -381,23 +381,77 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     # Guardar el chat en la base de datos si no existe
     chat, created = await get_or_create_chat_async(chat_id)
 
-    welcome_message = (
-        f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
-        f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
-        f"Para comenzar, necesitas registrarte con tu número de teléfono. "
-        f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
-        f"Tu número de teléfono nos permite identificarte de manera única "
-        f"en todas nuestras plataformas, incluyendo futuras integraciones con WhatsApp."
-    )
-
     # Verificar si el usuario ya está registrado
     user_id, db_user = await get_chat_user_async(chat_id)
+
+    # Mensaje personalizado según si está registrado o no
+    if user_id is not None and db_user is not None:
+        welcome_message = (
+            f"¡Hola {user.first_name}! Bienvenido de nuevo a Tresqu, tu asistente de finanzas personales.\n\n"
+            f"Puedes registrar tus gastos simplemente enviándome mensajes como:\n"
+            f"- \"Gasté 50k en comida\"\n"
+            f"- \"Compré café por 35000\"\n"
+            f"- \"Pagué la cuenta de luz, 75k\""
+        )
+    else:
+        # Intentar encontrar si existe un usuario registrado con este ID de Telegram
+        telegram_external_id = str(user.id)
+        existing_user = await get_user_by_external_id_async(telegram_external_id)
+
+        if existing_user:
+            # Asociar el usuario existente con este chat
+            await update_chat_user_async(chat, existing_user)
+            db_user = existing_user
+
+            welcome_message = (
+                f"¡Hola {user.first_name}! Tu cuenta ha sido vinculada a este chat.\n\n"
+                f"Puedes registrar tus gastos simplemente enviándome mensajes como:\n"
+                f"- \"Gasté 50k en comida\"\n"
+                f"- \"Compré café por 35000\"\n"
+                f"- \"Pagué la cuenta de luz, 75k\""
+            )
+        else:
+            welcome_message = (
+                f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
+                f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
+                f"Para comenzar, necesitas registrarte con tu número de teléfono. "
+                f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
+                f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
+                f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
+            )
+
+            # Crear botón para solicitar número de teléfono
+            contact_keyboard = KeyboardButton(
+                text="Compartir número de teléfono", request_contact=True)
+            reply_markup = ReplyKeyboardMarkup(
+                [[contact_keyboard]], one_time_keyboard=True)
+
+            # Enviar el mensaje de bienvenida con el teclado
+            await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+
+            # Registrar respuesta
+            await create_message_async(
+                chat,
+                "system",
+                "outgoing",
+                welcome_message
+            )
+
+            return
 
     # Enviar el mensaje de bienvenida
     await update.message.reply_text(welcome_message)
 
+    # Registrar respuesta
+    await create_message_async(
+        chat,
+        "system",
+        "outgoing",
+        welcome_message
+    )
+
     # Si el usuario está registrado pero no tiene zona horaria configurada, preguntar
-    if db_user and not hasattr(db_user, 'timezone'):
+    if db_user and (not hasattr(db_user, 'timezone') or not db_user.timezone):
         # Crear un teclado con las zonas horarias principales
         keyboard = []
         for tz_code, tz_name in COMMON_TIMEZONES:
@@ -464,6 +518,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Maneja mensajes de texto y genera respuestas con procesamiento de lenguaje natural."""
     chat_id = update.effective_chat.id
     user_message_text = update.message.text
+    telegram_user = update.effective_user
 
     logger.info(f"Mensaje recibido de {chat_id}: {user_message_text[:50]}...")
 
@@ -472,8 +527,38 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     # Obtener el usuario asociado al chat de manera segura
     user_id, chat_user = await get_chat_user_async(chat_id)
-    print(f"😲😲 user_id: {user_id}")
-    print(f"👍👍 chat_user: {chat_user.external_id}")
+
+    # Si no hay usuario asociado al chat, intentamos encontrarlo por número de teléfono
+    # o asociarlo si ya existe en otra plataforma
+    if user_id is None or chat_user is None:
+        # Si el usuario de Telegram tiene número de teléfono (contacto compartido previamente)
+        if hasattr(telegram_user, 'contact') and telegram_user.contact and telegram_user.contact.phone_number:
+            # Normalizar el número de teléfono
+            phone_number = normalize_phone_number(
+                telegram_user.contact.phone_number)
+
+            # Buscar si existe un usuario con este número
+            existing_user = await get_user_by_phone_number_async(phone_number)
+
+            if existing_user:
+                # Asociar el usuario existente con este chat de Telegram
+                await update_chat_user_async(chat, existing_user)
+                chat_user = existing_user
+                user_id = existing_user.id
+                logger.info(
+                    f"Usuario existente asociado al chat de Telegram: {existing_user.id}")
+        else:
+            # Intentar obtener un usuario asociado con este ID de Telegram
+            telegram_external_id = str(telegram_user.id)
+            existing_user = await get_user_by_external_id_async(telegram_external_id)
+
+            if existing_user:
+                # Asociar el usuario existente con este chat
+                await update_chat_user_async(chat, existing_user)
+                chat_user = existing_user
+                user_id = existing_user.id
+                logger.info(
+                    f"Usuario existente por ID de Telegram asociado al chat: {existing_user.id}")
 
     # Registrar el mensaje recibido
     await create_message_async(
@@ -483,13 +568,22 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         user_message_text
     )
 
-    # Si no hay usuario asociado, solicitar registro
+    # Si todavía no hay usuario asociado, solicitar registro
     if user_id is None or chat_user is None:
         message = (
             "Parece que aún no estás registrado. Usa el comando /registrar para crear una cuenta "
-            "y poder utilizar todas las funciones del bot."
+            "y poder utilizar todas las funciones del bot.\n\n"
+            "Si ya te registraste mediante WhatsApp, necesitarás compartir tu contacto "
+            "para que podamos vincular tu cuenta."
         )
-        await update.message.reply_text(message)
+
+        # Crear botón para solicitar número de teléfono
+        contact_keyboard = KeyboardButton(
+            text="Compartir número de teléfono", request_contact=True)
+        reply_markup = ReplyKeyboardMarkup(
+            [[contact_keyboard]], one_time_keyboard=True)
+
+        await update.message.reply_text(message, reply_markup=reply_markup)
 
         # Registrar respuesta
         await create_message_async(
@@ -581,6 +675,35 @@ async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         "Contacto compartido"
     )
 
+    # Verificar si ya existe un usuario con este número de teléfono
+    # (desde cualquier plataforma WhatsApp/Telegram)
+    existing_user = await get_user_by_phone_number_async(normalized_phone)
+
+    if existing_user:
+        # Si ya existe un usuario con este número, asociarlo a este chat
+        await update_chat_user_async(chat, existing_user)
+
+        await update.message.reply_text(
+            f"¡Bienvenido de nuevo! Tu cuenta ya está vinculada a este chat.\n\n"
+            f"Moneda predeterminada: {existing_user.default_currency}\n\n"
+            f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
+            f"- \"Gasté 50k en comida\"\n"
+            f"- \"Compré café por 35000\"\n"
+            f"- \"Pagué la cuenta de luz, 75k\"",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            "Cuenta existente vinculada al chat"
+        )
+
+        return ConversationHandler.END
+
+    # Si no existe usuario, continuar con el flujo normal de registro
     # Guardar el número de teléfono normalizado en el contexto para usarlo después
     context.user_data["phone_number"] = normalized_phone
     logger.info("Número de teléfono guardado en context.user_data")
@@ -1041,6 +1164,76 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Maneja un contacto compartido fuera del flujo de registro formal."""
+    chat_id = update.effective_chat.id
+    user = update.effective_user
+    contact = update.message.contact
+    phone_number = contact.phone_number
+
+    logger.info(
+        f"Contacto compartido (fuera de registro) - chat_id: {chat_id}, user_id: {user.id}, phone: {phone_number}")
+
+    # Normalizar el número de teléfono
+    normalized_phone = normalize_phone_number(phone_number)
+
+    # Verificar que el contacto pertenece al usuario
+    if str(contact.user_id) != str(user.id):
+        await update.message.reply_text(
+            "El número de teléfono debe ser el tuyo para vincular tu cuenta.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+        return
+
+    # Obtener o crear el chat
+    chat, _ = await get_or_create_chat_async(chat_id)
+
+    # Registrar el mensaje recibido
+    await create_message_async(
+        chat,
+        str(update.message.message_id),
+        "incoming",
+        "Contacto compartido"
+    )
+
+    # Verificar si ya existe un usuario con este número de teléfono
+    existing_user = await get_user_by_phone_number_async(normalized_phone)
+
+    if existing_user:
+        # Si ya existe un usuario con este número, asociarlo a este chat
+        await update_chat_user_async(chat, existing_user)
+
+        await update.message.reply_text(
+            f"¡Genial! Tu cuenta existente ha sido vinculada a este chat de Telegram.\n\n"
+            f"Moneda predeterminada: {existing_user.default_currency}\n\n"
+            f"Ahora puedes utilizar Tresqu tanto en WhatsApp como en Telegram con la misma cuenta.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            "Cuenta existente vinculada al chat"
+        )
+    else:
+        # Si no existe un usuario con este número, informar que debe registrarse
+        await update.message.reply_text(
+            f"No encontramos una cuenta asociada al número {normalized_phone}.\n\n"
+            f"Para crear una nueva cuenta, usa el comando /registrar.",
+            reply_markup=ReplyKeyboardRemove()
+        )
+
+        # Registrar respuesta
+        await create_message_async(
+            chat,
+            "system",
+            "outgoing",
+            "No se encontró cuenta existente"
+        )
+
+
 def setup_bot():
     """Configura la aplicación del bot con todos los manejadores"""
     # Configurar el token desde settings.py
@@ -1099,6 +1292,10 @@ def setup_bot():
     application.add_handler(CommandHandler("moneda", register_user))
     application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("ayuda", start))
+
+    # Manejar contactos compartidos fuera del flujo de registro
+    application.add_handler(MessageHandler(
+        filters.CONTACT & ~filters.COMMAND, handle_contact_shared))
 
     # Mensajes de voz
     application.add_handler(MessageHandler(

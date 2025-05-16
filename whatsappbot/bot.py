@@ -253,7 +253,7 @@ def update_user_timezone(user, timezone_str):
     return user
 
 
-async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key):
+async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key, sender_name=None):
     """
     Procesa un mensaje entrante de WhatsApp y envía una respuesta
     """
@@ -288,7 +288,10 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 # Iniciar proceso de registro
                 whatsapp_user_states[sender_number] = {
                     "estado": ESPERANDO_MONEDA,
-                    "datos": {"phone_number": sender_number}
+                    "datos": {
+                        "phone_number": sender_number,
+                        "name": sender_name  # Guardar el nombre si está disponible
+                    }
                 }
 
                 # Mensaje de bienvenida y solicitud de moneda
@@ -376,7 +379,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
                     # Crear usuario (el external_id sigue la misma convención de telegram)
                     external_id = f"wa_{sender_number}"
-                    name = f"Usuario WhatsApp {sender_number[-4:]}"
+
+                    # Usar el nombre real del contacto si está disponible, sino usar nombre genérico
+                    name = datos.get("name")
+                    if not name or name.strip() == "":
+                        name = f"Usuario WhatsApp {sender_number[-4:]}"
 
                     # Crear el usuario
                     user = await sync_to_async(create_user)(

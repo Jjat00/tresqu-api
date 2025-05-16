@@ -7,6 +7,8 @@ import json
 import logging
 import asyncio
 
+import requests
+
 from .bot import handle_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -59,6 +61,25 @@ def webhook_receiver(request, instance_name):
             conversation = data.get('message', {}).get('conversation', '')
             message_id = data.get('key', {}).get('id', '')
 
+            # Extraer el nombre del remitente si está disponible en los metadatos
+            # El nombre puede estar en diferentes ubicaciones dependiendo de la estructura del webhook
+            sender_name = ''
+
+            # Buscar en varias ubicaciones posibles
+            if 'pushName' in data:
+                sender_name = data.get('pushName', '')
+            elif 'key' in data and 'pushName' in data.get('key', {}):
+                sender_name = data.get('key', {}).get('pushName', '')
+            elif 'participant' in data:
+                # Algunos webhooks proporcionan participant en lugar de pushName
+                sender_name = data.get('participant', {}).get('name', '')
+
+            # Si no se encuentra en ninguna parte, intentar buscar en toda la estructura
+            if not sender_name and webhook_data.get('pushName'):
+                sender_name = webhook_data.get('pushName')
+
+            logger.info(f"Nombre del remitente encontrado: {sender_name}")
+
             # Extraer el número del remitente (eliminar @s.whatsapp.net o @g.us si está presente)
             sender_number = remote_jid.split(
                 '@')[0] if '@' in remote_jid else remote_jid
@@ -70,7 +91,8 @@ def webhook_receiver(request, instance_name):
                 return JsonResponse({"status": "success", "message": "Evento procesado (sin mensaje)"})
 
             # Log del mensaje recibido
-            logger.info(f"Mensaje recibido de {sender_number}: {conversation}")
+            logger.info(
+                f"Mensaje recibido de {sender_number} ({sender_name}): {conversation}")
 
             # Usar handle_whatsapp_message para procesar el mensaje y enviar respuesta
             success, response = asyncio.run(handle_whatsapp_message(
@@ -79,7 +101,8 @@ def webhook_receiver(request, instance_name):
                 message_id=message_id,
                 instance_name=instance_name,
                 server_url=server_url,
-                api_key=api_key
+                api_key=api_key,
+                sender_name=sender_name
             ))
 
             if success:
@@ -127,59 +150,6 @@ def process_connection_update(data, instance_name):
     except Exception as e:
         logger.exception(
             f"Error al procesar actualización de conexión: {str(e)}")
-
-
-@csrf_exempt
-def webhook_config(request, instance_name):
-    """
-    Configura o actualiza un webhook para una instancia específica
-    """
-    if request.method == 'GET':
-        # Obtener la configuración actual
-        try:
-            webhook = WhatsAppWebhook.objects.get(
-                instance_name=instance_name, is_active=True)
-            return JsonResponse({
-                "enabled": webhook.is_active,
-                "url": webhook.url,
-                "webhookByEvents": webhook.webhook_by_events,
-                "events": webhook.events
-            })
-        except WhatsAppWebhook.DoesNotExist:
-            return JsonResponse({"status": "error", "message": "Webhook no configurado"}, status=404)
-
-    elif request.method == 'POST':
-        try:
-            # Parsear los datos de la solicitud
-            data = json.loads(request.body)
-
-            # Validar datos requeridos
-            if 'url' not in data:
-                return JsonResponse({"status": "error", "message": "URL es obligatoria"}, status=400)
-
-            # Crear o actualizar la configuración del webhook
-            webhook, created = WhatsAppWebhook.objects.update_or_create(
-                instance_name=instance_name,
-                defaults={
-                    'name': data.get('name', f"Webhook {instance_name}"),
-                    'url': data['url'],
-                    'webhook_by_events': data.get('webhook_by_events', False),
-                    'webhook_base64': data.get('webhook_base64', False),
-                    'events': data.get('events', []),
-                    'is_active': data.get('enabled', True)
-                }
-            )
-
-            action = "creado" if created else "actualizado"
-            return JsonResponse({"status": "success", "message": f"Webhook {action} correctamente"})
-
-        except json.JSONDecodeError:
-            return JsonResponse({"status": "error", "message": "JSON inválido"}, status=400)
-        except Exception as e:
-            logger.exception(f"Error al configurar webhook: {str(e)}")
-            return JsonResponse({"status": "error", "message": str(e)}, status=500)
-
-    return JsonResponse({"status": "error", "message": "Método no permitido"}, status=405)
 
 
 # Función para enviar respuesta vía WhatsApp API
