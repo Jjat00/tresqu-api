@@ -464,6 +464,11 @@ async def send_whatsapp_response(instance_name, to_number, message, server_url=N
         if not server_url:
             server_url = getattr(
                 settings, 'EVOLUTION_API_URL', 'http://localhost:8080')
+
+        # Asegurar que la URL tenga un esquema (http:// o https://)
+        if server_url and not (server_url.startswith('http://') or server_url.startswith('https://')):
+            server_url = f"https://{server_url}"
+
         if not api_key:
             api_key = getattr(settings, 'GLOBAL_API_KEY', '')
 
