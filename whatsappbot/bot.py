@@ -204,6 +204,16 @@ COMMON_CURRENCIES = [
     {'code': 'CLP', 'name': 'Peso chileno', 'flag': '🇨🇱'},
     {'code': 'PEN', 'name': 'Sol peruano', 'flag': '🇵🇪'},
     {'code': 'BRL', 'name': 'Real brasileño', 'flag': '🇧🇷'},
+    {'code': 'CAD', 'name': 'Dólar canadiense', 'flag': '🇨🇦'},
+    {'code': 'GBP', 'name': 'Libra esterlina', 'flag': '🇬🇧'},
+    {'code': 'JPY', 'name': 'Yen japonés', 'flag': '🇯🇵'},
+    {'code': 'CNY', 'name': 'Yuan chino', 'flag': '🇨🇳'},
+    {'code': 'AUD', 'name': 'Dólar australiano', 'flag': '🇦🇺'},
+    {'code': 'VES', 'name': 'Bolívar venezolano', 'flag': '🇻🇪'},
+    {'code': 'BOB', 'name': 'Boliviano', 'flag': '🇧🇴'},
+    {'code': 'UYU', 'name': 'Peso uruguayo', 'flag': '🇺🇾'},
+    {'code': 'PYG', 'name': 'Guaraní paraguayo', 'flag': '🇵🇾'},
+    {'code': 'INR', 'name': 'Rupia india', 'flag': '🇮🇳'},
 ]
 
 # Zonas horarias comunes
@@ -286,7 +296,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     [f"- {c['flag']} {c['code']} ({c['name']})" for c in COMMON_CURRENCIES])
 
                 response_text = (
-                    f"¡Hola! Soy Cashbot, tu asistente de finanzas personales. "
+                    f"¡Hola! Soy Tresqu, tu asistente de finanzas personales. "
                     f"Para comenzar, necesito un poco de información.\n\n"
                     f"Por favor, indica tu moneda predeterminada respondiendo con el código de 3 letras.\n\n"
                     f"Opciones comunes:\n{monedas_texto}\n\n"
