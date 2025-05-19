@@ -411,7 +411,8 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                         f"- \"Gasté 50k en comida\"\n"
                         f"- \"Compré café por 35000\"\n"
                         f"- \"Pagué la cuenta de luz, 75k\"\n\n"
-                        f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos."
+                        f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos.\n\n"
+                        f"Agrega a Tresqu en tus contactos para que puedas enviarle mensajes siempre que quieras."
                     )
 
                 except ValueError:
