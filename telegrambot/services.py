@@ -364,7 +364,7 @@ async def process_message(user: User, raw_text: str) -> str:
 
         prompt = ChatPromptTemplate.from_messages([
             ("system", f"""
-            Eres un asistente financiero experto en clasificar gastos e ingresos.
+            Eres un asistente financiero experto en clasificar gastos e ingresos, te llamas Tresqu.
             
             Categorías disponibles para gastos: {expense_categories_str}
             Categorías disponibles para ingresos: {income_categories_str}
@@ -508,7 +508,7 @@ async def process_message(user: User, raw_text: str) -> str:
             Puedes dar consejos.
             Siempre debes mencionar el movimiento registrado, su categoria y la fecha.
             Siempre debes responder en el mismo idioma que el usuario.
-
+            De vez en cuando recuerdale a la gente que pueden ver su dashboard en https://tresqu.com/
             """),
             MessagesPlaceholder("history"),
             ("human", "{input}"),
