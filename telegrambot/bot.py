@@ -853,6 +853,7 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
             f"- \"Compré café por 35000\"\n"
             f"- \"Pagué la cuenta de luz, 75k\"\n\n"
             f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda"
+            f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos."
         )
         logger.info("Mensaje de confirmación enviado")
 
