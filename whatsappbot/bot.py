@@ -253,11 +253,92 @@ def update_user_timezone(user, timezone_str):
     return user
 
 
-async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key, sender_name=None):
+async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key, sender_name=None, message_type="text", media_url=None):
     """
     Procesa un mensaje entrante de WhatsApp y envía una respuesta
+
+    Args:
+        sender_number: Número de teléfono del remitente
+        message_text: Texto del mensaje
+        message_id: ID único del mensaje
+        instance_name: Nombre de la instancia de WhatsApp
+        server_url: URL del servidor de WhatsApp
+        api_key: Clave API para autenticación
+        sender_name: Nombre del remitente (opcional)
+        message_type: Tipo de mensaje (text, audio, image, etc.)
+        media_url: URL del contenido multimedia (si aplica)
     """
     try:
+        # Verificar tipo de mensaje
+        if message_type in ["audio", "voice", "ptt"]:
+            # Mensaje de audio - función no implementada
+            response_text = "Lo siento, actualmente no puedo procesar mensajes de audio. Esta función estará disponible próximamente. Por favor, envía un mensaje de texto."
+
+            # Crear chat si no existe
+            chat, created = await sync_to_async(get_or_create_chat)(sender_number)
+
+            # Guardar respuesta
+            await sync_to_async(create_message)(
+                chat, f"response_{message_id}", "outgoing", response_text
+            )
+
+            # Enviar respuesta
+            success = await send_whatsapp_response(
+                instance_name=instance_name,
+                to_number=sender_number,
+                message=response_text,
+                server_url=server_url,
+                api_key=api_key
+            )
+
+            return success, response_text
+
+        elif message_type in ["image", "photo"] and message_text.strip() == "":
+            # Imagen sin texto - función no implementada
+            response_text = "Lo siento, actualmente no puedo procesar imágenes. Esta función estará disponible próximamente. Por favor, envía un mensaje de texto."
+
+            # Crear chat si no existe
+            chat, created = await sync_to_async(get_or_create_chat)(sender_number)
+
+            # Guardar respuesta
+            await sync_to_async(create_message)(
+                chat, f"response_{message_id}", "outgoing", response_text
+            )
+
+            # Enviar respuesta
+            success = await send_whatsapp_response(
+                instance_name=instance_name,
+                to_number=sender_number,
+                message=response_text,
+                server_url=server_url,
+                api_key=api_key
+            )
+
+            return success, response_text
+
+        elif message_type in ["document", "file", "video"]:
+            # Documentos, archivos o videos - función no implementada
+            response_text = "Lo siento, actualmente no puedo procesar documentos, archivos o videos. Esta función estará disponible próximamente. Por favor, envía un mensaje de texto."
+
+            # Crear chat si no existe
+            chat, created = await sync_to_async(get_or_create_chat)(sender_number)
+
+            # Guardar respuesta
+            await sync_to_async(create_message)(
+                chat, f"response_{message_id}", "outgoing", response_text
+            )
+
+            # Enviar respuesta
+            success = await send_whatsapp_response(
+                instance_name=instance_name,
+                to_number=sender_number,
+                message=response_text,
+                server_url=server_url,
+                api_key=api_key
+            )
+
+            return success, response_text
+
         # 1. Obtener o crear el chat para este número
         chat, created = await sync_to_async(get_or_create_chat)(sender_number)
 

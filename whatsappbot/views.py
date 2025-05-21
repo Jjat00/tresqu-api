@@ -70,8 +70,70 @@ def webhook_receiver(request, instance_name):
 
             # Obtener datos del mensaje
             remote_jid = data.get('key', {}).get('remoteJid', '')
-            conversation = data.get('message', {}).get('conversation', '')
             message_id = data.get('key', {}).get('id', '')
+            message_obj = data.get('message', {})
+
+            # Determinar el tipo de mensaje
+            message_type = "text"  # Tipo por defecto
+            conversation = ""
+            media_url = None
+
+            # Verificar si hay texto en el mensaje
+            if 'conversation' in message_obj and message_obj.get('conversation'):
+                conversation = message_obj.get('conversation', '')
+            # Verificar si es un mensaje extendido con texto
+            elif 'extendedTextMessage' in message_obj and message_obj.get('extendedTextMessage', {}).get('text'):
+                conversation = message_obj.get(
+                    'extendedTextMessage', {}).get('text', '')
+
+            # Verificar si hay multimedia
+            # Imagen
+            if 'imageMessage' in message_obj:
+                message_type = "image"
+                caption = message_obj.get(
+                    'imageMessage', {}).get('caption', '')
+                if caption:
+                    conversation = caption
+                media_url = message_obj.get(
+                    'imageMessage', {}).get('url', None)
+                logger.info(
+                    f"Mensaje de imagen recibido con caption: {caption}")
+
+            # Audio
+            elif 'audioMessage' in message_obj:
+                message_type = "audio"
+                media_url = message_obj.get(
+                    'audioMessage', {}).get('url', None)
+                logger.info("Mensaje de audio recibido")
+
+            # PTT (Push to Talk / Nota de voz)
+            elif 'pttMessage' in message_obj:
+                message_type = "ptt"
+                media_url = message_obj.get('pttMessage', {}).get('url', None)
+                logger.info("Nota de voz recibida")
+
+            # Video
+            elif 'videoMessage' in message_obj:
+                message_type = "video"
+                caption = message_obj.get(
+                    'videoMessage', {}).get('caption', '')
+                if caption:
+                    conversation = caption
+                media_url = message_obj.get(
+                    'videoMessage', {}).get('url', None)
+                logger.info(
+                    f"Mensaje de video recibido con caption: {caption}")
+
+            # Documento
+            elif 'documentMessage' in message_obj:
+                message_type = "document"
+                caption = message_obj.get(
+                    'documentMessage', {}).get('caption', '')
+                if caption:
+                    conversation = caption
+                media_url = message_obj.get(
+                    'documentMessage', {}).get('url', None)
+                logger.info(f"Documento recibido con caption: {caption}")
 
             # Extraer el nombre del remitente si está disponible en los metadatos
             # El nombre puede estar en diferentes ubicaciones dependiendo de la estructura del webhook
@@ -96,15 +158,14 @@ def webhook_receiver(request, instance_name):
             sender_number = remote_jid.split(
                 '@')[0] if '@' in remote_jid else remote_jid
 
-            # Si no hay mensaje o número, ignoramos
-            if not conversation or not sender_number:
-                logger.warning(
-                    "Mensaje sin contenido o sin número de remitente válido")
-                return JsonResponse({"status": "success", "message": "Evento procesado (sin mensaje)"})
+            # Si no hay número, ignoramos
+            if not sender_number:
+                logger.warning("Mensaje sin número de remitente válido")
+                return JsonResponse({"status": "success", "message": "Evento procesado (sin remitente)"})
 
             # Log del mensaje recibido
             logger.info(
-                f"Mensaje recibido de {sender_number} ({sender_name}): {conversation}")
+                f"Mensaje recibido de {sender_number} ({sender_name}): Tipo {message_type}, Texto: {conversation}")
 
             # Usar handle_whatsapp_message para procesar el mensaje y enviar respuesta
             success, response = asyncio.run(handle_whatsapp_message(
@@ -114,7 +175,9 @@ def webhook_receiver(request, instance_name):
                 instance_name=instance_name,
                 server_url=server_url,
                 api_key=api_key,
-                sender_name=sender_name
+                sender_name=sender_name,
+                message_type=message_type,
+                media_url=media_url
             ))
 
             if success:
