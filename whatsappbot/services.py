@@ -487,7 +487,7 @@ async def process_message(user: User, raw_text: str) -> str:
             - Las descripciones, ejemplos y notas de gastos/ingresos SIEMPRE deben escribirse en el mismo idioma del usuario
             - PRIORIZA SIEMPRE el uso de categorías existentes sobre la creación de nuevas
             - Si hay una categoría "Otros" o similar, úsala para casos que no encajan perfectamente en otras categorías
-            - Cuando el usuario te pide un reporte recuerdale que puede ver el dashboard en https://tresqu.com/ 
+            - Cuando el usuario te pide un reporte recuerdale que puede ver el dashboard en https://tresqu.com/, solo responde esto si el usuario te pide un reporte. para registrar un gasto o ingreso, no respondas esto.
 
             COLORES PARA CATEGORÍAS DE GASTOS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
