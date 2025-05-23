@@ -488,10 +488,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                         f"¡Registro exitoso! Tu cuenta ha sido configurada correctamente.\n\n"
                         f"✅ Moneda: {currency}\n"
                         f"✅ Zona horaria: {timezone_name}\n\n"
-                        f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
+                        f"Ahora puedes empezar a registrar tus gastos o ingresos simplemente enviándome mensajes como:\n"
                         f"- \"Gasté 50k en comida\"\n"
                         f"- \"Compré café por 35000\"\n"
                         f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+                        f"- \"Gané 100000 pesos en mi negocio\"\n"
                         f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos.\n\n"
                         f"Agrega a Tresqu en tus contactos para que puedas enviarle mensajes siempre que quieras."
                     )

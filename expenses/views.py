@@ -1727,6 +1727,208 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         return Response(result)
 
+    @action(detail=False, methods=['get'])
+    def monthly_comparison_chart_data(self, request):
+        """
+        Obtiene datos para una gráfica de barras que compara ingresos vs gastos acumulados día a día durante un mes.
+
+        La gráfica muestra:
+        - Una línea constante con el total de ingresos del mes
+        - Una línea que muestra la suma acumulada de gastos día a día
+        - Permite ver qué tan cerca está el usuario de superar sus ingresos
+
+        GET /api/expenses/monthly_comparison_chart_data/
+
+        Parámetros:
+        - month: Mes a analizar (1-12, por defecto: mes actual)
+        - year: Año a analizar (por defecto: año actual)
+        - timezone: Zona horaria del usuario (opcional, por defecto 'America/Bogota' o UTC-5)
+        """
+        logger.info(
+            f"Endpoint /monthly_comparison_chart_data/ accedido por usuario: {request.user}")
+
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        # Obtener fecha/hora actual en la zona horaria del usuario
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
+
+        # Obtener mes y año de los parámetros (por defecto mes y año actual)
+        try:
+            month = int(request.query_params.get('month', today.month))
+            year = int(request.query_params.get('year', today.year))
+
+            # Validar mes
+            if month < 1 or month > 12:
+                return Response(
+                    {"error": "El mes debe estar entre 1 y 12"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        except ValueError:
+            return Response(
+                {"error": "Mes y año deben ser números enteros"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Calcular primer y último día del mes
+        first_day = datetime(year, month, 1).date()
+        if month == 12:
+            next_month = 1
+            next_month_year = year + 1
+        else:
+            next_month = month + 1
+            next_month_year = year
+        last_day = datetime(next_month_year, next_month,
+                            1).date() - timedelta(days=1)
+
+        # Convertir a UTC para filtrar correctamente
+        start_datetime = self._convert_to_utc(first_day, False, user_timezone)
+        end_datetime = self._convert_to_utc(last_day, True, user_timezone)
+
+        # Importar el modelo Income
+        from income.models import Income
+
+        # Obtener gastos del mes para el usuario actual
+        expenses_queryset = self.get_queryset().filter(
+            timestamp__gte=start_datetime,
+            timestamp__lte=end_datetime
+        )
+
+        # Obtener ingresos del mes para el usuario actual
+        incomes_queryset = Income.objects.filter(
+            user=request.user,
+            timestamp__gte=start_datetime,
+            timestamp__lte=end_datetime
+        )
+
+        # Calcular total de ingresos del mes
+        total_monthly_income = incomes_queryset.aggregate(
+            total=Sum('amount')
+        )['total'] or 0
+
+        # Generar etiquetas para todos los días del mes
+        labels = []
+        current_date = first_day
+        while current_date <= last_day:
+            labels.append(current_date.strftime('%d'))
+            current_date += timedelta(days=1)
+
+        # Inicializar datos para gastos acumulados
+        cumulative_expenses = []
+        daily_expenses = {}
+
+        # Agrupar gastos por día
+        for expense in expenses_queryset:
+            # Convertir timestamp a fecha local
+            local_datetime = expense.timestamp.astimezone(user_timezone)
+            expense_date = local_datetime.date()
+            day_key = expense_date.day
+
+            if day_key not in daily_expenses:
+                daily_expenses[day_key] = 0
+            daily_expenses[day_key] += float(expense.amount)
+
+        # Calcular gastos acumulados día a día
+        cumulative_total = 0
+        current_date = first_day
+        while current_date <= last_day:
+            day_key = current_date.day
+
+            # Sumar gastos del día actual al acumulado
+            if day_key in daily_expenses:
+                cumulative_total += daily_expenses[day_key]
+
+            cumulative_expenses.append(round(cumulative_total, 2))
+            current_date += timedelta(days=1)
+
+        # Crear línea constante de ingresos (mismo valor para todos los días)
+        income_line = [round(float(total_monthly_income), 2)] * len(labels)
+
+        # Calcular porcentaje de ingresos consumido al final del mes
+        final_expense_total = cumulative_expenses[-1] if cumulative_expenses else 0
+        percentage_consumed = 0
+        if total_monthly_income > 0:
+            percentage_consumed = (
+                final_expense_total / float(total_monthly_income)) * 100
+
+        # Determinar estado financiero
+        financial_status = "saludable"
+        if percentage_consumed >= 100:
+            financial_status = "crítico"
+        elif percentage_consumed >= 80:
+            financial_status = "advertencia"
+        elif percentage_consumed >= 60:
+            financial_status = "precaución"
+
+        # Calcular días hasta superar ingresos (si aplica)
+        days_to_exceed = None
+        for i, cumulative in enumerate(cumulative_expenses):
+            if cumulative > total_monthly_income:
+                days_to_exceed = i + 1  # +1 porque los índices empiezan en 0
+                break
+
+        # Preparar respuesta en formato Chart.js
+        response_data = {
+            'labels': labels,
+            'datasets': [
+                {
+                    'label': 'Ingresos del mes',
+                    'data': income_line,
+                    'borderColor': '#4CAF50',  # Verde para ingresos
+                    'backgroundColor': 'rgba(76, 175, 80, 0.1)',
+                    'borderWidth': 3,
+                    'fill': False,
+                    'type': 'line',
+                    'tension': 0
+                },
+                {
+                    'label': 'Gastos acumulados',
+                    'data': cumulative_expenses,
+                    'borderColor': '#F44336',  # Rojo para gastos
+                    'backgroundColor': 'rgba(244, 67, 54, 0.1)',
+                    'borderWidth': 3,
+                    'fill': True,
+                    'type': 'line',
+                    'tension': 0.1
+                }
+            ],
+            'month_info': {
+                'month': month,
+                'year': year,
+                'month_name': calendar.month_name[month],
+                'total_days': len(labels)
+            },
+            'financial_summary': {
+                'total_monthly_income': round(float(total_monthly_income), 2),
+                'total_expenses_to_date': final_expense_total,
+                'remaining_budget': round(float(total_monthly_income) - final_expense_total, 2),
+                'percentage_consumed': round(percentage_consumed, 2),
+                'financial_status': financial_status,
+                'days_to_exceed_income': days_to_exceed
+            },
+            'chart_config': {
+                'type': 'line',  # Aunque se llame bar chart, usamos line para mejor visualización
+                'responsive': True,
+                'scales': {
+                    'y': {
+                        'beginAtZero': True,
+                        'title': {
+                            'display': True,
+                            'text': 'Monto ($)'
+                        }
+                    },
+                    'x': {
+                        'title': {
+                            'display': True,
+                            'text': f'Días del mes ({calendar.month_name[month]} {year})'
+                        }
+                    }
+                }
+            }
+        }
+
+        return Response(response_data)
+
     def destroy(self, request, *args, **kwargs):
         """
         Elimina un gasto específico.
