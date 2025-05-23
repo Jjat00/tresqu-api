@@ -32,17 +32,50 @@ def normalize_category_name(name: str) -> str:
 
 def normalize_phone_number(phone_number):
     """
-    Normaliza un número de teléfono eliminando el signo + al inicio.
+    Normaliza un número de teléfono eliminando el signo + al inicio y todos los espacios.
+    Maneja casos especiales como números mexicanos.
 
     Args:
         phone_number (str): El número de teléfono a normalizar
 
     Returns:
-        str: El número normalizado sin el signo +, o None si el input era None
+        str: El número normalizado sin el signo + y sin espacios, o None si el input era None
+
+    Examples:
+        "+52 55 2899 5412" -> "5215528995412" (México móvil)
+        "+5215528995412" -> "5215528995412" 
+        "5215528995412" -> "5215528995412"
+        "+52 55 2899 5412" -> "5215528995412"
     """
     if not phone_number:
         return None
-    return phone_number.lstrip('+')
+
+    # Eliminar espacios al inicio y final primero
+    normalized = phone_number.strip()
+
+    # Eliminar el signo + al inicio si existe
+    normalized = normalized.lstrip('+')
+
+    # Eliminar todos los espacios, guiones y otros caracteres
+    normalized = normalized.replace(' ', '').replace(
+        '-', '').replace('(', '').replace(')', '')
+
+    # Caso especial para México: números móviles
+    # Si el número empieza con 52 y tiene 12 dígitos, pero no tiene el "1" después del código de país
+    # Ejemplo: 525528995412 debería ser 5215528995412
+    if normalized.startswith('52') and len(normalized) == 12:
+        # Verificar si es un número móvil mexicano (códigos de área móviles comunes)
+        # Los códigos de área móviles en México incluyen: 55, 33, 81, 222, etc.
+        # Obtener los primeros 2 dígitos después de 52
+        area_codes = normalized[2:4]
+        mobile_area_codes = ['55', '33', '81', '22', '44',
+                             '66', '99', '77', '61', '64', '65', '67', '68', '69']
+
+        if area_codes in mobile_area_codes:
+            # Insertar el "1" después del código de país para números móviles
+            normalized = '521' + normalized[2:]
+
+    return normalized
 
 
 @sync_to_async

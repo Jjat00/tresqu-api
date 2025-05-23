@@ -16,6 +16,7 @@ from users.models import User, SubscriptionPlan
 from users.serializers import UserSerializer
 
 from .bot import handle_whatsapp_message
+from .utils import normalize_phone_number
 
 logger = logging.getLogger(__name__)
 
@@ -336,6 +337,17 @@ def send_verification_code(request, instance_name):
                 "message": "Se requiere un número de teléfono"
             }, status=400)
 
+        # Normalizar el número de teléfono para consistencia
+        phone_number_normalized = normalize_phone_number(phone_number)
+        if not phone_number_normalized:
+            return JsonResponse({
+                "status": "error",
+                "message": "Número de teléfono inválido"
+            }, status=400)
+
+        logger.info(
+            f"Número original: {phone_number}, Normalizado: {phone_number_normalized}")
+
         # Obtener la URL del servidor y API key (opcional)
         server_url = data.get('server_url', getattr(
             settings, 'EVOLUTION_API_URL', 'http://localhost:8080'))
@@ -344,17 +356,17 @@ def send_verification_code(request, instance_name):
         # Generar un código de verificación
         verification_code = generate_verification_code()
 
-        # Almacenar el código en caché con expiración
-        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number}"
+        # Almacenar el código en caché con el número normalizado
+        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
         cache.set(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
 
         # Preparar el mensaje con el código
         message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
 
-        # Enviar el código por WhatsApp
+        # Enviar el código por WhatsApp usando el número original (para el envío)
         success = send_whatsapp_response(
             instance_name=instance_name,
-            to_number=phone_number,
+            to_number=phone_number,  # Usar el número original para el envío
             message=message,
             server_url=server_url,
             api_key=api_key
@@ -369,6 +381,7 @@ def send_verification_code(request, instance_name):
         else:
             # Si falla el envío, eliminar el código de la caché
             cache.delete(cache_key)
+            logger.error(f"Fallo al enviar código a {phone_number_normalized}")
             return JsonResponse({
                 "status": "error",
                 "message": "No se pudo enviar el código de verificación"
@@ -403,8 +416,19 @@ def verify_code(request):
                 "message": "Se requiere número de teléfono y código de verificación"
             }, status=400)
 
-        # Obtener el código almacenado en caché
-        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number}"
+        # Normalizar el número de teléfono para consistencia
+        phone_number_normalized = normalize_phone_number(phone_number)
+        if not phone_number_normalized:
+            return JsonResponse({
+                "status": "error",
+                "message": "Número de teléfono inválido"
+            }, status=400)
+
+        logger.info(
+            f"Verificando código - Número original: {phone_number}, Normalizado: {phone_number_normalized}")
+
+        # Obtener el código almacenado en caché usando el número normalizado
+        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
         stored_code = cache.get(cache_key)
 
         if not stored_code:
@@ -418,12 +442,8 @@ def verify_code(request):
             # Eliminar el código usado
             cache.delete(cache_key)
 
-            # Formatear número de teléfono para buscar o crear usuario
-            # Asegurar que el número no tiene el + inicial para la búsqueda
-            if phone_number.startswith('+'):
-                phone_number_clean = phone_number[1:]
-            else:
-                phone_number_clean = phone_number
+            # Usar el número normalizado para todas las operaciones de base de datos
+            phone_number_clean = phone_number_normalized
 
             # Construir external_id para WhatsApp
             whatsapp_external_id = f"wa_{phone_number_clean}"
@@ -438,6 +458,8 @@ def verify_code(request):
                 logger.info(
                     f"Usuario encontrado por external_id de WhatsApp: {whatsapp_external_id}")
             except User.DoesNotExist:
+                logger.info(
+                    f"No se encontró usuario con external_id: {whatsapp_external_id}")
                 # Si no existe, buscar por número de teléfono (puede existir en Telegram)
                 try:
                     user = User.objects.get(phone_number=phone_number_clean)
@@ -469,6 +491,8 @@ def verify_code(request):
                             f"Usuario actualizado con external_id combinado: {user.external_id}")
 
                 except User.DoesNotExist:
+                    logger.info(
+                        f"No se encontró usuario con número de teléfono: {phone_number_clean}")
                     # No existe un usuario con este número, crear uno nuevo
                     default_plan = SubscriptionPlan.objects.get(id=1)
                     user_name = data.get(
