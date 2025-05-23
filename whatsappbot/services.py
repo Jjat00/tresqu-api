@@ -488,6 +488,17 @@ async def process_message(user: User, raw_text: str) -> str:
             - PRIORIZA SIEMPRE el uso de categorías existentes sobre la creación de nuevas
             - Si hay una categoría "Otros" o similar, úsala para casos que no encajan perfectamente en otras categorías
             - Cuando el usuario te pide un reporte o resúmenes recuerdale que puede ver el dashboard en https://tresqu.com/, solo responde esto si el usuario te pide un reporte. para registrar un gasto o ingreso, no respondas esto.
+            - Límitate a usar las features actuales, si el usuario te pide algo que no está en las funciones, di que será implementado en el futuro.
+            - Features a implementar a futuro:
+                - Mensajes de audio en whatsapp por el momento esta funcion solo está en telegram.
+                - Extrae gastos de imagenes.
+                - Función de gastos compartidos.
+                - Función de registro de deudas.
+                - Función de registro de ahorros.
+                - Función de registro de inversiones.
+                - Función de registro de metas.
+                - Alertas de gastos y ingresos.
+                
 
             COLORES PARA CATEGORÍAS DE GASTOS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
