@@ -33,6 +33,13 @@ from .serializers import (
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """Filtrar para que los usuarios solo puedan ver su propia información"""
+        if not self.request.user.is_authenticated:
+            return User.objects.none()
+        return User.objects.filter(id=self.request.user.id)
 
     @action(detail=True, methods=['get'])
     def subscription_history(self, request, pk=None):
@@ -54,11 +61,23 @@ class UserViewSet(viewsets.ModelViewSet):
 class SubscriptionPlanViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = SubscriptionPlan.objects.filter(is_active=True)
     serializer_class = SubscriptionPlanSerializer
+    permission_classes = [AllowAny]
 
 
 class SubscriptionViewSet(viewsets.ModelViewSet):
     queryset = Subscription.objects.all()
     serializer_class = SubscriptionSerializer
+    permission_classes = [IsAuthenticated]
+
+    def get_queryset(self):
+        """Filtrar suscripciones por usuario autenticado"""
+        if not self.request.user.is_authenticated:
+            return Subscription.objects.none()
+        return Subscription.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        """Asegurar que las nuevas suscripciones se asignen al usuario autenticado"""
+        serializer.save(user=self.request.user)
 
 
 class OrganizationViewSet(viewsets.ModelViewSet):

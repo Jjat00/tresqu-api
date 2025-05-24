@@ -63,6 +63,9 @@ REST_FRAMEWORK = {
     'DEFAULT_AUTHENTICATION_CLASSES': (
         'cashbotapp.auth.CustomJWTAuthentication',
     ),
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.IsAuthenticated',
+    ],
     'EXCEPTION_HANDLER': 'cashbotapp.utils.custom_exception_handler',
 }
 
