@@ -779,6 +779,7 @@ def create_income(
 ) -> str:
     """
     Registra un ingreso para el usuario especificado.
+    Si no se proporciona moneda o no es válida, usa la moneda por defecto del usuario.
 
     Args:
         user_external_id: ID externo del usuario
@@ -798,17 +799,28 @@ def create_income(
         import json
         from datetime import datetime
 
-        # Por seguridad limitamos los valores aceptados
-        if amount <= 0:
-            return f"Error: El monto del ingreso debe ser positivo."
-
-        if not is_valid_currency(currency):
-            return f"Error: Moneda {currency} no reconocida."
-
         # Obtener el usuario
         user = User.objects.filter(external_id=user_external_id).first()
         if not user:
             return f"Error: Usuario no encontrado."
+
+        # Por seguridad limitamos los valores aceptados
+        if amount <= 0:
+            return f"Error: El monto del ingreso debe ser positivo."
+
+        # Verificar si la moneda es válida, de lo contrario usar la moneda por defecto del usuario
+        currency_message = ""
+        if not currency or not is_valid_currency(currency):
+            # Guardar la original por si se quiere informar al usuario
+            original_currency = currency
+            currency = user.default_currency
+            # Solo mostrar mensaje si el usuario intentó especificar una moneda inválida
+            if original_currency and original_currency.strip() != "":
+                currency_message = f"(Moneda '{original_currency}' no válida, se usó tu moneda por defecto: {currency})"
+            else:  # Si no especificó moneda, el mensaje es más simple
+                currency_message = f"(Se usó tu moneda por defecto: {currency})"
+        else:
+            currency = currency.upper()  # Asegurar que la moneda válida esté en mayúsculas
 
         # Normalizar el nombre de la categoría (primera letra mayúscula de cada palabra)
         normalized_category = " ".join(word.capitalize()
@@ -853,7 +865,7 @@ def create_income(
         except Exception as e:
             logger.error(f"Error generando embedding para ingreso: {e}")
 
-        return f"Ingreso registrado: {amount} {currency} en {category_obj.name} ({received_date})"
+        return f"Ingreso registrado: {amount} {currency} en {category_obj.name} ({received_date}) {currency_message}".strip()
 
     except Exception as e:
         return f"Error al registrar el ingreso: {str(e)}"
