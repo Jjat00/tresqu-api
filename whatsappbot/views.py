@@ -14,11 +14,17 @@ from django.core.cache import cache
 from rest_framework_simplejwt.tokens import RefreshToken
 from users.models import User, SubscriptionPlan
 from users.serializers import UserSerializer
+import os
 
 from .bot import handle_whatsapp_message
 from .utils import normalize_phone_number
 
 logger = logging.getLogger(__name__)
+
+# Detectar si estamos en Railway para ajustar timeouts
+IS_RAILWAY = os.getenv('RAILWAY_ENVIRONMENT') is not None
+# Railway tiene timeouts más estrictos
+WEBHOOK_TIMEOUT = 5.0 if IS_RAILWAY else 30.0
 
 # Duración de validez del código de verificación (en segundos)
 VERIFICATION_CODE_TIMEOUT = 300  # 5 minutos
@@ -168,28 +174,48 @@ def webhook_receiver(request, instance_name):
             logger.info(
                 f"Mensaje recibido de {sender_number} ({sender_name}): Tipo {message_type}, Texto: {conversation}")
 
-            # Usar handle_whatsapp_message para procesar el mensaje y enviar respuesta
-            success, response = asyncio.run(handle_whatsapp_message(
-                sender_number=sender_number,
-                message_text=conversation,
-                message_id=message_id,
-                instance_name=instance_name,
-                server_url=server_url,
-                api_key=api_key,
-                sender_name=sender_name,
-                message_type=message_type,
-                media_url=media_url
-            ))
+            # RESPONDER INMEDIATAMENTE AL WEBHOOK ANTES DE PROCESAR
+            # Esto evita que Railway cierre la conexión por timeout
+            import threading
 
-            if success:
-                logger.info(f"✅ Procesamiento completo para {sender_number}")
-            else:
-                logger.error(f"❌ Error en procesamiento para {sender_number}")
+            def process_message_background():
+                """Procesa el mensaje en segundo plano"""
+                try:
+                    success, response = asyncio.run(handle_whatsapp_message(
+                        sender_number=sender_number,
+                        message_text=conversation,
+                        message_id=message_id,
+                        instance_name=instance_name,
+                        server_url=server_url,
+                        api_key=api_key,
+                        sender_name=sender_name,
+                        message_type=message_type,
+                        media_url=media_url
+                    ))
+
+                    if success:
+                        logger.info(
+                            f"✅ Procesamiento completo para {sender_number}")
+                    else:
+                        logger.error(
+                            f"❌ Error en procesamiento para {sender_number}")
+
+                except Exception as e:
+                    logger.exception(
+                        f"Error al procesar mensaje en background: {str(e)}")
+
+            # Iniciar el procesamiento en un hilo separado
+            thread = threading.Thread(
+                target=process_message_background, daemon=True)
+            thread.start()
+
+            logger.info(
+                f"Procesamiento iniciado en background para {sender_number}")
 
         except Exception as e:
             logger.exception(f"Error al procesar mensaje: {str(e)}")
 
-    # Responder siempre con éxito
+    # Responder INMEDIATAMENTE con éxito
     return JsonResponse(
         {"status": "success", "message": "Evento recibido correctamente"},
         status=200

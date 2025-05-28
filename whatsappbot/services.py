@@ -546,7 +546,7 @@ async def process_message(user: User, raw_text: str) -> str:
                 agent_executor.ainvoke(
                     {"input": raw_text, "history": memory.chat_memory.messages}
                 ),
-                timeout=120.0  # 120 segundos de timeout
+                timeout=30.0  # 30 segundos de timeout reducido para evitar timeouts de Railway
             )
             return result["output"]
         except asyncio.TimeoutError:
