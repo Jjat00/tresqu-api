@@ -612,7 +612,7 @@ async def send_whatsapp_response(instance_name, to_number, message, server_url=N
             # Función interna que realiza la solicitud HTTP de manera síncrona
             def send_request():
                 response = requests.post(
-                    api_url, json=payload, headers=headers, timeout=10)
+                    api_url, json=payload, headers=headers, timeout=60)
                 return response
 
             # Ejecutar la función síncrona en un thread separado para no bloquear el evento loop

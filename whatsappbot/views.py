@@ -281,7 +281,7 @@ def send_whatsapp_response(instance_name, to_number, message, server_url=None, a
         try:
             logger.info(f"Enviando mensaje a través de: {api_url}")
             response = requests.post(
-                api_url, json=payload, headers=headers, timeout=10)
+                api_url, json=payload, headers=headers, timeout=60)
             logger.info(f"Respuesta: Código {response.status_code}")
 
             if response.status_code == 200 or response.status_code == 201:
