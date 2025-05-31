@@ -893,3 +893,268 @@ def send_verification_code_meta(request):
             "status": "error",
             "message": str(e)
         }, status=500)
+
+
+@csrf_exempt
+@require_POST
+def send_mass_message_api(request):
+    """
+    API endpoint para enviar mensajes masivos desde el dashboard web
+    """
+    try:
+        # Verificar autenticación (puedes agregar tu lógica de autenticación aquí)
+        # Por ahora, verificamos que tenga una API key válida
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+            return JsonResponse({
+                "status": "error",
+                "message": "No autorizado"
+            }, status=401)
+
+        # Obtener datos de la solicitud
+        data = json.loads(request.body) if request.body else {}
+
+        message = data.get('message')
+        platform = data.get('platform', 'WHATSAPP')
+        template = data.get('template')
+        dry_run = data.get('dry_run', False)
+
+        if not message and not template:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere un mensaje o template"
+            }, status=400)
+
+        # Usar template si se especifica
+        if template:
+            message = get_template_message(template)
+
+        # Obtener usuarios según la plataforma
+        if platform == 'WHATSAPP':
+            users = User.objects.filter(
+                platform__in=['WHATSAPP', 'MULTIPLTAFORMA'],
+                phone_number__isnull=False
+            ).exclude(phone_number='')
+        else:
+            users = User.objects.filter(
+                phone_number__isnull=False
+            ).exclude(phone_number='')
+
+        total_users = users.count()
+
+        if total_users == 0:
+            return JsonResponse({
+                "status": "error",
+                "message": "No se encontraron usuarios para enviar mensajes"
+            }, status=400)
+
+        if dry_run:
+            # Solo retornar información sin enviar
+            users_preview = []
+            for user in users[:10]:
+                users_preview.append({
+                    'name': user.first_name,
+                    'phone': user.phone_number,
+                    'platform': user.platform
+                })
+
+            return JsonResponse({
+                "status": "success",
+                "message": "Vista previa generada",
+                "total_users": total_users,
+                "users_preview": users_preview,
+                "message_preview": message
+            })
+
+        # Enviar mensajes en segundo plano
+        import threading
+        thread = threading.Thread(
+            target=send_mass_messages_background,
+            args=(users, message)
+        )
+        thread.start()
+
+        return JsonResponse({
+            "status": "success",
+            "message": f"Envío masivo iniciado para {total_users} usuarios",
+            "total_users": total_users
+        })
+
+    except Exception as e:
+        logger.exception(f"Error en API de mensaje masivo: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+
+
+def get_template_message(template):
+    """Retorna mensajes predefinidos según el template"""
+    templates = {
+        'reminder': (
+            "🔔 *Recordatorio de Tresqu*\n\n"
+            "¡Hola! 👋 Esperamos que tengas un excelente día.\n\n"
+            "💰 Recuerda registrar tus gastos e ingresos de hoy para mantener "
+            "un control perfecto de tus finanzas.\n\n"
+            "Simplemente envíame un mensaje como:\n"
+            "• \"Gasté 25000 en almuerzo\"\n"
+            "• \"Compré café por 5000\"\n"
+            "• \"Gané 50000 en mi negocio\"\n\n"
+            "📊 Revisa tu dashboard en https://tresqu.com\n\n"
+            "¡Tus finanzas bajo control! 💪"
+        ),
+        'welcome': (
+            "🎉 *¡Bienvenido a Tresqu!*\n\n"
+            "Gracias por unirte a nuestra comunidad de control financiero. "
+            "Estamos aquí para ayudarte a gestionar tus gastos e ingresos de manera inteligente.\n\n"
+            "💡 Puedes empezar registrando tus movimientos enviándome mensajes como:\n"
+            "• \"Gasté 30000 en supermercado\"\n"
+            "• \"Recibí 100000 de mi trabajo\"\n\n"
+            "¡Comencemos este viaje financiero juntos! 🚀"
+        ),
+        'daily_summary': (
+            "📊 *Resumen Diario de Tresqu*\n\n"
+            "¡Hola {name}! 👋\n\n"
+            "Es un buen momento para revisar tus finanzas del día:\n\n"
+            "💰 ¿Registraste todos tus gastos de hoy?\n"
+            "💵 ¿Anotaste tus ingresos?\n\n"
+            "📱 Revisa tu dashboard: https://tresqu.com\n\n"
+            "¡Mantén el control de tus finanzas! 🎯"
+        ),
+        'weekly_reminder': (
+            "📅 *Recordatorio Semanal de Tresqu*\n\n"
+            "¡Hola {name}! 👋\n\n"
+            "Es momento de revisar tu semana financiera:\n\n"
+            "📈 ¿Cómo van tus gastos esta semana?\n"
+            "💡 ¿Hay algún patrón que notes?\n"
+            "🎯 ¿Estás cumpliendo tus metas?\n\n"
+            "📊 Revisa tu resumen semanal: https://tresqu.com\n\n"
+            "¡Sigue así! 💪"
+        )
+    }
+    return templates.get(template, "")
+
+
+def send_mass_messages_background(users, message):
+    """Envía mensajes masivos en segundo plano"""
+    sent_count = 0
+    failed_count = 0
+    total_users = users.count()
+
+    logger.info(f"Iniciando envío masivo a {total_users} usuarios")
+
+    for i, user in enumerate(users, 1):
+        try:
+            # Personalizar mensaje con el nombre del usuario
+            personalized_message = message.replace(
+                "{name}", user.first_name or "")
+
+            # Enviar mensaje usando Meta WhatsApp API
+            success = send_meta_whatsapp_message(
+                phone_number=user.phone_number,
+                message_text=personalized_message
+            )
+
+            if success:
+                sent_count += 1
+                logger.info(
+                    f"✅ [{i}/{total_users}] Mensaje enviado a {user.first_name} ({user.phone_number})")
+            else:
+                failed_count += 1
+                logger.error(
+                    f"❌ [{i}/{total_users}] Falló envío a {user.first_name} ({user.phone_number})")
+
+            # Delay entre mensajes para evitar rate limiting
+            if i < total_users:
+                time.sleep(2)  # 2 segundos entre mensajes
+
+        except Exception as e:
+            failed_count += 1
+            logger.error(
+                f"❌ [{i}/{total_users}] Error enviando a {user.first_name}: {str(e)}")
+            continue
+
+    # Log del resumen final
+    success_rate = (sent_count / total_users * 100) if total_users > 0 else 0
+    logger.info(
+        f"📊 Envío masivo completado: {sent_count}/{total_users} exitosos ({success_rate:.1f}%)")
+
+
+@csrf_exempt
+@require_POST
+def schedule_reminder_messages(request):
+    """
+    Programa mensajes de recordatorio automáticos
+    """
+    try:
+        # Verificar autenticación
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+            return JsonResponse({
+                "status": "error",
+                "message": "No autorizado"
+            }, status=401)
+
+        data = json.loads(request.body) if request.body else {}
+
+        reminder_type = data.get('type', 'daily')  # daily, weekly, monthly
+        template = data.get('template', 'reminder')
+
+        # Obtener usuarios activos (que han enviado mensajes en los últimos 30 días)
+        from datetime import datetime, timedelta
+        from users.models import Chat, Message
+
+        thirty_days_ago = datetime.now() - timedelta(days=30)
+
+        # Usuarios que han enviado mensajes recientemente
+        active_chats = Chat.objects.filter(
+            platform='WHATSAPP',
+            messages__created_at__gte=thirty_days_ago
+        ).distinct()
+
+        active_users = User.objects.filter(
+            platform__in=['WHATSAPP', 'MULTIPLTAFORMA'],
+            phone_number__isnull=False,
+            chats__in=active_chats
+        ).exclude(phone_number='').distinct()
+
+        total_users = active_users.count()
+
+        if total_users == 0:
+            return JsonResponse({
+                "status": "error",
+                "message": "No se encontraron usuarios activos"
+            }, status=400)
+
+        # Obtener mensaje del template
+        message = get_template_message(template)
+
+        if not message:
+            return JsonResponse({
+                "status": "error",
+                "message": "Template no válido"
+            }, status=400)
+
+        # Enviar mensajes en segundo plano
+        import threading
+        thread = threading.Thread(
+            target=send_mass_messages_background,
+            args=(active_users, message)
+        )
+        thread.start()
+
+        return JsonResponse({
+            "status": "success",
+            "message": f"Recordatorio {reminder_type} programado para {total_users} usuarios activos",
+            "total_users": total_users,
+            "template": template
+        })
+
+    except Exception as e:
+        logger.exception(f"Error programando recordatorios: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)

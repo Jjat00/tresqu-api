@@ -208,6 +208,9 @@ META_WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv(
 META_APP_ID = os.getenv('META_APP_ID', '')
 META_APP_SECRET = os.getenv('META_APP_SECRET', '')
 
+# API Key para funciones administrativas (mensajes masivos)
+ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', 'admin_secret_key')
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Cashbot API',
     'DESCRIPTION': 'API para la gestión de Cashbot',

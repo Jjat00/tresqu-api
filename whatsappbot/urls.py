@@ -12,4 +12,10 @@ urlpatterns = [
          views.send_verification_code_meta, name='send_verification_code'),
     path('verify-code/',
          views.verify_code, name='verify_code'),
+
+    # Rutas para mensajes masivos
+    path('send-mass-message/',
+         views.send_mass_message_api, name='send_mass_message_api'),
+    path('schedule-reminders/',
+         views.schedule_reminder_messages, name='schedule_reminder_messages'),
 ]
