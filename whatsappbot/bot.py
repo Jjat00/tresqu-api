@@ -253,17 +253,17 @@ def update_user_timezone(user, timezone_str):
     return user
 
 
-async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name, server_url, api_key, sender_name=None, message_type="text", media_url=None):
+async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name=None, server_url=None, api_key=None, sender_name=None, message_type="text", media_url=None):
     """
-    Procesa un mensaje entrante de WhatsApp y envía una respuesta
+    Procesa un mensaje entrante de WhatsApp y envía una respuesta usando Meta WhatsApp API
 
     Args:
         sender_number: Número de teléfono del remitente
         message_text: Texto del mensaje
         message_id: ID único del mensaje
-        instance_name: Nombre de la instancia de WhatsApp
-        server_url: URL del servidor de WhatsApp
-        api_key: Clave API para autenticación
+        instance_name: Nombre de la instancia (no usado en Meta API)
+        server_url: URL del servidor (no usado en Meta API)
+        api_key: Clave API (no usado en Meta API)
         sender_name: Nombre del remitente (opcional)
         message_type: Tipo de mensaje (text, audio, image, etc.)
         media_url: URL del contenido multimedia (si aplica)
@@ -282,13 +282,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 chat, f"response_{message_id}", "outgoing", response_text
             )
 
-            # Enviar respuesta
+            # Enviar respuesta usando Meta API
             success = await send_whatsapp_response(
-                instance_name=instance_name,
+                instance_name="meta_api",
                 to_number=sender_number,
-                message=response_text,
-                server_url=server_url,
-                api_key=api_key
+                message=response_text
             )
 
             return success, response_text
@@ -305,13 +303,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 chat, f"response_{message_id}", "outgoing", response_text
             )
 
-            # Enviar respuesta
+            # Enviar respuesta usando Meta API
             success = await send_whatsapp_response(
-                instance_name=instance_name,
+                instance_name="meta_api",
                 to_number=sender_number,
-                message=response_text,
-                server_url=server_url,
-                api_key=api_key
+                message=response_text
             )
 
             return success, response_text
@@ -328,13 +324,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 chat, f"response_{message_id}", "outgoing", response_text
             )
 
-            # Enviar respuesta
+            # Enviar respuesta usando Meta API
             success = await send_whatsapp_response(
-                instance_name=instance_name,
+                instance_name="meta_api",
                 to_number=sender_number,
-                message=response_text,
-                server_url=server_url,
-                api_key=api_key
+                message=response_text
             )
 
             return success, response_text
@@ -392,13 +386,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     chat, f"response_{message_id}", "outgoing", response_text
                 )
 
-                # Enviar la respuesta al usuario
+                # Enviar la respuesta usando Meta API
                 success = await send_whatsapp_response(
-                    instance_name=instance_name,
+                    instance_name="meta_api",
                     to_number=sender_number,
-                    message=response_text,
-                    server_url=server_url,
-                    api_key=api_key
+                    message=response_text
                 )
 
                 return success, response_text
@@ -429,17 +421,15 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                         f"{zonas_texto}"
                     )
 
-                # Guardar y enviar respuesta
+                # Guardar y enviar respuesta usando Meta API
                 await sync_to_async(create_message)(
                     chat, f"response_{message_id}", "outgoing", response_text
                 )
 
                 success = await send_whatsapp_response(
-                    instance_name=instance_name,
+                    instance_name="meta_api",
                     to_number=sender_number,
-                    message=response_text,
-                    server_url=server_url,
-                    api_key=api_key
+                    message=response_text
                 )
 
                 return success, response_text
@@ -503,17 +493,15 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                         f"Por ejemplo, escribe '1' para seleccionar la primera zona horaria."
                     )
 
-                # Guardar y enviar respuesta
+                # Guardar y enviar respuesta usando Meta API
                 await sync_to_async(create_message)(
                     chat, f"response_{message_id}", "outgoing", response_text
                 )
 
                 success = await send_whatsapp_response(
-                    instance_name=instance_name,
+                    instance_name="meta_api",
                     to_number=sender_number,
-                    message=response_text,
-                    server_url=server_url,
-                    api_key=api_key
+                    message=response_text
                 )
 
                 return success, response_text
@@ -527,13 +515,11 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
             chat, f"response_{message_id}", "outgoing", response_text
         )
 
-        # 8. Enviar la respuesta al usuario
+        # 8. Enviar la respuesta usando Meta API
         success = await send_whatsapp_response(
-            instance_name=instance_name,
+            instance_name="meta_api",
             to_number=sender_number,
-            message=response_text,
-            server_url=server_url,
-            api_key=api_key
+            message=response_text
         )
 
         if success:
@@ -551,94 +537,33 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
 async def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None):
     """
-    Envía una respuesta a un número de WhatsApp utilizando la API
+    Envía una respuesta a un número de WhatsApp utilizando Meta WhatsApp API
 
     Args:
-        instance_name (str): Nombre de la instancia de WhatsApp
+        instance_name (str): Nombre de la instancia de WhatsApp (no usado en Meta API)
         to_number (str): Número de teléfono del destinatario
         message (str): Mensaje a enviar
-        server_url (str): URL del servidor de WhatsApp
-        api_key (str): Clave de API del servidor de WhatsApp
+        server_url (str): URL del servidor (no usado en Meta API)
+        api_key (str): Clave de API (no usado en Meta API)
     """
     try:
-        # Si no se proporcionan estos valores, usar los predeterminados de configuración
-        if not server_url:
-            server_url = getattr(
-                settings, 'EVOLUTION_API_URL', 'http://localhost:8080')
+        # Usar Meta WhatsApp API exclusivamente
+        from .views import send_meta_whatsapp_message
+        import asyncio
 
-        # Asegurar que la URL tenga un esquema (http:// o https://)
-        if server_url and not (server_url.startswith('http://') or server_url.startswith('https://')):
-            server_url = f"https://{server_url}"
+        logger.info(
+            f"Enviando mensaje Meta API a {to_number}: {message[:50]}...")
 
-        if not api_key:
-            api_key = getattr(settings, 'GLOBAL_API_KEY', '')
+        # Ejecutar la función síncrona en un thread separado
+        success = await asyncio.to_thread(send_meta_whatsapp_message, to_number, message)
 
-        # Asegurarnos de que el número tiene formato internacional
-        if not to_number.startswith('+'):
-            # Asumimos que es un número sin el símbolo +
-            to_number_formatted = to_number
+        if success:
+            logger.info(f"✅ Mensaje Meta enviado exitosamente a {to_number}")
         else:
-            to_number_formatted = to_number[1:]  # Quitar el + si existe
+            logger.error(f"❌ Error enviando mensaje Meta a {to_number}")
 
-        logger.info(f"Intentando enviar mensaje a {to_number_formatted}")
-
-        # Construir la URL correcta para enviar mensajes - codificar el nombre de la instancia si contiene espacios
-        import urllib.parse
-        encoded_instance = urllib.parse.quote(instance_name)
-        api_url = f"{server_url}/message/sendText/{encoded_instance}"
-
-        # Preparar el payload según la documentación proporcionada
-        payload = {
-            "number": to_number_formatted,
-            "text": message
-        }
-
-        # Log detallado del payload para depuración
-        logger.info(f"URL de envío: {api_url}")
-        logger.info(f"Payload: {json.dumps(payload, indent=2)}")
-
-        # Configurar headers con la API key
-        headers = {
-            "Content-Type": "application/json",
-            "apikey": api_key
-        }
-
-        # Realizar la solicitud de forma asíncrona usando requests con asyncio.to_thread
-        try:
-            logger.info(f"Enviando mensaje a través de: {api_url}")
-            import requests
-            import asyncio
-
-            # Función interna que realiza la solicitud HTTP de manera síncrona
-            def send_request():
-                response = requests.post(
-                    api_url, json=payload, headers=headers, timeout=60)
-                return response
-
-            # Ejecutar la función síncrona en un thread separado para no bloquear el evento loop
-            response = await asyncio.to_thread(send_request)
-            logger.info(f"Respuesta: Código {response.status_code}")
-
-            if response.status_code == 200 or response.status_code == 201:
-                try:
-                    response_data = response.json()
-                    logger.info(
-                        f"Respuesta: {json.dumps(response_data, indent=2)}")
-                    return True
-                except:
-                    if "success" in response.text.lower():
-                        logger.info("Mensaje enviado (respuesta no es JSON)")
-                        return True
-                    return True
-            else:
-                logger.error(
-                    f"Error al enviar mensaje. Código: {response.status_code}, Respuesta: {response.text}")
-                return False
-
-        except Exception as e:
-            logger.exception(f"Error al enviar mensaje: {str(e)}")
-            return False
+        return success
 
     except Exception as e:
-        logger.exception(f"Error inesperado al enviar mensaje: {str(e)}")
+        logger.exception(f"Error enviando mensaje Meta WhatsApp: {str(e)}")
         return False

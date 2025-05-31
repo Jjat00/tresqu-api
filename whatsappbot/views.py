@@ -1,7 +1,7 @@
 from django.shortcuts import render
-from django.http import JsonResponse
+from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST, require_GET
+from django.views.decorators.http import require_POST, require_GET, require_http_methods
 from django.conf import settings
 import json
 import logging
@@ -25,6 +25,298 @@ VERIFICATION_CODE_TIMEOUT = 300  # 5 minutos
 
 # Prefijo para las claves en caché
 VERIFICATION_CODE_PREFIX = 'whatsapp_verification_code_'
+
+# Token de verificación para Meta WhatsApp API
+META_VERIFY_TOKEN = getattr(
+    settings, 'META_WHATSAPP_VERIFY_TOKEN', 'mi_token_secreto')
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+def meta_webhook(request):
+    """
+    Endpoint para manejar el webhook de Meta WhatsApp API
+    GET: Verificación del webhook
+    POST: Recepción de eventos de WhatsApp
+    """
+    if request.method == 'GET':
+        return verify_meta_webhook(request)
+    elif request.method == 'POST':
+        return handle_meta_webhook(request)
+
+
+def verify_meta_webhook(request):
+    """
+    Verifica el webhook de Meta WhatsApp API
+    Responde al challenge de verificación de Meta
+    """
+    try:
+        # Obtener parámetros de la verificación
+        mode = request.GET.get('hub.mode')
+        token = request.GET.get('hub.verify_token')
+        challenge = request.GET.get('hub.challenge')
+
+        logger.info(
+            f"Verificación de webhook Meta - Mode: {mode}, Token: {token}, Challenge: {challenge}")
+
+        # Verificar que el modo sea 'subscribe' y el token coincida
+        if mode == 'subscribe' and token == META_VERIFY_TOKEN:
+            logger.info("✅ Verificación de webhook Meta exitosa")
+            return HttpResponse(challenge, content_type='text/plain')
+        else:
+            logger.error(
+                f"❌ Verificación de webhook Meta fallida - Token esperado: {META_VERIFY_TOKEN}")
+            return HttpResponse('Forbidden', status=403)
+
+    except Exception as e:
+        logger.exception(f"Error en verificación de webhook Meta: {str(e)}")
+        return HttpResponse('Error', status=500)
+
+
+def handle_meta_webhook(request):
+    """
+    Procesa los eventos recibidos desde Meta WhatsApp API
+    """
+    try:
+        # Parsear el JSON del webhook
+        webhook_data = json.loads(request.body)
+        logger.info(
+            f"Evento recibido de Meta WhatsApp: {json.dumps(webhook_data, indent=2)}")
+
+        # Verificar que hay entradas en el webhook
+        entries = webhook_data.get('entry', [])
+        if not entries:
+            logger.warning("No se encontraron entradas en el webhook de Meta")
+            return JsonResponse({"status": "success", "message": "Sin entradas para procesar"})
+
+        # Procesar cada entrada
+        for entry in entries:
+            entry_id = entry.get('id')  # WHATSAPP_BUSINESS_ACCOUNT_ID
+            changes = entry.get('changes', [])
+
+            logger.info(
+                f"Procesando entrada {entry_id} con {len(changes)} cambios")
+
+            # Procesar cada cambio
+            for change in changes:
+                field = change.get('field')
+                value = change.get('value', {})
+
+                if field == 'messages':
+                    # Procesar mensajes entrantes
+                    process_meta_messages(value, entry_id)
+                elif field == 'message_status':
+                    # Procesar actualizaciones de estado de mensajes
+                    process_meta_message_status(value, entry_id)
+                else:
+                    logger.info(f"Campo no manejado: {field}")
+
+        return JsonResponse({"status": "success", "message": "Evento procesado correctamente"})
+
+    except json.JSONDecodeError:
+        logger.error("Error al decodificar JSON del webhook de Meta")
+        return JsonResponse({"status": "error", "message": "JSON inválido"}, status=400)
+    except Exception as e:
+        logger.exception(f"Error al procesar webhook de Meta: {str(e)}")
+        return JsonResponse({"status": "error", "message": str(e)}, status=500)
+
+
+def process_meta_messages(value, waba_id):
+    """
+    Procesa los mensajes entrantes de Meta WhatsApp API
+    """
+    try:
+        messages = value.get('messages', [])
+        contacts = value.get('contacts', [])
+
+        # Crear un diccionario de contactos para fácil acceso
+        contacts_dict = {}
+        for contact in contacts:
+            wa_id = contact.get('wa_id')
+            profile = contact.get('profile', {})
+            contacts_dict[wa_id] = {
+                'name': profile.get('name', ''),
+                'wa_id': wa_id
+            }
+
+        # Procesar cada mensaje
+        for message in messages:
+            try:
+                # Información básica del mensaje
+                message_id = message.get('id')
+                from_number = message.get('from')
+                timestamp = message.get('timestamp')
+                message_type = message.get('type', 'text')
+
+                # Obtener información del contacto
+                contact_info = contacts_dict.get(from_number, {})
+                sender_name = contact_info.get('name', '')
+
+                logger.info(
+                    f"Procesando mensaje Meta - ID: {message_id}, De: {from_number}, Tipo: {message_type}")
+
+                # Extraer contenido del mensaje según el tipo
+                message_text = ""
+                media_url = None
+
+                if message_type == 'text':
+                    message_text = message.get('text', {}).get('body', '')
+                elif message_type == 'image':
+                    image_data = message.get('image', {})
+                    message_text = image_data.get('caption', '')
+                    media_url = image_data.get('id')  # Media ID para descargar
+                elif message_type == 'audio':
+                    audio_data = message.get('audio', {})
+                    media_url = audio_data.get('id')
+                elif message_type == 'video':
+                    video_data = message.get('video', {})
+                    message_text = video_data.get('caption', '')
+                    media_url = video_data.get('id')
+                elif message_type == 'document':
+                    document_data = message.get('document', {})
+                    message_text = document_data.get('caption', '')
+                    media_url = document_data.get('id')
+                elif message_type == 'voice':
+                    voice_data = message.get('voice', {})
+                    media_url = voice_data.get('id')
+                else:
+                    logger.info(
+                        f"Tipo de mensaje no soportado: {message_type}")
+                    continue
+
+                # Procesar el mensaje usando la lógica existente
+                # Nota: Necesitaremos adaptar handle_whatsapp_message para Meta API
+                success, response = asyncio.run(handle_meta_whatsapp_message(
+                    sender_number=from_number,
+                    message_text=message_text,
+                    message_id=message_id,
+                    waba_id=waba_id,
+                    sender_name=sender_name,
+                    message_type=message_type,
+                    media_url=media_url
+                ))
+
+                if success:
+                    logger.info(
+                        f"✅ Mensaje Meta procesado exitosamente para {from_number}")
+                else:
+                    logger.error(
+                        f"❌ Error procesando mensaje Meta para {from_number}")
+
+            except Exception as e:
+                logger.exception(
+                    f"Error procesando mensaje individual de Meta: {str(e)}")
+                continue
+
+    except Exception as e:
+        logger.exception(f"Error procesando mensajes de Meta: {str(e)}")
+
+
+def process_meta_message_status(value, waba_id):
+    """
+    Procesa las actualizaciones de estado de mensajes de Meta WhatsApp API
+    """
+    try:
+        statuses = value.get('statuses', [])
+
+        for status in statuses:
+            message_id = status.get('id')
+            status_type = status.get('status')  # sent, delivered, read, failed
+            timestamp = status.get('timestamp')
+            recipient_id = status.get('recipient_id')
+
+            logger.info(
+                f"Estado de mensaje Meta - ID: {message_id}, Estado: {status_type}, Para: {recipient_id}")
+
+            # Aquí puedes agregar lógica para actualizar el estado de mensajes en tu base de datos
+            # Por ejemplo, marcar mensajes como entregados o leídos
+
+    except Exception as e:
+        logger.exception(
+            f"Error procesando estados de mensajes de Meta: {str(e)}")
+
+
+async def handle_meta_whatsapp_message(sender_number, message_text, message_id, waba_id, sender_name="", message_type="text", media_url=None):
+    """
+    Maneja mensajes de WhatsApp usando Meta API
+    Adaptación de la función existente para Meta API
+    """
+    try:
+        # Por ahora, usar la lógica existente adaptada para Meta
+        # Necesitarás implementar el envío de respuestas usando Meta API
+
+        # Usar la función existente como base
+        success, response = await handle_whatsapp_message(
+            sender_number=sender_number,
+            message_text=message_text,
+            message_id=message_id,
+            instance_name="meta_api",  # Identificador especial para Meta API
+            server_url="https://graph.facebook.com",  # URL base de Meta API
+            api_key=getattr(settings, 'META_WHATSAPP_ACCESS_TOKEN', ''),
+            sender_name=sender_name,
+            message_type=message_type,
+            media_url=media_url
+        )
+
+        return success, response
+
+    except Exception as e:
+        logger.exception(f"Error manejando mensaje de Meta WhatsApp: {str(e)}")
+        return False, str(e)
+
+
+def send_meta_whatsapp_message(phone_number, message_text, waba_id=None):
+    """
+    Envía un mensaje usando Meta WhatsApp API
+    """
+    try:
+        # Configuración de Meta API
+        access_token = getattr(settings, 'META_WHATSAPP_ACCESS_TOKEN', '')
+        phone_number_id = getattr(
+            settings, 'META_WHATSAPP_PHONE_NUMBER_ID', '')
+
+        if not access_token or not phone_number_id:
+            logger.error("Configuración de Meta WhatsApp API incompleta")
+            return False
+
+        # URL de la API de Meta
+        url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
+
+        # Headers
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Content-Type': 'application/json'
+        }
+
+        # Payload del mensaje
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone_number,
+            "type": "text",
+            "text": {
+                "body": message_text
+            }
+        }
+
+        logger.info(f"Enviando mensaje Meta a {phone_number}: {message_text}")
+
+        # Realizar la petición
+        response = requests.post(url, headers=headers,
+                                 json=payload, timeout=30)
+
+        if response.status_code == 200:
+            response_data = response.json()
+            logger.info(
+                f"✅ Mensaje Meta enviado exitosamente: {response_data}")
+            return True
+        else:
+            logger.error(
+                f"❌ Error enviando mensaje Meta: {response.status_code} - {response.text}")
+            return False
+
+    except Exception as e:
+        logger.exception(f"Error enviando mensaje Meta WhatsApp: {str(e)}")
+        return False
 
 
 @csrf_exempt
@@ -532,6 +824,71 @@ def verify_code(request):
 
     except Exception as e:
         logger.exception(f"Error al verificar código: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+
+
+@csrf_exempt
+@require_POST
+def send_verification_code_meta(request):
+    """
+    Genera y envía un código de verificación al número de WhatsApp usando Meta API
+    """
+    try:
+        # Obtener datos de la solicitud
+        data = json.loads(request.body) if request.body else {}
+
+        # Verificar que se proporcionó un número de teléfono
+        phone_number = data.get('phone_number')
+        if not phone_number:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere un número de teléfono"
+            }, status=400)
+
+        # Normalizar el número de teléfono para consistencia
+        phone_number_normalized = normalize_phone_number(phone_number)
+        if not phone_number_normalized:
+            return JsonResponse({
+                "status": "error",
+                "message": "Número de teléfono inválido"
+            }, status=400)
+
+        logger.info(
+            f"Número original: {phone_number}, Normalizado: {phone_number_normalized}")
+
+        # Generar un código de verificación
+        verification_code = generate_verification_code()
+
+        # Almacenar el código en caché con el número normalizado
+        cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
+        cache.set(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
+
+        # Preparar el mensaje con el código
+        message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
+
+        # Enviar el código por WhatsApp usando Meta API
+        success = send_meta_whatsapp_message(phone_number, message)
+
+        if success:
+            return JsonResponse({
+                "status": "ok",
+                "message": "Código de verificación enviado con éxito",
+                "expires_in": VERIFICATION_CODE_TIMEOUT
+            })
+        else:
+            # Si falla el envío, eliminar el código de la caché
+            cache.delete(cache_key)
+            logger.error(f"Fallo al enviar código a {phone_number_normalized}")
+            return JsonResponse({
+                "status": "error",
+                "message": "No se pudo enviar el código de verificación"
+            }, status=500)
+
+    except Exception as e:
+        logger.exception(f"Error al enviar código de verificación: {str(e)}")
         return JsonResponse({
             "status": "error",
             "message": str(e)

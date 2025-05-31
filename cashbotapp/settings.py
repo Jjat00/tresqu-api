@@ -198,20 +198,15 @@ TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL', '')
 # Configuración de OpenAI
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
-# Configuración de WhatsApp Bot (Evolution API)
-EVOLUTION_API_URL = os.getenv('EVOLUTION_API_URL', '')
-EVOLUTION_API_KEY = os.getenv('EVOLUTION_API_KEY', '')
-GLOBAL_API_KEY = os.getenv('AUTHENTICATION_API_KEY', '')
-# Nombre de la instancia predeterminada
-WHATSAPP_DEFAULT_INSTANCE = os.getenv(
-    'WHATSAPP_DEFAULT_INSTANCE', 'Tresqu Test')
-WHATSAPP_DEFAULT_EVENTS = [
-    "QRCODE_UPDATED",
-    "MESSAGES_UPSERT",
-    "MESSAGES_UPDATE",
-    "CONNECTION_UPDATE",
-    "SEND_MESSAGE",
-]
+# Configuración de Meta WhatsApp API
+META_WHATSAPP_ACCESS_TOKEN = os.getenv('META_WHATSAPP_ACCESS_TOKEN', '')
+META_WHATSAPP_VERIFY_TOKEN = os.getenv(
+    'META_WHATSAPP_VERIFY_TOKEN', 'mi_token_secreto')
+META_WHATSAPP_PHONE_NUMBER_ID = os.getenv('META_WHATSAPP_PHONE_NUMBER_ID', '')
+META_WHATSAPP_BUSINESS_ACCOUNT_ID = os.getenv(
+    'META_WHATSAPP_BUSINESS_ACCOUNT_ID', '')
+META_APP_ID = os.getenv('META_APP_ID', '')
+META_APP_SECRET = os.getenv('META_APP_SECRET', '')
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Cashbot API',
