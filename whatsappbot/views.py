@@ -225,11 +225,63 @@ def process_meta_message_status(value, waba_id):
             timestamp = status.get('timestamp')
             recipient_id = status.get('recipient_id')
 
-            logger.info(
-                f"Estado de mensaje Meta - ID: {message_id}, Estado: {status_type}, Para: {recipient_id}")
+            # Manejar errores específicos
+            errors = status.get('errors', [])
 
-            # Aquí puedes agregar lógica para actualizar el estado de mensajes en tu base de datos
-            # Por ejemplo, marcar mensajes como entregados o leídos
+            if status_type == 'failed' and errors:
+                for error in errors:
+                    error_code = error.get('code')
+                    error_title = error.get('title', '')
+                    error_message = error.get('message', '')
+                    error_details = error.get(
+                        'error_data', {}).get('details', '')
+
+                    logger.error(
+                        f"❌ Error en mensaje Meta - ID: {message_id}, "
+                        f"Para: {recipient_id}, Código: {error_code}, "
+                        f"Título: {error_title}, Detalles: {error_details}"
+                    )
+
+                    # Manejar errores específicos
+                    if error_code == 131047:
+                        logger.warning(
+                            f"🔄 Error 131047 (Re-engagement) para {recipient_id}: "
+                            f"Se requiere plantilla de mensaje para contactar después de 24h"
+                        )
+                    elif error_code == 131026:
+                        logger.warning(
+                            f"📱 Error 131026 (Message Undeliverable) para {recipient_id}: "
+                            f"Número no válido o usuario no acepta términos"
+                        )
+                    elif error_code == 131048:
+                        logger.warning(
+                            f"🚫 Error 131048 (Spam Rate Limit) para {recipient_id}: "
+                            f"Demasiados mensajes marcados como spam"
+                        )
+                    elif error_code == 131049:
+                        logger.warning(
+                            f"🌐 Error 131049 (Ecosystem Health) para {recipient_id}: "
+                            f"Meta no entregó para mantener ecosistema saludable"
+                        )
+                    elif error_code == 131042:
+                        logger.error(
+                            f"💳 Error 131042 (Payment Issue) para {recipient_id}: "
+                            f"Problema con método de pago de la cuenta"
+                        )
+                    elif error_code in [130429, 131056, 80007]:
+                        logger.warning(
+                            f"⏱️ Error {error_code} (Rate Limit) para {recipient_id}: "
+                            f"Límite de velocidad alcanzado"
+                        )
+                    else:
+                        logger.error(
+                            f"❓ Error desconocido {error_code} para {recipient_id}: {error_message}"
+                        )
+            else:
+                logger.info(
+                    f"📊 Estado de mensaje Meta - ID: {message_id}, "
+                    f"Estado: {status_type}, Para: {recipient_id}"
+                )
 
     except Exception as e:
         logger.exception(
@@ -265,9 +317,10 @@ async def handle_meta_whatsapp_message(sender_number, message_text, message_id, 
         return False, str(e)
 
 
-def send_meta_whatsapp_message(phone_number, message_text, waba_id=None):
+def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_template=False, template_name=None, template_language="es", template_params=None):
     """
     Envía un mensaje usando Meta WhatsApp API
+    Soporta tanto mensajes de texto como plantillas
     """
     try:
         # Configuración de Meta API
@@ -288,17 +341,47 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None):
             'Content-Type': 'application/json'
         }
 
-        # Payload del mensaje
-        payload = {
-            "messaging_product": "whatsapp",
-            "to": phone_number,
-            "type": "text",
-            "text": {
-                "body": message_text
+        # Construir payload según el tipo de mensaje
+        if use_template and template_name:
+            # Usar plantilla de mensaje
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": phone_number,
+                "type": "template",
+                "template": {
+                    "name": template_name,
+                    "language": {
+                        "code": template_language
+                    }
+                }
             }
-        }
 
-        logger.info(f"Enviando mensaje Meta a {phone_number}: {message_text}")
+            # Agregar parámetros si se proporcionan
+            if template_params:
+                payload["template"]["components"] = [
+                    {
+                        "type": "body",
+                        "parameters": [
+                            {"type": "text", "text": param} for param in template_params
+                        ]
+                    }
+                ]
+
+            logger.info(
+                f"Enviando plantilla Meta '{template_name}' a {phone_number}")
+        else:
+            # Mensaje de texto normal
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": phone_number,
+                "type": "text",
+                "text": {
+                    "body": message_text
+                }
+            }
+
+            logger.info(
+                f"Enviando mensaje Meta a {phone_number}: {message_text}")
 
         # Realizar la petición
         response = requests.post(url, headers=headers,
@@ -918,17 +1001,24 @@ def send_mass_message_api(request):
         message = data.get('message')
         platform = data.get('platform', 'WHATSAPP')
         template = data.get('template')
+        # Nombre de plantilla de Meta
+        template_name = data.get('template_name')
+        template_language = data.get('template_language', 'es')
+        template_params = data.get('template_params', [])
+        use_template = data.get('use_template', False)
         dry_run = data.get('dry_run', False)
 
-        if not message and not template:
+        if not message and not template and not template_name:
             return JsonResponse({
                 "status": "error",
-                "message": "Se requiere un mensaje o template"
+                "message": "Se requiere un mensaje, template o template_name"
             }, status=400)
 
         # Usar template si se especifica
         if template:
             message = get_template_message(template)
+        elif template_name:
+            use_template = True
 
         # Obtener usuarios según la plataforma
         if platform == 'WHATSAPP':
@@ -964,21 +1054,26 @@ def send_mass_message_api(request):
                 "message": "Vista previa generada",
                 "total_users": total_users,
                 "users_preview": users_preview,
-                "message_preview": message
+                "message_preview": message if not use_template else f"Plantilla: {template_name}",
+                "use_template": use_template,
+                "template_name": template_name
             })
 
         # Enviar mensajes en segundo plano
         import threading
         thread = threading.Thread(
             target=send_mass_messages_background,
-            args=(users, message)
+            args=(users, message, use_template, template_name,
+                  template_language, template_params)
         )
         thread.start()
 
         return JsonResponse({
             "status": "success",
             "message": f"Envío masivo iniciado para {total_users} usuarios",
-            "total_users": total_users
+            "total_users": total_users,
+            "use_template": use_template,
+            "template_name": template_name if use_template else None
         })
 
     except Exception as e:
@@ -1036,25 +1131,49 @@ def get_template_message(template):
     return templates.get(template, "")
 
 
-def send_mass_messages_background(users, message):
+def send_mass_messages_background(users, message, use_template=False, template_name=None, template_language="es", template_params=None):
     """Envía mensajes masivos en segundo plano"""
     sent_count = 0
     failed_count = 0
+    re_engagement_errors = 0
+    other_errors = 0
     total_users = users.count()
 
     logger.info(f"Iniciando envío masivo a {total_users} usuarios")
+    if use_template:
+        logger.info(
+            f"Usando plantilla: {template_name} (idioma: {template_language})")
+    else:
+        logger.info(f"Usando mensaje de texto: {message[:50]}...")
 
     for i, user in enumerate(users, 1):
         try:
-            # Personalizar mensaje con el nombre del usuario
-            personalized_message = message.replace(
-                "{name}", user.first_name or "")
+            # Personalizar mensaje con el nombre del usuario si no es plantilla
+            if use_template:
+                # Para plantillas, usar parámetros si se proporcionan
+                user_template_params = template_params.copy() if template_params else []
+                if user.first_name and "{name}" in str(user_template_params):
+                    # Reemplazar {name} en los parámetros
+                    user_template_params = [param.replace(
+                        "{name}", user.first_name) for param in user_template_params]
 
-            # Enviar mensaje usando Meta WhatsApp API
-            success = send_meta_whatsapp_message(
-                phone_number=user.phone_number,
-                message_text=personalized_message
-            )
+                success = send_meta_whatsapp_message(
+                    phone_number=user.phone_number,
+                    message_text="",  # No se usa para plantillas
+                    use_template=True,
+                    template_name=template_name,
+                    template_language=template_language,
+                    template_params=user_template_params if user_template_params else None
+                )
+            else:
+                # Mensaje de texto personalizado
+                personalized_message = message.replace(
+                    "{name}", user.first_name or "")
+
+                success = send_meta_whatsapp_message(
+                    phone_number=user.phone_number,
+                    message_text=personalized_message
+                )
 
             if success:
                 sent_count += 1
@@ -1079,6 +1198,151 @@ def send_mass_messages_background(users, message):
     success_rate = (sent_count / total_users * 100) if total_users > 0 else 0
     logger.info(
         f"📊 Envío masivo completado: {sent_count}/{total_users} exitosos ({success_rate:.1f}%)")
+
+    if use_template:
+        logger.info(f"📋 Plantilla utilizada: {template_name}")
+
+    logger.info(f"❌ Fallos totales: {failed_count}")
+
+
+@csrf_exempt
+@require_POST
+def send_template_message_api(request):
+    """
+    API endpoint específico para enviar mensajes usando plantillas de Meta
+    """
+    try:
+        # Verificar autenticación
+        api_key = request.headers.get(
+            'Authorization', '').replace('Bearer ', '')
+        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+            return JsonResponse({
+                "status": "error",
+                "message": "No autorizado"
+            }, status=401)
+
+        # Obtener datos de la solicitud
+        data = json.loads(request.body) if request.body else {}
+
+        template_name = data.get('template_name')
+        template_language = data.get('template_language', 'es')
+        template_params = data.get('template_params', [])
+        # Lista de números específicos
+        phone_numbers = data.get('phone_numbers', [])
+        # Enviar a todos los usuarios
+        send_to_all = data.get('send_to_all', False)
+        dry_run = data.get('dry_run', False)
+
+        if not template_name:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere template_name"
+            }, status=400)
+
+        # Determinar destinatarios
+        if send_to_all:
+            users = User.objects.filter(
+                platform__in=['WHATSAPP', 'MULTIPLTAFORMA'],
+                phone_number__isnull=False
+            ).exclude(phone_number='')
+            target_numbers = [user.phone_number for user in users]
+        elif phone_numbers:
+            target_numbers = phone_numbers
+        else:
+            return JsonResponse({
+                "status": "error",
+                "message": "Se requiere phone_numbers o send_to_all=true"
+            }, status=400)
+
+        total_numbers = len(target_numbers)
+
+        if total_numbers == 0:
+            return JsonResponse({
+                "status": "error",
+                "message": "No se encontraron números para enviar"
+            }, status=400)
+
+        if dry_run:
+            return JsonResponse({
+                "status": "success",
+                "message": "Vista previa de plantilla generada",
+                "total_numbers": total_numbers,
+                "template_name": template_name,
+                "template_language": template_language,
+                "template_params": template_params,
+                # Mostrar solo los primeros 10
+                "target_numbers": target_numbers[:10]
+            })
+
+        # Enviar plantillas en segundo plano
+        import threading
+        thread = threading.Thread(
+            target=send_template_messages_background,
+            args=(target_numbers, template_name,
+                  template_language, template_params)
+        )
+        thread.start()
+
+        return JsonResponse({
+            "status": "success",
+            "message": f"Envío de plantillas iniciado para {total_numbers} números",
+            "total_numbers": total_numbers,
+            "template_name": template_name
+        })
+
+    except Exception as e:
+        logger.exception(f"Error en API de plantilla: {str(e)}")
+        return JsonResponse({
+            "status": "error",
+            "message": str(e)
+        }, status=500)
+
+
+def send_template_messages_background(phone_numbers, template_name, template_language="es", template_params=None):
+    """Envía plantillas de mensaje en segundo plano"""
+    sent_count = 0
+    failed_count = 0
+    total_numbers = len(phone_numbers)
+
+    logger.info(f"Iniciando envío de plantillas a {total_numbers} números")
+    logger.info(f"Plantilla: {template_name} (idioma: {template_language})")
+
+    for i, phone_number in enumerate(phone_numbers, 1):
+        try:
+            success = send_meta_whatsapp_message(
+                phone_number=phone_number,
+                message_text="",  # No se usa para plantillas
+                use_template=True,
+                template_name=template_name,
+                template_language=template_language,
+                template_params=template_params
+            )
+
+            if success:
+                sent_count += 1
+                logger.info(
+                    f"✅ [{i}/{total_numbers}] Plantilla enviada a {phone_number}")
+            else:
+                failed_count += 1
+                logger.error(
+                    f"❌ [{i}/{total_numbers}] Falló envío de plantilla a {phone_number}")
+
+            # Delay entre mensajes
+            if i < total_numbers:
+                time.sleep(2)
+
+        except Exception as e:
+            failed_count += 1
+            logger.error(
+                f"❌ [{i}/{total_numbers}] Error enviando plantilla a {phone_number}: {str(e)}")
+            continue
+
+    # Log del resumen final
+    success_rate = (sent_count / total_numbers *
+                    100) if total_numbers > 0 else 0
+    logger.info(
+        f"📊 Envío de plantillas completado: {sent_count}/{total_numbers} exitosos ({success_rate:.1f}%)")
+    logger.info(f"❌ Fallos totales: {failed_count}")
 
 
 @csrf_exempt

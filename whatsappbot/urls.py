@@ -18,4 +18,8 @@ urlpatterns = [
          views.send_mass_message_api, name='send_mass_message_api'),
     path('schedule-reminders/',
          views.schedule_reminder_messages, name='schedule_reminder_messages'),
+
+    # Rutas para plantillas de mensaje
+    path('send-template/',
+         views.send_template_message_api, name='send_template_message_api'),
 ]
