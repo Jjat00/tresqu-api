@@ -356,8 +356,8 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
                 }
             }
 
-            # Agregar parámetros si se proporcionan
-            if template_params:
+            # Agregar parámetros solo si se proporcionan y no están vacíos
+            if template_params and len(template_params) > 0:
                 payload["template"]["components"] = [
                     {
                         "type": "body",
@@ -366,9 +366,12 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
                         ]
                     }
                 ]
+                logger.info(
+                    f"Enviando plantilla Meta '{template_name}' con parámetros {template_params} a {phone_number}")
+            else:
+                logger.info(
+                    f"Enviando plantilla Meta '{template_name}' sin parámetros a {phone_number}")
 
-            logger.info(
-                f"Enviando plantilla Meta '{template_name}' a {phone_number}")
         else:
             # Mensaje de texto normal
             payload = {
