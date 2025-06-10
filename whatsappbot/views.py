@@ -17,6 +17,7 @@ from users.serializers import UserSerializer
 
 from .bot import handle_whatsapp_message
 from .utils import normalize_phone_number
+from .cache_utils import set_cache, get_cache, delete_cache
 
 logger = logging.getLogger(__name__)
 
@@ -156,13 +157,13 @@ def process_meta_messages(value, waba_id):
                 cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
 
                 # Verificar si el mensaje ya fue procesado o está en proceso
-                if cache.get(cache_key):
+                if get_cache(cache_key):
                     logger.info(
                         f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {from_number}. Ignorando.")
                     continue
 
                 # Marcar el mensaje como en proceso (con timeout de seguridad)
-                cache.set(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
+                set_cache(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
                 logger.info(
                     f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {from_number}")
 
@@ -230,7 +231,7 @@ def process_meta_messages(value, waba_id):
                 finally:
                     # IMPORTANTE: Limpiar el cache después del procesamiento
                     # para permitir futuros mensajes del mismo usuario
-                    cache.delete(cache_key)
+                    delete_cache(cache_key)
                     logger.info(
                         f"🔓 Cache limpiado para mensaje ID: {message_id}")
 
@@ -239,7 +240,7 @@ def process_meta_messages(value, waba_id):
                     f"Error procesando mensaje individual de Meta: {str(e)}")
                 # Asegurar limpieza del cache en caso de error
                 if 'cache_key' in locals():
-                    cache.delete(cache_key)
+                    delete_cache(cache_key)
                 continue
 
     except Exception as e:
@@ -584,13 +585,13 @@ def webhook_receiver(request, instance_name):
             cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
 
             # Verificar si el mensaje ya fue procesado o está en proceso
-            if cache.get(cache_key):
+            if get_cache(cache_key):
                 logger.info(
                     f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {sender_number}. Ignorando.")
                 return JsonResponse({"status": "success", "message": "Mensaje duplicado ignorado"})
 
             # Marcar el mensaje como en proceso (con timeout de seguridad)
-            cache.set(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
+            set_cache(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
             logger.info(
                 f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {sender_number}")
 
@@ -621,7 +622,7 @@ def webhook_receiver(request, instance_name):
 
             finally:
                 # IMPORTANTE: Limpiar el cache después del procesamiento
-                cache.delete(cache_key)
+                delete_cache(cache_key)
                 logger.info(f"🔓 Cache limpiado para mensaje ID: {message_id}")
 
         except Exception as e:
@@ -796,7 +797,7 @@ def send_verification_code(request, instance_name):
 
         # Almacenar el código en caché con el número normalizado
         cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
-        cache.set(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
+        set_cache(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
 
         # Preparar el mensaje con el código
         message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
@@ -818,7 +819,7 @@ def send_verification_code(request, instance_name):
             })
         else:
             # Si falla el envío, eliminar el código de la caché
-            cache.delete(cache_key)
+            delete_cache(cache_key)
             logger.error(f"Fallo al enviar código a {phone_number_normalized}")
             return JsonResponse({
                 "status": "error",
@@ -867,7 +868,7 @@ def verify_code(request):
 
         # Obtener el código almacenado en caché usando el número normalizado
         cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
-        stored_code = cache.get(cache_key)
+        stored_code = get_cache(cache_key)
 
         if not stored_code:
             return JsonResponse({
@@ -878,7 +879,7 @@ def verify_code(request):
         # Verificar si el código coincide
         if code == stored_code:
             # Eliminar el código usado
-            cache.delete(cache_key)
+            delete_cache(cache_key)
 
             # Usar el número normalizado para todas las operaciones de base de datos
             phone_number_clean = phone_number_normalized
@@ -1010,7 +1011,7 @@ def send_verification_code_meta(request):
 
         # Almacenar el código en caché con el número normalizado
         cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
-        cache.set(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
+        set_cache(cache_key, verification_code, VERIFICATION_CODE_TIMEOUT)
 
         # Preparar el mensaje con el código
         message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
@@ -1026,7 +1027,7 @@ def send_verification_code_meta(request):
             })
         else:
             # Si falla el envío, eliminar el código de la caché
-            cache.delete(cache_key)
+            delete_cache(cache_key)
             logger.error(f"Fallo al enviar código a {phone_number_normalized}")
             return JsonResponse({
                 "status": "error",
