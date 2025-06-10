@@ -26,6 +26,10 @@ VERIFICATION_CODE_TIMEOUT = 300  # 5 minutos
 # Prefijo para las claves en caché
 VERIFICATION_CODE_PREFIX = 'whatsapp_verification_code_'
 
+# Prefijo para prevenir duplicados de mensajes
+MESSAGE_PROCESSING_PREFIX = 'whatsapp_message_processing_'
+MESSAGE_PROCESSING_TIMEOUT = 300  # 5 minutos
+
 # Token de verificación para Meta WhatsApp API
 META_VERIFY_TOKEN = getattr(
     settings, 'META_WHATSAPP_VERIFY_TOKEN', 'mi_token_secreto')
@@ -123,7 +127,7 @@ def handle_meta_webhook(request):
 
 def process_meta_messages(value, waba_id):
     """
-    Procesa los mensajes entrantes de Meta WhatsApp API
+    Procesa los mensajes entrantes de Meta WhatsApp API con prevención de duplicados
     """
     try:
         messages = value.get('messages', [])
@@ -147,6 +151,20 @@ def process_meta_messages(value, waba_id):
                 from_number = message.get('from')
                 timestamp = message.get('timestamp')
                 message_type = message.get('type', 'text')
+
+                # PREVENCIÓN DE DUPLICADOS - Verificar si el mensaje ya está siendo procesado
+                cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
+
+                # Verificar si el mensaje ya fue procesado o está en proceso
+                if cache.get(cache_key):
+                    logger.info(
+                        f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {from_number}. Ignorando.")
+                    continue
+
+                # Marcar el mensaje como en proceso (con timeout de seguridad)
+                cache.set(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
+                logger.info(
+                    f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {from_number}")
 
                 # Obtener información del contacto
                 contact_info = contacts_dict.get(from_number, {})
@@ -182,30 +200,46 @@ def process_meta_messages(value, waba_id):
                 else:
                     logger.info(
                         f"Tipo de mensaje no soportado: {message_type}")
+                    # Limpiar el cache antes de continuar
+                    cache.delete(cache_key)
                     continue
 
-                # Procesar el mensaje usando la lógica existente
-                # Nota: Necesitaremos adaptar handle_whatsapp_message para Meta API
-                success, response = asyncio.run(handle_meta_whatsapp_message(
-                    sender_number=from_number,
-                    message_text=message_text,
-                    message_id=message_id,
-                    waba_id=waba_id,
-                    sender_name=sender_name,
-                    message_type=message_type,
-                    media_url=media_url
-                ))
+                try:
+                    # Procesar el mensaje usando la lógica existente
+                    success, response = asyncio.run(handle_meta_whatsapp_message(
+                        sender_number=from_number,
+                        message_text=message_text,
+                        message_id=message_id,
+                        waba_id=waba_id,
+                        sender_name=sender_name,
+                        message_type=message_type,
+                        media_url=media_url
+                    ))
 
-                if success:
+                    if success:
+                        logger.info(
+                            f"✅ Mensaje Meta procesado exitosamente para {from_number}")
+                    else:
+                        logger.error(
+                            f"❌ Error procesando mensaje Meta para {from_number}")
+
+                except Exception as processing_error:
+                    logger.exception(
+                        f"Error procesando mensaje Meta ID {message_id}: {str(processing_error)}")
+
+                finally:
+                    # IMPORTANTE: Limpiar el cache después del procesamiento
+                    # para permitir futuros mensajes del mismo usuario
+                    cache.delete(cache_key)
                     logger.info(
-                        f"✅ Mensaje Meta procesado exitosamente para {from_number}")
-                else:
-                    logger.error(
-                        f"❌ Error procesando mensaje Meta para {from_number}")
+                        f"🔓 Cache limpiado para mensaje ID: {message_id}")
 
             except Exception as e:
                 logger.exception(
                     f"Error procesando mensaje individual de Meta: {str(e)}")
+                # Asegurar limpieza del cache en caso de error
+                if 'cache_key' in locals():
+                    cache.delete(cache_key)
                 continue
 
     except Exception as e:
@@ -546,23 +580,49 @@ def webhook_receiver(request, instance_name):
             logger.info(
                 f"Mensaje recibido de {sender_number} ({sender_name}): Tipo {message_type}, Texto: {conversation}")
 
-            # Usar handle_whatsapp_message para procesar el mensaje y enviar respuesta
-            success, response = asyncio.run(handle_whatsapp_message(
-                sender_number=sender_number,
-                message_text=conversation,
-                message_id=message_id,
-                instance_name=instance_name,
-                server_url=server_url,
-                api_key=api_key,
-                sender_name=sender_name,
-                message_type=message_type,
-                media_url=media_url
-            ))
+            # PREVENCIÓN DE DUPLICADOS - Verificar si el mensaje ya está siendo procesado
+            cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
 
-            if success:
-                logger.info(f"✅ Procesamiento completo para {sender_number}")
-            else:
-                logger.error(f"❌ Error en procesamiento para {sender_number}")
+            # Verificar si el mensaje ya fue procesado o está en proceso
+            if cache.get(cache_key):
+                logger.info(
+                    f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {sender_number}. Ignorando.")
+                return JsonResponse({"status": "success", "message": "Mensaje duplicado ignorado"})
+
+            # Marcar el mensaje como en proceso (con timeout de seguridad)
+            cache.set(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
+            logger.info(
+                f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {sender_number}")
+
+            try:
+                # Usar handle_whatsapp_message para procesar el mensaje y enviar respuesta
+                success, response = asyncio.run(handle_whatsapp_message(
+                    sender_number=sender_number,
+                    message_text=conversation,
+                    message_id=message_id,
+                    instance_name=instance_name,
+                    server_url=server_url,
+                    api_key=api_key,
+                    sender_name=sender_name,
+                    message_type=message_type,
+                    media_url=media_url
+                ))
+
+                if success:
+                    logger.info(
+                        f"✅ Procesamiento completo para {sender_number}")
+                else:
+                    logger.error(
+                        f"❌ Error en procesamiento para {sender_number}")
+
+            except Exception as processing_error:
+                logger.exception(
+                    f"Error procesando mensaje Evolution ID {message_id}: {str(processing_error)}")
+
+            finally:
+                # IMPORTANTE: Limpiar el cache después del procesamiento
+                cache.delete(cache_key)
+                logger.info(f"🔓 Cache limpiado para mensaje ID: {message_id}")
 
         except Exception as e:
             logger.exception(f"Error al procesar mensaje: {str(e)}")

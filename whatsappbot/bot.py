@@ -336,17 +336,30 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         # 1. Obtener o crear el chat para este número
         chat, created = await sync_to_async(get_or_create_chat)(sender_number)
 
-        # 2. Guardar el mensaje entrante
+        # 2. Verificar si el mensaje ya existe en la base de datos
+        existing_message = await sync_to_async(
+            lambda: Message.objects.filter(
+                chat=chat,
+                platform_message_id=message_id
+            ).first()
+        )()
+
+        if existing_message:
+            logger.info(
+                f"⚠️ Mensaje ya existe en BD - ID: {message_id}, De: {sender_number}. Ignorando.")
+            return True, "Mensaje duplicado ignorado"
+
+        # 3. Guardar el mensaje entrante
         await sync_to_async(create_message)(
             chat, message_id, "incoming", message_text
         )
 
-        # 3. Verificar si el número está en proceso de registro
+        # 4. Verificar si el número está en proceso de registro
         registro_activo = sender_number in whatsapp_user_states
         estado_registro = whatsapp_user_states.get(
             sender_number, {}).get("estado", ESTADO_INICIAL)
 
-        # 4. Obtener el usuario asociado al chat o por número de teléfono
+        # 5. Obtener el usuario asociado al chat o por número de teléfono
         user_id, user = await sync_to_async(get_chat_user)(sender_number)
 
         if not user:
@@ -395,7 +408,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
                 return success, response_text
 
-        # 5. Procesar el estado de registro si está en curso
+        # 6. Procesar el estado de registro si está en curso
         if registro_activo:
             if estado_registro == ESPERANDO_MONEDA:
                 # Validar código de moneda
@@ -506,16 +519,16 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
                 return success, response_text
 
-        # 6. Si llegamos aquí, el usuario existe o se ha registrado correctamente
+        # 7. Si llegamos aquí, el usuario existe o se ha registrado correctamente
         # Procesar el mensaje y obtener respuesta
         response_text = await process_message(user, message_text)
 
-        # 7. Guardar la respuesta en la base de datos
+        # 8. Guardar la respuesta en la base de datos
         await sync_to_async(create_message)(
             chat, f"response_{message_id}", "outgoing", response_text
         )
 
-        # 8. Enviar la respuesta usando Meta API
+        # 9. Enviar la respuesta usando Meta API
         success = await send_whatsapp_response(
             instance_name="meta_api",
             to_number=sender_number,

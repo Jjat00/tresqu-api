@@ -149,6 +149,20 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")
 
+# Configuración de Cache
+# Usar cache de base de datos que es más robusto que memoria local
+# y no requiere servicios adicionales como Redis
+CACHES = {
+    'default': {
+        'BACKEND': 'django.core.cache.backends.db.DatabaseCache',
+        'LOCATION': 'django_cache_table',
+        'TIMEOUT': 300,  # 5 minutos de timeout por defecto
+        'OPTIONS': {
+            'MAX_ENTRIES': 1000,  # Máximo 1000 entradas en cache
+            'CULL_FREQUENCY': 3,  # Eliminar 1/3 de las entradas cuando se llena
+        }
+    }
+}
 
 # Password validation
 # https://docs.djangoproject.com/en/5.1/ref/settings/#auth-password-validators

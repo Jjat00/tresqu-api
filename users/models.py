@@ -268,6 +268,9 @@ class Message(models.Model):
     embedding = VectorField(dimensions=1536, null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
+    # No aplicamos restricción de BD para preservar datos duplicados existentes
+    # La prevención se maneja a nivel de aplicación con cache y verificaciones
+
     def __str__(self):
         return f"{self.get_message_type_display()} message: {self.text[:50]}"
 
