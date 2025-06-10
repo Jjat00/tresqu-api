@@ -220,7 +220,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         # Gastos recientes
         recent_expenses = self.get_serializer(
-            queryset.order_by('-timestamp')[:10],
+            queryset.order_by('-timestamp'),
             many=True
         ).data
 
