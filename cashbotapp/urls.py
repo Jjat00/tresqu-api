@@ -25,6 +25,7 @@ urlpatterns = [
     path('api/', include('expenses.urls'), name='expenses'),
     path('api/', include('users.urls'), name='users'),
     path('api/', include('income.urls'), name='income'),
+    path('api/savings/', include('savings.urls'), name='savings'),
     path('telegram/', include('telegrambot.urls'), name='telegram'),
     path('whatsapp/', include('whatsappbot.urls'), name='whatsapp'),
     # JWT auth

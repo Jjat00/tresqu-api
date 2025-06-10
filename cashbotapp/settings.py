@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'corsheaders',
     'income',
     'whatsappbot',
+    'savings',
 ]
 
 REST_FRAMEWORK = {
