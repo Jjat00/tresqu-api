@@ -29,6 +29,9 @@ from .serializers import (
     OrganizationInvitationSerializer
 )
 
+# Importar información de monedas
+from telegrambot.currencies import COMMON_CURRENCIES, ISO_4217_CODES
+
 
 class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
@@ -40,6 +43,22 @@ class UserViewSet(viewsets.ModelViewSet):
         if not self.request.user.is_authenticated:
             return User.objects.none()
         return User.objects.filter(id=self.request.user.id)
+
+    @action(detail=False, methods=['get'])
+    def available_currencies(self, request):
+        """
+        Obtiene las monedas disponibles en el sistema
+        GET /api/users/available_currencies/
+
+        Retorna tanto las monedas comunes (con banderas) como todas las monedas ISO 4217 válidas
+        """
+        return Response({
+            'common_currencies': COMMON_CURRENCIES,
+            'all_currencies': [
+                {'code': code, 'name': name}
+                for code, name in ISO_4217_CODES.items()
+            ]
+        })
 
     @action(detail=True, methods=['get'])
     def subscription_history(self, request, pk=None):

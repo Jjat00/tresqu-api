@@ -118,6 +118,33 @@ class ExpenseViewSet(viewsets.ModelViewSet):
 
         return utc_datetime
 
+    def _filter_by_date_range(self, queryset, start_date, end_date, user_timezone=None):
+        """
+        Filtra gastos por un rango de fechas usando spent_at (fecha real del gasto) como criterio principal.
+
+        Args:
+            queryset: QuerySet base a filtrar
+            start_date: Fecha de inicio (date object)
+            end_date: Fecha de fin (date object)
+            user_timezone: Zona horaria del usuario
+
+        Returns:
+            QuerySet filtrado
+        """
+        if user_timezone is None:
+            user_timezone = DEFAULT_TIMEZONE
+
+        # Convertir fechas a UTC para filtrar timestamp como fallback
+        start_datetime = self._convert_to_utc(start_date, False, user_timezone)
+        end_datetime = self._convert_to_utc(end_date, True, user_timezone)
+
+        # Filtrar usando spent_at como criterio principal, timestamp como fallback
+        return queryset.filter(
+            Q(spent_at__gte=start_date, spent_at__lte=end_date) |
+            (Q(spent_at__isnull=True) & Q(
+                timestamp__gte=start_datetime, timestamp__lte=end_datetime))
+        )
+
     @action(detail=False, methods=['get'])
     def by_category(self, request):
         """
@@ -195,14 +222,24 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         """
         months = int(request.query_params.get('months', 1))
 
+        # Obtener zona horaria del usuario
+        user_timezone = self._get_user_timezone(request)
+        local_now = self._get_local_datetime(request)
+        today = local_now.date()
+
         # Calcular fecha de inicio (hace X meses)
-        start_date = timezone.now().date().replace(day=1)
+        start_date = today.replace(day=1)
         if months > 0:
             for _ in range(months - 1):
                 # Retroceder al primer día del mes anterior
                 start_date = (start_date - timedelta(days=1)).replace(day=1)
 
-        queryset = self.get_queryset().filter(timestamp__gte=start_date)
+        # Filtrar usando spent_at (fecha real del gasto) en lugar de timestamp (fecha de registro)
+        queryset = self.get_queryset().filter(
+            Q(spent_at__gte=start_date) |
+            (Q(spent_at__isnull=True) & Q(
+                timestamp__gte=self._convert_to_utc(start_date, False, user_timezone)))
+        )
 
         # Gastos por categoría
         by_category = queryset.values('category__name').annotate(
@@ -306,10 +343,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             year, month, calendar.monthrange(year, month)[1]).date()
 
         # Filtrar gastos del mes especificado para el usuario actual
-        queryset = self.get_queryset().filter(
-            timestamp__date__gte=first_day,
-            timestamp__date__lte=last_day
-        )
+        queryset = self._filter_by_date_range(
+            self.get_queryset(), first_day, last_day)
 
         # Si no hay datos, devolver respuesta vacía
         if not queryset.exists():
@@ -429,29 +464,15 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             # Hoy (en la zona horaria del usuario)
             start_date = today
             end_date = today
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'yesterday':
             # Ayer (en la zona horaria del usuario)
             start_date = today - timedelta(days=1)
             end_date = start_date
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_month':
             # Mes actual (en la zona horaria del usuario)
@@ -466,15 +487,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             end_date = datetime(next_month_year, next_month,
                                 1).date() - timedelta(days=1)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_month':
             # Mes anterior (en la zona horaria del usuario)
@@ -483,75 +497,40 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             start_date = last_day_previous.replace(day=1)
             end_date = last_day_previous
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_week':
             # Semana actual (lunes a domingo en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_week':
             # Semana anterior (en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday() + 7)
             end_date = start_date + timedelta(days=6)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_year':
             # Año actual (en la zona horaria del usuario)
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_year':
             # Año anterior (en la zona horaria del usuario)
             start_date = datetime(today.year - 1, 1, 1).date()
             end_date = datetime(today.year - 1, 12, 31).date()
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'custom':
             # Filtro personalizado (considerando zona horaria del usuario)
@@ -571,16 +550,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                         status=status.HTTP_400_BAD_REQUEST
                     )
 
-                # Convertir a UTC para filtrar correctamente
-                start_datetime = self._convert_to_utc(
-                    start_date, False, user_timezone)
-                end_datetime = self._convert_to_utc(
-                    end_date, True, user_timezone)
-
-                queryset = queryset.filter(
-                    timestamp__gte=start_datetime,
-                    timestamp__lte=end_datetime
-                )
+                queryset = self._filter_by_date_range(
+                    queryset, start_date, end_date, user_timezone)
             except (ValueError, TypeError):
                 return Response(
                     {"error": "Formato de fecha inválido. Use YYYY-MM-DD"},
@@ -726,29 +697,15 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             # Hoy (en la zona horaria del usuario)
             start_date = today
             end_date = today
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'yesterday':
             # Ayer (en la zona horaria del usuario)
             start_date = today - timedelta(days=1)
             end_date = start_date
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_month':
             # Mes actual (en la zona horaria del usuario)
@@ -763,15 +720,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             end_date = datetime(next_month_year, next_month,
                                 1).date() - timedelta(days=1)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_month':
             # Mes anterior (en la zona horaria del usuario)
@@ -780,75 +730,40 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             start_date = last_day_previous.replace(day=1)
             end_date = last_day_previous
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_week':
             # Semana actual (lunes a domingo en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday())
             end_date = start_date + timedelta(days=6)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_week':
             # Semana anterior (en la zona horaria del usuario)
             start_date = today - timedelta(days=today.weekday() + 7)
             end_date = start_date + timedelta(days=6)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'current_year':
             # Año actual (en la zona horaria del usuario)
             start_date = today.replace(month=1, day=1)
             end_date = today.replace(month=12, day=31)
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'previous_year':
             # Año anterior (en la zona horaria del usuario)
             start_date = datetime(today.year - 1, 1, 1).date()
             end_date = datetime(today.year - 1, 12, 31).date()
 
-            # Convertir a UTC para filtrar correctamente
-            start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            end_datetime = self._convert_to_utc(end_date, True, user_timezone)
-
-            queryset = queryset.filter(
-                timestamp__gte=start_datetime,
-                timestamp__lte=end_datetime
-            )
+            queryset = self._filter_by_date_range(
+                queryset, start_date, end_date, user_timezone)
 
         elif date_filter == 'custom':
             # Filtro personalizado (considerando zona horaria del usuario)
@@ -1137,10 +1052,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             end_datetime = self._convert_to_utc(end_date, True, user_timezone)
 
         # Aplicar filtro de fecha al queryset
-        queryset = queryset.filter(
-            timestamp__gte=start_datetime,
-            timestamp__lte=end_datetime
-        )
+        queryset = self._filter_by_date_range(
+            queryset, start_date, end_date, user_timezone)
 
         # Si no hay gastos, devolver respuesta vacía
         if not queryset.exists():
@@ -1467,10 +1380,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             end_datetime = self._convert_to_utc(end_date, True, user_timezone)
 
         # Aplicar filtro de fecha al queryset
-        queryset = queryset.filter(
-            timestamp__gte=start_datetime,
-            timestamp__lte=end_datetime
-        )
+        queryset = self._filter_by_date_range(
+            queryset, start_date, end_date, user_timezone)
 
         # Si no hay gastos, devolver respuesta vacía
         if not queryset.exists():
@@ -1789,12 +1700,11 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         from income.models import Income
 
         # Obtener gastos del mes para el usuario actual
-        expenses_queryset = self.get_queryset().filter(
-            timestamp__gte=start_datetime,
-            timestamp__lte=end_datetime
-        )
+        expenses_queryset = self._filter_by_date_range(
+            self.get_queryset(), first_day, last_day, user_timezone)
 
         # Obtener ingresos del mes para el usuario actual
+        # Para ingresos mantenemos timestamp porque no tienen spent_at
         incomes_queryset = Income.objects.filter(
             user=request.user,
             timestamp__gte=start_datetime,
