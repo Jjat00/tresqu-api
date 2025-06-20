@@ -56,8 +56,77 @@ logger = logging.getLogger(__name__)
 llm = ChatOpenAI(model="gpt-4.1", temperature=0.1,
                  api_key=settings.OPENAI_API_KEY)
 
-# Cliente de OpenAI para posibles integraciones futuras
+# Cliente de OpenAI para transcripción de audio y otras integraciones
 openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+
+async def transcribe_audio(audio_file_path: str) -> str:
+    """
+    Transcribe un archivo de audio usando la API de OpenAI Whisper
+    """
+    try:
+        with open(audio_file_path, 'rb') as audio_file:
+            # Usar la API de OpenAI para transcribir
+            transcription = openai_client.audio.transcriptions.create(
+                model="whisper-1",
+                file=audio_file
+            )
+            return transcription.text
+    except Exception as e:
+        logger.error(f"Error transcribiendo audio: {e}")
+        return ""
+
+
+async def download_whatsapp_media(media_id: str, access_token: str) -> str:
+    """
+    Descarga un archivo de media de WhatsApp usando su ID y devuelve la ruta del archivo temporal
+    """
+    import requests
+    import tempfile
+    import os
+
+    try:
+        # Paso 1: Obtener la URL del archivo
+        media_url_endpoint = f"https://graph.facebook.com/v18.0/{media_id}"
+        headers = {
+            'Authorization': f'Bearer {access_token}'
+        }
+
+        response = requests.get(media_url_endpoint, headers=headers)
+        response.raise_for_status()
+
+        media_info = response.json()
+        file_url = media_info.get('url')
+        mime_type = media_info.get('mime_type', '')
+
+        if not file_url:
+            logger.error("No se pudo obtener la URL del archivo de media")
+            return ""
+
+        # Paso 2: Descargar el archivo
+        file_response = requests.get(file_url, headers=headers)
+        file_response.raise_for_status()
+
+        # Determinar la extensión del archivo basada en el mime_type
+        extension = '.ogg'  # Por defecto para audio de WhatsApp
+        if 'audio/ogg' in mime_type:
+            extension = '.ogg'
+        elif 'audio/mpeg' in mime_type:
+            extension = '.mp3'
+        elif 'audio/wav' in mime_type:
+            extension = '.wav'
+
+        # Crear archivo temporal
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+            temp_file.write(file_response.content)
+            temp_path = temp_file.name
+
+        logger.info(f"Archivo de media descargado exitosamente: {temp_path}")
+        return temp_path
+
+    except Exception as e:
+        logger.error(f"Error descargando archivo de media de WhatsApp: {e}")
+        return ""
 
 
 async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
@@ -490,7 +559,7 @@ async def process_message(user: User, raw_text: str) -> str:
             - Cuando el usuario te pide un reporte o resúmenes recuerdale que puede ver el dashboard en https://tresqu.com/, solo responde esto si el usuario te pide un reporte. para registrar un gasto o ingreso, no respondas esto.
             - Límitate a usar las features actuales, si el usuario te pide algo que no está en las funciones, di que será implementado en el futuro.
             - Features a implementar a futuro:
-                - Mensajes de audio en whatsapp por el momento esta funcion solo está en telegram.
+                - Mensajes de audio en whatsapp: ✅ IMPLEMENTADO - Funciona igual que en Telegram usando OpenAI Whisper.
                 - Extrae gastos de imagenes.
                 - Función de gastos compartidos.
                 - Función de registro de deudas.

@@ -271,25 +271,99 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
     try:
         # Verificar tipo de mensaje
         if message_type in ["audio", "voice", "ptt"]:
-            # Mensaje de audio - función no implementada
-            response_text = "Lo siento, actualmente no puedo procesar mensajes de audio. Esta función estará disponible próximamente. Por favor, envía un mensaje de texto."
+            # Procesar mensaje de audio/voz
+            logger.info(f"Procesando mensaje de voz de {sender_number}")
 
             # Crear chat si no existe
             chat, created = await sync_to_async(get_or_create_chat)(sender_number)
 
-            # Guardar respuesta
-            await sync_to_async(create_message)(
-                chat, f"response_{message_id}", "outgoing", response_text
-            )
+            # Verificar si tenemos el media_id para descargar el audio
+            if not media_url:
+                response_text = "Lo siento, no pude acceder al archivo de audio. Por favor, intenta de nuevo."
 
-            # Enviar respuesta usando Meta API
-            success = await send_whatsapp_response(
-                instance_name="meta_api",
-                to_number=sender_number,
-                message=response_text
-            )
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
 
-            return success, response_text
+                success = await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=response_text
+                )
+
+                return success, response_text
+
+            try:
+                # Enviar mensaje de "procesando"
+                processing_message = "🎧 Procesando tu mensaje de voz..."
+                await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=processing_message
+                )
+
+                # Descargar el archivo de audio usando la API de Meta
+                from whatsappbot.services import download_whatsapp_media, transcribe_audio
+                from django.conf import settings
+
+                # Obtener el token de acceso de Meta
+                access_token = getattr(
+                    settings, 'META_WHATSAPP_ACCESS_TOKEN', '')
+
+                if not access_token:
+                    logger.error(
+                        "Token de acceso de Meta WhatsApp no configurado")
+                    response_text = "Lo siento, hay un problema de configuración. Por favor, contacta al soporte."
+                else:
+                    # Descargar el archivo de audio
+                    temp_audio_path = await download_whatsapp_media(media_url, access_token)
+
+                    if not temp_audio_path:
+                        response_text = "Lo siento, no pude descargar el archivo de audio. Por favor, intenta de nuevo."
+                    else:
+                        # Transcribir el audio
+                        transcription = await transcribe_audio(temp_audio_path)
+
+                        # Limpiar el archivo temporal
+                        import os
+                        try:
+                            os.unlink(temp_audio_path)
+                        except:
+                            pass
+
+                        if not transcription or not transcription.strip():
+                            response_text = "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
+                        else:
+                            # Procesar el texto transcrito como un mensaje normal
+                            logger.info(
+                                f"Transcripción exitosa: {transcription}")
+
+                            # Actualizar el message_text con la transcripción y continuar el procesamiento normal
+                            message_text = transcription
+                            message_type = "text"  # Cambiar el tipo para procesamiento normal
+
+                            # Guardar el mensaje original (voz) y la transcripción
+                            await sync_to_async(create_message)(
+                                chat, message_id, "incoming", f"[Mensaje de voz]: {transcription}"
+                            )
+
+                            # Continuar con el procesamiento normal (no retornar aquí)
+
+            except Exception as e:
+                logger.error(f"Error procesando mensaje de voz: {e}")
+                response_text = "Lo siento, hubo un error procesando tu mensaje de voz. Por favor, intenta de nuevo."
+
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
+
+                success = await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=response_text
+                )
+
+                return success, response_text
 
         elif message_type in ["image", "photo"] and message_text.strip() == "":
             # Imagen sin texto - función no implementada
