@@ -269,6 +269,9 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         media_url: URL del contenido multimedia (si aplica)
     """
     try:
+        # Variable para controlar si saltamos la verificación de mensajes duplicados
+        skip_duplicate_check = False
+
         # Verificar tipo de mensaje
         if message_type in ["audio", "voice", "ptt"]:
             # Procesar mensaje de audio/voz
@@ -338,16 +341,17 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                             logger.info(
                                 f"Transcripción exitosa: {transcription}")
 
-                            # Actualizar el message_text con la transcripción y continuar el procesamiento normal
-                            message_text = transcription
-                            message_type = "text"  # Cambiar el tipo para procesamiento normal
-
                             # Guardar el mensaje original (voz) y la transcripción
                             await sync_to_async(create_message)(
                                 chat, message_id, "incoming", f"[Mensaje de voz]: {transcription}"
                             )
 
-                            # Continuar con el procesamiento normal (no retornar aquí)
+                            # Actualizar el message_text con la transcripción y continuar el procesamiento normal
+                            message_text = transcription
+                            message_type = "text"  # Cambiar el tipo para procesamiento normal
+
+                            # Saltar la verificación de mensaje duplicado ya que acabamos de guardarlo
+                            skip_duplicate_check = True
 
             except Exception as e:
                 logger.error(f"Error procesando mensaje de voz: {e}")
@@ -410,23 +414,27 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         # 1. Obtener o crear el chat para este número
         chat, created = await sync_to_async(get_or_create_chat)(sender_number)
 
-        # 2. Verificar si el mensaje ya existe en la base de datos
-        existing_message = await sync_to_async(
-            lambda: Message.objects.filter(
-                chat=chat,
-                platform_message_id=message_id
-            ).first()
-        )()
+        # 2. Verificar si el mensaje ya existe en la base de datos (solo si no es un mensaje de voz ya procesado)
+        if not skip_duplicate_check:
+            existing_message = await sync_to_async(
+                lambda: Message.objects.filter(
+                    chat=chat,
+                    platform_message_id=message_id
+                ).first()
+            )()
 
-        if existing_message:
+            if existing_message:
+                logger.info(
+                    f"⚠️ Mensaje ya existe en BD - ID: {message_id}, De: {sender_number}. Ignorando.")
+                return True, "Mensaje duplicado ignorado"
+
+            # 3. Guardar el mensaje entrante
+            await sync_to_async(create_message)(
+                chat, message_id, "incoming", message_text
+            )
+        else:
             logger.info(
-                f"⚠️ Mensaje ya existe en BD - ID: {message_id}, De: {sender_number}. Ignorando.")
-            return True, "Mensaje duplicado ignorado"
-
-        # 3. Guardar el mensaje entrante
-        await sync_to_async(create_message)(
-            chat, message_id, "incoming", message_text
-        )
+                f"🎧 Saltando verificación de duplicados para mensaje de voz transcrito: {message_id}")
 
         # 4. Verificar si el número está en proceso de registro
         registro_activo = sender_number in whatsapp_user_states
