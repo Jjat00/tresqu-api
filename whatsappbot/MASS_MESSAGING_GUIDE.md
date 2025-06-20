@@ -270,3 +270,192 @@ python manage.py send_mass_message --message "🚨 Mantenimiento programado hoy 
 - Aumenta el `--delay` entre mensajes
 - Reduce `--max-users` por ejecución
 - Programa envíos en horarios de menor tráfico
+
+## Funcionalidades Disponibles
+
+El comando `send_mass_message` permite enviar mensajes a múltiples usuarios de forma masiva con las siguientes opciones:
+
+### 1. Mensajes de Texto Simples
+
+```bash
+python manage.py send_mass_message --message "¡Hola! Este es un mensaje de prueba"
+```
+
+### 2. Templates de WhatsApp (NUEVO)
+
+```bash
+python manage.py send_mass_message --template-name "audio_feature" --template-language "es"
+```
+
+### 3. Exclusión de Números Específicos (NUEVO)
+
+```bash
+python manage.py send_mass_message \
+  --template-name "audio_feature" \
+  --template-language "es" \
+  --exclude-numbers "573164277879,573123456789,573111111111"
+```
+
+### 4. Templates con Parámetros
+
+```bash
+python manage.py send_mass_message \
+  --template-name "welcome_user" \
+  --template-language "es" \
+  --template-params '[{"type": "body", "parameters": [{"type": "text", "text": "Juan"}]}]'
+```
+
+## Parámetros Disponibles
+
+### Parámetros Básicos
+
+- `--message`: Mensaje de texto a enviar
+- `--template-name`: Nombre del template de WhatsApp a usar
+- `--template-language`: Código del idioma (por defecto: "es")
+- `--template-params`: Parámetros del template en formato JSON
+- `--exclude-numbers`: Lista de números a excluir separados por comas
+
+### Parámetros de Control
+
+- `--platform`: Plataforma de usuarios (`WHATSAPP` o `ALL`)
+- `--delay`: Delay en segundos entre mensajes (por defecto: 2)
+- `--dry-run`: Solo mostrar usuarios sin enviar mensajes
+- `--template`: Templates predefinidos de texto (deprecated)
+
+## Ejemplos de Uso
+
+### Ejemplo 1: Template Simple (Tu Caso)
+
+```bash
+python manage.py send_mass_message \
+  --template-name "audio_feature" \
+  --template-language "es" \
+  --exclude-numbers "573164277879"
+```
+
+### Ejemplo 2: Template con Múltiples Exclusiones
+
+```bash
+python manage.py send_mass_message \
+  --template-name "audio_feature" \
+  --template-language "es" \
+  --exclude-numbers "573164277879,573123456789,573111111111" \
+  --delay 3
+```
+
+### Ejemplo 3: Modo Dry-Run (Prueba)
+
+```bash
+python manage.py send_mass_message \
+  --template-name "audio_feature" \
+  --template-language "es" \
+  --exclude-numbers "573164277879" \
+  --dry-run
+```
+
+### Ejemplo 4: Template con Parámetros Personalizados
+
+```bash
+python manage.py send_mass_message \
+  --template-name "welcome_with_name" \
+  --template-language "es" \
+  --template-params '[{
+    "type": "body",
+    "parameters": [
+      {"type": "text", "text": "{{name}}"}
+    ]
+  }]'
+```
+
+## Formato del Template JSON
+
+Para templates con parámetros, el formato es:
+
+```json
+[
+  {
+    "type": "body",
+    "parameters": [
+      { "type": "text", "text": "valor1" },
+      { "type": "text", "text": "valor2" }
+    ]
+  }
+]
+```
+
+## Salida del Comando
+
+El comando mostrará:
+
+```
+🚀 Iniciando envío de mensaje masivo
+============================================================
+👥 Total de usuarios encontrados: 150
+📱 Plataforma: WHATSAPP
+⏱️ Delay entre mensajes: 2 segundos
+📋 Template: audio_feature (idioma: es)
+🚫 Números excluidos: 1
+------------------------------------------------------------
+
+📤 Iniciando envío de template 'audio_feature' a 150 usuarios...
+--------------------------------------------------
+✅ [1/150] Juan (573123456789)
+✅ [2/150] María (573987654321)
+❌ [3/150] FALLÓ: Pedro (573555555555)
+...
+
+============================================================
+📊 RESUMEN DEL ENVÍO MASIVO
+✅ Mensajes enviados exitosamente: 148
+❌ Mensajes fallidos: 2
+📱 Total de usuarios procesados: 150
+📈 Tasa de éxito: 98.7%
+
+🎉 ¡Todos los mensajes se enviaron exitosamente!
+```
+
+## Consideraciones Importantes
+
+### Rate Limiting
+
+- El delay por defecto es de 2 segundos entre mensajes
+- Ajusta el `--delay` según las limitaciones de Meta WhatsApp API
+- Para grandes volúmenes, considera usar delays más largos
+
+### Templates de WhatsApp
+
+- Los templates deben estar previamente aprobados en Meta Business
+- Verifica que el nombre del template sea exacto
+- Los códigos de idioma deben seguir el estándar ISO 639-1
+
+### Exclusiones
+
+- Los números deben incluir el código de país (ej: 573164277879)
+- Separa múltiples números con comas
+- No incluyas espacios en la lista de exclusiones
+
+### Modo Dry-Run
+
+- Siempre ejecuta primero con `--dry-run` para verificar los usuarios
+- Esto te mostrará exactamente quién recibiría el mensaje
+- No se consume cuota de la API en modo dry-run
+
+## Solución de Problemas
+
+### Error: "No se encontraron usuarios"
+
+- Verifica que hay usuarios con números de teléfono válidos
+- Revisa los filtros de plataforma
+- Confirma que los números excluidos no eliminan todos los usuarios
+
+### Error: "Template no encontrado"
+
+- Verifica que el template esté aprobado en Meta Business
+- Confirma que el nombre del template sea exacto
+- Revisa el código de idioma
+
+### Fallos en el Envío
+
+- Revisa los logs para detalles específicos
+- Verifica la configuración de WHATSAPP_ACCESS_TOKEN
+- Confirma que los números de teléfono tengan formato válido

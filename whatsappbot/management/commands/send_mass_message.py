@@ -1,6 +1,8 @@
 """
 Comando de Django para enviar mensajes masivos a usuarios de WhatsApp
-Uso: python manage.py send_mass_message --message "Tu mensaje aquí"
+Uso: 
+- Mensaje de texto: python manage.py send_mass_message --message "Tu mensaje aquí"
+- Template: python manage.py send_mass_message --template-name "audio_feature" --template-language "es"
 """
 
 from django.core.management.base import BaseCommand
@@ -9,6 +11,8 @@ from users.models import User
 from whatsappbot.views import send_meta_whatsapp_message
 import time
 import logging
+import requests
+import json
 
 logger = logging.getLogger(__name__)
 
@@ -20,8 +24,28 @@ class Command(BaseCommand):
         parser.add_argument(
             '--message',
             type=str,
-            required=True,
-            help='Mensaje a enviar a todos los usuarios',
+            help='Mensaje de texto a enviar a todos los usuarios',
+        )
+        parser.add_argument(
+            '--template-name',
+            type=str,
+            help='Nombre del template de WhatsApp a usar',
+        )
+        parser.add_argument(
+            '--template-language',
+            type=str,
+            default='es',
+            help='Código del idioma para el template (por defecto: es)',
+        )
+        parser.add_argument(
+            '--template-params',
+            type=str,
+            help='Parámetros del template en formato JSON (opcional)',
+        )
+        parser.add_argument(
+            '--exclude-numbers',
+            type=str,
+            help='Lista de números a excluir separados por comas (ej: 573164277879,573123456789)',
         )
         parser.add_argument(
             '--platform',
@@ -45,20 +69,53 @@ class Command(BaseCommand):
             '--template',
             type=str,
             choices=['reminder', 'welcome', 'custom'],
-            help='Usar un template predefinido',
+            help='Usar un template predefinido de texto (deprecated, usar --template-name)',
         )
 
     def handle(self, *args, **options):
         message = options['message']
+        template_name = options['template_name']
+        template_language = options['template_language']
+        template_params = options['template_params']
+        exclude_numbers = options['exclude_numbers']
         platform = options['platform']
         delay = options['delay']
         dry_run = options['dry_run']
         template = options['template']
 
-        # Usar template predefinido si se especifica
+        # Validar que se proporcione mensaje o template
+        if not message and not template_name and not template:
+            self.stdout.write(
+                self.style.ERROR(
+                    '❌ Debes proporcionar --message o --template-name'
+                )
+            )
+            return
+
+        # Procesar números a excluir
+        excluded_numbers = []
+        if exclude_numbers:
+            excluded_numbers = [num.strip()
+                                for num in exclude_numbers.split(',')]
+            self.stdout.write(f"🚫 Números excluidos: {excluded_numbers}")
+
+        # Usar template predefinido si se especifica (deprecated)
         if template:
             message = self.get_template_message(template)
             self.stdout.write(f"📝 Usando template '{template}': {message}")
+
+        # Procesar parámetros del template
+        template_parameters = None
+        if template_params:
+            try:
+                template_parameters = json.loads(template_params)
+            except json.JSONDecodeError:
+                self.stdout.write(
+                    self.style.ERROR(
+                        '❌ Los parámetros del template deben estar en formato JSON válido'
+                    )
+                )
+                return
 
         self.stdout.write(
             self.style.SUCCESS('🚀 Iniciando envío de mensaje masivo')
@@ -76,6 +133,10 @@ class Command(BaseCommand):
                 phone_number__isnull=False
             ).exclude(phone_number='')
 
+        # Excluir números específicos
+        if excluded_numbers:
+            users = users.exclude(phone_number__in=excluded_numbers)
+
         total_users = users.count()
 
         if total_users == 0:
@@ -88,7 +149,18 @@ class Command(BaseCommand):
         self.stdout.write(f"👥 Total de usuarios encontrados: {total_users}")
         self.stdout.write(f"📱 Plataforma: {platform}")
         self.stdout.write(f"⏱️ Delay entre mensajes: {delay} segundos")
-        self.stdout.write(f"💬 Mensaje: {message}")
+
+        if template_name:
+            self.stdout.write(
+                f"📋 Template: {template_name} (idioma: {template_language})")
+            if template_parameters:
+                self.stdout.write(f"🔧 Parámetros: {template_parameters}")
+        else:
+            self.stdout.write(f"💬 Mensaje: {message}")
+
+        if excluded_numbers:
+            self.stdout.write(f"🚫 Números excluidos: {len(excluded_numbers)}")
+
         self.stdout.write("-" * 60)
 
         if dry_run:
@@ -109,7 +181,11 @@ class Command(BaseCommand):
             return
 
         # Enviar mensajes
-        self.send_mass_messages(users, message, delay)
+        if template_name:
+            self.send_mass_templates(
+                users, template_name, template_language, template_parameters, delay)
+        else:
+            self.send_mass_messages(users, message, delay)
 
     def get_template_message(self, template):
         """Retorna mensajes predefinidos según el template"""
@@ -205,6 +281,102 @@ class Command(BaseCommand):
                 continue
 
         # Resumen final
+        self.show_final_summary(sent_count, failed_count, total_users)
+
+    def send_meta_whatsapp_template(self, phone_number, template_name, language_code, parameters=None):
+        """Envía un template de WhatsApp usando la API de Meta"""
+        try:
+            url = f"https://graph.facebook.com/v18.0/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"
+
+            payload = {
+                "messaging_product": "whatsapp",
+                "to": phone_number,
+                "type": "template",
+                "template": {
+                    "name": template_name,
+                    "language": {
+                        "code": language_code
+                    }
+                }
+            }
+
+            # Agregar parámetros si se proporcionan
+            if parameters:
+                payload["template"]["components"] = parameters
+
+            headers = {
+                "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            }
+
+            response = requests.post(url, headers=headers, json=payload)
+
+            if response.status_code == 200:
+                return True
+            else:
+                logger.error(
+                    f"Error enviando template a {phone_number}: {response.text}")
+                return False
+
+        except Exception as e:
+            logger.error(
+                f"Excepción enviando template a {phone_number}: {str(e)}")
+            return False
+
+    def send_mass_templates(self, users, template_name, language_code, parameters, delay):
+        """Envía templates de WhatsApp a todos los usuarios"""
+        sent_count = 0
+        failed_count = 0
+        total_users = users.count()
+
+        self.stdout.write(
+            f"\n📤 Iniciando envío de template '{template_name}' a {total_users} usuarios...")
+        self.stdout.write("-" * 50)
+
+        for i, user in enumerate(users, 1):
+            try:
+                # Enviar template usando Meta WhatsApp API
+                success = self.send_meta_whatsapp_template(
+                    phone_number=user.phone_number,
+                    template_name=template_name,
+                    language_code=language_code,
+                    parameters=parameters
+                )
+
+                if success:
+                    sent_count += 1
+                    status = "✅"
+                    self.stdout.write(
+                        f"{status} [{i}/{total_users}] {user.first_name} ({user.phone_number})"
+                    )
+                else:
+                    failed_count += 1
+                    status = "❌"
+                    self.stdout.write(
+                        self.style.ERROR(
+                            f"{status} [{i}/{total_users}] FALLÓ: {user.first_name} ({user.phone_number})"
+                        )
+                    )
+
+                # Delay entre mensajes para evitar rate limiting
+                if i < total_users:  # No hacer delay después del último mensaje
+                    time.sleep(delay)
+
+            except Exception as e:
+                failed_count += 1
+                self.stdout.write(
+                    self.style.ERROR(
+                        f"❌ [{i}/{total_users}] ERROR: {user.first_name} - {str(e)}"
+                    )
+                )
+                # Continuar con el siguiente usuario
+                continue
+
+        # Resumen final
+        self.show_final_summary(sent_count, failed_count, total_users)
+
+    def show_final_summary(self, sent_count, failed_count, total_users):
+        """Muestra el resumen final del envío"""
         self.stdout.write("\n" + "=" * 60)
         self.stdout.write(
             self.style.SUCCESS(f"📊 RESUMEN DEL ENVÍO MASIVO")
