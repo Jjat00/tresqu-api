@@ -10,6 +10,9 @@ import pytz
 
 from .models import Income, IncomeCategory
 from .serializers import IncomeSerializer, IncomeCategorySerializer
+# Importar utilidades para categorías por usuario
+from categories.models import UserIncomeCategory
+from categories.utils import get_user_income_categories_queryset
 
 # Configurar logger
 logger = logging.getLogger(__name__)
@@ -18,11 +21,28 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEZONE = pytz.timezone('America/Bogota')  # Equivalente a UTC-5
 
 
+def get_income_category_name(income):
+    """
+    Función auxiliar para obtener el nombre de la categoría de un ingreso
+    priorizando user_income_category sobre category legacy
+    """
+    if income.user_income_category:
+        return income.user_income_category.name
+    elif income.category:
+        return income.category.name
+    elif hasattr(income, 'category_str') and income.category_str:
+        return income.category_str
+    else:
+        return 'Sin categoría'
+
+
 class IncomeCategoryViewSet(viewsets.ModelViewSet):
     serializer_class = IncomeCategorySerializer
     permission_classes = [permissions.IsAuthenticated]
 
     def get_queryset(self):
+        """Obtener categorías globales (legacy) - Deprecado, usar UserIncomeCategoryViewSet"""
+        # Este ViewSet se mantiene para compatibilidad legacy
         return IncomeCategory.objects.all()
 
     def perform_create(self, serializer):
@@ -33,20 +53,43 @@ class IncomeCategoryViewSet(viewsets.ModelViewSet):
     def with_details(self, request):
         """
         Devuelve todas las categorías con sus detalles completos (descripción y ejemplos).
+        DEPRECADO: Usar las nuevas APIs de categorías por usuario en /api/categories/
 
         GET /api/income-categories/with_details/
         """
-        categories = self.get_queryset()
-        data = []
+        logger.warning(
+            "Endpoint legacy /with_details/ usado - considerar migrar a categorías por usuario")
 
-        for category in categories:
+        # Priorizar categorías por usuario
+        user_categories = get_user_income_categories_queryset(request.user)
+
+        data = []
+        for category in user_categories:
             data.append({
                 'id': category.id,
                 'name': category.name,
                 'color': category.color,
                 'description': category.description or '',
                 'example': category.example or '',
+                'is_default': category.is_default,
+                'type': 'user_category'
             })
+
+        # Si no hay categorías por usuario, usar globales como fallback
+        if not data:
+            logger.warning(
+                f"No hay categorías por usuario para {request.user}, usando globales")
+            global_categories = self.get_queryset()
+            for category in global_categories:
+                data.append({
+                    'id': category.id,
+                    'name': category.name,
+                    'color': category.color,
+                    'description': category.description or '',
+                    'example': category.example or '',
+                    'is_default': False,
+                    'type': 'global_category'
+                })
 
         return Response(data)
 
@@ -54,20 +97,32 @@ class IncomeCategoryViewSet(viewsets.ModelViewSet):
     def colors_map(self, request):
         """
         Devuelve un mapa de nombre de categoría -> color para usar en visualizaciones.
+        Actualizado para usar categorías por usuario.
 
         GET /api/income-categories/colors_map/
         """
-        categories = self.get_queryset()
-        colors_map = {
-            category.name: category.color
-            for category in categories
-        }
+        # Priorizar categorías por usuario
+        user_categories = get_user_income_categories_queryset(request.user)
+
+        colors_map = {}
+        for category in user_categories:
+            colors_map[category.name] = category.color
+
+        # Si no hay categorías por usuario, usar globales como fallback
+        if not colors_map:
+            global_categories = self.get_queryset()
+            colors_map = {
+                category.name: category.color
+                for category in global_categories
+            }
+
         return Response(colors_map)
 
     @action(detail=True, methods=['put', 'patch'])
     def update_details(self, request, pk=None):
         """
         Actualiza los detalles específicos de una categoría (descripción, ejemplo, color).
+        DEPRECADO: Usar las nuevas APIs de categorías por usuario en /api/categories/
 
         PUT/PATCH /api/income-categories/{id}/update_details/
 
@@ -76,6 +131,9 @@ class IncomeCategoryViewSet(viewsets.ModelViewSet):
         - example: Ejemplos de ingresos para esta categoría
         - color: Color hexadecimal (formato: #RRGGBB)
         """
+        logger.warning(
+            "Endpoint legacy /update_details/ usado - considerar migrar a categorías por usuario")
+
         try:
             category = self.get_object()
 
@@ -191,7 +249,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=['get'])
     def summary(self, request):
-        """Obtiene un resumen de ingresos por período"""
+        """Obtiene un resumen de ingresos por período usando categorías por usuario"""
         user = request.user
         period = request.query_params.get('period', 'month')
 
@@ -219,10 +277,27 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 start_date, False, user_timezone)
             queryset = queryset.filter(timestamp__gte=start_datetime)
 
-        # Calcular totales por categoría incluyendo el ID
-        summary = queryset.values('id', 'category__name', 'currency').annotate(
+        # Calcular totales por categoría incluyendo el ID, priorizando categorías por usuario
+        summary = queryset.values(
+            'id',
+            'user_income_category__name',
+            'category__name',
+            'currency'
+        ).annotate(
             total=Sum('amount')
         ).order_by('-total')
+
+        # Transformar para incluir nombre de categoría correcto
+        transformed_summary = []
+        for item in summary:
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_income_category__name'] or item['category__name'] or 'Otros'
+            transformed_summary.append({
+                'id': item['id'],
+                'category__name': category_name,
+                'currency': item['currency'],
+                'total': item['total']
+            })
 
         # Calcular total general
         total = queryset.aggregate(Sum('amount'))['amount__sum'] or 0
@@ -231,7 +306,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
             'period': period,
             'start_date': start_date,
             'end_date': today,
-            'summary': summary,
+            'summary': transformed_summary,
             'total': total
         })
 
@@ -469,8 +544,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 'total_amount': 0
             })
 
-        # Agrupar por categoría y calcular totales
-        by_category = queryset.values('category__name').annotate(
+        # Agrupar por categoría y calcular totales, priorizando categorías por usuario
+        by_category = queryset.values('user_income_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -483,7 +558,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
             except ValueError:
                 pass  # Ignorar si no es un entero válido
 
-        # Transformar a formato para gráficos de dona (compatible con Chart.js)
+        # Transformar a formato para gráficas de barras (compatible con Chart.js)
         labels = []
         data = []
         backgroundColor = []
@@ -491,23 +566,38 @@ class IncomeViewSet(viewsets.ModelViewSet):
         category_details = []  # Agregar información detallada de categorías
 
         for item in by_category:
-            category_name = item['category__name'] or 'Sin categoría'
-            category = IncomeCategory.objects.filter(
-                name=category_name).first()
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_income_category__name'] or item['category__name'] or 'Sin categoría'
 
-            color = category.color if category and hasattr(
-                category, 'color') else '#4CAF50'  # Verde por defecto para ingresos
+            # Buscar primero en categorías por usuario
+            user_category = None
+            if item['user_income_category__name']:
+                user_category = UserIncomeCategory.objects.filter(
+                    user=request.user,
+                    name=item['user_income_category__name']
+                ).first()
+
+            # Si no se encuentra en categorías por usuario, buscar en globales
+            if user_category:
+                color = user_category.color
+                description = user_category.description or ''
+                example = user_category.example or ''
+            else:
+                global_category = IncomeCategory.objects.filter(
+                    name=category_name).first()
+                color = global_category.color if global_category and hasattr(
+                    global_category, 'color') else '#4CAF50'
+                description = global_category.description if global_category else ''
+                example = global_category.example if global_category else ''
 
             # Incluir información adicional de la categoría
             category_info = {
                 'name': category_name,
                 'color': color,
                 'total': float(item['total']),
+                'description': description,
+                'example': example
             }
-
-            if category:
-                category_info['description'] = category.description or ''
-                category_info['example'] = category.example or ''
 
             category_details.append(category_info)
 
@@ -784,8 +874,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 'datasets': []
             })
 
-        # Agrupar por categoría y calcular totales
-        by_category = queryset.values('category__name').annotate(
+        # Agrupar por categoría y calcular totales, priorizando categorías por usuario
+        by_category = queryset.values('user_income_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -805,22 +895,38 @@ class IncomeViewSet(viewsets.ModelViewSet):
         category_details = []  # Agregar información detallada de categorías
 
         for item in by_category:
-            category_name = item['category__name'] or 'Sin categoría'
-            category = IncomeCategory.objects.filter(
-                name=category_name).first()
-            color = category.color if category and hasattr(
-                category, 'color') else '#4CAF50'  # Verde por defecto para ingresos
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_income_category__name'] or item['category__name'] or 'Sin categoría'
+
+            # Buscar primero en categorías por usuario
+            user_category = None
+            if item['user_income_category__name']:
+                user_category = UserIncomeCategory.objects.filter(
+                    user=request.user,
+                    name=item['user_income_category__name']
+                ).first()
+
+            # Si no se encuentra en categorías por usuario, buscar en globales
+            if user_category:
+                color = user_category.color
+                description = user_category.description or ''
+                example = user_category.example or ''
+            else:
+                global_category = IncomeCategory.objects.filter(
+                    name=category_name).first()
+                color = global_category.color if global_category and hasattr(
+                    global_category, 'color') else '#4CAF50'
+                description = global_category.description if global_category else ''
+                example = global_category.example if global_category else ''
 
             # Incluir información adicional de la categoría
             category_info = {
                 'name': category_name,
                 'color': color,
                 'total': float(item['total']),
+                'description': description,
+                'example': example
             }
-
-            if category:
-                category_info['description'] = category.description or ''
-                category_info['example'] = category.example or ''
 
             category_details.append(category_info)
 
@@ -1462,14 +1568,19 @@ class IncomeViewSet(viewsets.ModelViewSet):
         # Obtener todas las categorías con ingresos en el período
         categories = {}
         for income in queryset:
-            category_name = income.category.name if income.category else 'Sin categoría'
-            if category_name == '':
-                category_name = 'Sin categoría'
-
+            category_name = get_income_category_name(income)
             if category_name not in categories:
-                category = income.category
-                color = category.color if category and hasattr(
-                    category, 'color') else '#4CAF50'  # Verde por defecto para ingresos
+                # Obtener información de categoría priorizando user_income_category
+                user_category = income.user_income_category
+                legacy_category = income.category
+
+                if user_category:
+                    color = user_category.color
+                elif legacy_category and hasattr(legacy_category, 'color'):
+                    color = legacy_category.color
+                else:
+                    color = '#4CAF50'  # Verde por defecto para ingresos
+
                 categories[category_name] = {
                     'name': category_name,
                     'color': color
@@ -1483,10 +1594,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 # Obtener las categorías con mayores ingresos
                 category_totals = {}
                 for income in queryset:
-                    category_name = income.category.name if income.category else 'Sin categoría'
-                    if category_name == '':
-                        category_name = 'Sin categoría'
-
+                    category_name = get_income_category_name(income)
                     if category_name not in category_totals:
                         category_totals[category_name] = 0
                     category_totals[category_name] += float(income.amount)
@@ -1516,9 +1624,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
             period_label = format_date_label(time_key, group_by)
 
             # Obtener categoría
-            category_name = income.category.name if income.category else 'Sin categoría'
-            if category_name == '':
-                category_name = 'Sin categoría'
+            category_name = get_income_category_name(income)
 
             # Asignar solo si la categoría está en las seleccionadas
             if period_label in time_category_data and category_name in categories:
@@ -1564,10 +1670,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
         # Calcular total general
         total_amount = 0
         for income in queryset:
-            category_name = income.category.name if income.category else 'Sin categoría'
-            if category_name == '':
-                category_name = 'Sin categoría'
-
+            category_name = get_income_category_name(income)
             if category_name in categories:
                 total_amount += float(income.amount)
 
@@ -1769,7 +1872,7 @@ class IncomeViewSet(viewsets.ModelViewSet):
                 'id': instance.id,
                 'amount': instance.amount,
                 'currency': instance.currency,
-                'category': instance.category.name if instance.category else 'Sin categoría',
+                'category': get_income_category_name(instance),
                 'description': instance.description
             }
 

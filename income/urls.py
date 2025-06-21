@@ -4,7 +4,7 @@ from .views import IncomeViewSet, IncomeCategoryViewSet
 
 router = DefaultRouter()
 router.register('incomes', IncomeViewSet, basename='income')
-router.register('categories', IncomeCategoryViewSet,
+router.register('income-categories', IncomeCategoryViewSet,
                 basename='income-category')
 
 urlpatterns = [

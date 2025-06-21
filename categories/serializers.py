@@ -22,24 +22,26 @@ class UserExpenseCategorySerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_name(self, value):
-        """Validar que el nombre no esté duplicado para el usuario"""
+        """Validar que el nombre no esté duplicado para el usuario (case-insensitive)"""
         user = self.context['request'].user
+        normalized_name = value.strip().title()
+
         if self.instance:
             # En actualización, excluir la instancia actual
             existing = UserExpenseCategory.objects.filter(
-                user=user, name=value
+                user=user, name__iexact=normalized_name
             ).exclude(id=self.instance.id)
         else:
             # En creación, buscar duplicados
             existing = UserExpenseCategory.objects.filter(
-                user=user, name=value
+                user=user, name__iexact=normalized_name
             )
 
         if existing.exists():
             raise serializers.ValidationError(
-                f"Ya tienes una categoría de gasto llamada '{value}'"
+                f"Ya tienes una categoría de gasto llamada '{normalized_name}'"
             )
-        return value
+        return normalized_name
 
     def create(self, validated_data):
         """Crear categoría asignando automáticamente el usuario"""
@@ -59,24 +61,26 @@ class UserIncomeCategorySerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'created_at', 'updated_at']
 
     def validate_name(self, value):
-        """Validar que el nombre no esté duplicado para el usuario"""
+        """Validar que el nombre no esté duplicado para el usuario (case-insensitive)"""
         user = self.context['request'].user
+        normalized_name = value.strip().title()
+
         if self.instance:
             # En actualización, excluir la instancia actual
             existing = UserIncomeCategory.objects.filter(
-                user=user, name=value
+                user=user, name__iexact=normalized_name
             ).exclude(id=self.instance.id)
         else:
             # En creación, buscar duplicados
             existing = UserIncomeCategory.objects.filter(
-                user=user, name=value
+                user=user, name__iexact=normalized_name
             )
 
         if existing.exists():
             raise serializers.ValidationError(
-                f"Ya tienes una categoría de ingreso llamada '{value}'"
+                f"Ya tienes una categoría de ingreso llamada '{normalized_name}'"
             )
-        return value
+        return normalized_name
 
     def create(self, validated_data):
         """Crear categoría asignando automáticamente el usuario"""

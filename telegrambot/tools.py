@@ -157,19 +157,19 @@ async def parse_expense(text: str) -> dict:
         Si el texto menciona un gasto, extrae la información solicitada.
         Si no hay información suficiente, haz tu mejor estimación.
         Si el texto no menciona ningún gasto (como saludos), genera un error.
-        
-        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+
+        Si el mensaje incluye referencias temporales como "ayer", "el martes",
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del gasto. Usa la fecha actual como referencia.
-        
-        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
-        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
+
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje,
+        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL
         y el sistema usará automáticamente la fecha actual.
-        
+
         IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
         en el mismo idioma en que fueron proporcionados por el usuario.
         Nunca traduzcas los nombres de categorías o notas a otro idioma.
-        
+
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
@@ -196,13 +196,13 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         Si el texto menciona gastos, extrae la información solicitada.
         Si no hay información suficiente, haz tu mejor estimación.
         Si el texto no menciona ningún gasto (como saludos), genera un error.
-        
-        Si el mensaje incluye referencias temporales como "ayer", "el martes", 
+
+        Si el mensaje incluye referencias temporales como "ayer", "el martes",
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del gasto. Usa la fecha actual como referencia.
-        
-        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
-        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL 
+
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje,
+        NO debes generar una fecha arbitraria. Deja el campo spent_at como NULL
         y el sistema usará automáticamente la fecha actual.
 
         IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
@@ -249,12 +249,12 @@ def get_or_create_category(name: str, description: str | None = None, examples: 
     Devuelve un diccionario con el resultado de la operación.
     """
     try:
-        # Normalizar el nombre (primera letra mayúscula, resto minúsculas)
-        normalized_name = name.strip().capitalize()
+        # Normalizar el nombre manteniendo el formato título para consistencia
+        normalized_name = name.strip().title()
 
-        # Verificar si ya existe
-        if Category.objects.filter(name=normalized_name).exists():
-            category = Category.objects.get(name=normalized_name)
+        # Verificar si ya existe (case-insensitive)
+        if Category.objects.filter(name__iexact=normalized_name).exists():
+            category = Category.objects.get(name__iexact=normalized_name)
             # Actualizar si se proporcionan nuevos valores
             updated = False
             if description and not category.description:
@@ -326,9 +326,8 @@ def get_or_create_income_category(name: str, description: str | None = None, exa
     try:
         from income.models import IncomeCategory
 
-        # Normalizar el nombre (primera letra mayúscula de cada palabra)
-        normalized_name = " ".join(word.capitalize()
-                                   for word in name.strip().split())
+        # Normalizar el nombre manteniendo el formato título para consistencia
+        normalized_name = name.strip().title()
 
         # Verificar si ya existe (insensible a mayúsculas/minúsculas)
         existing_category = IncomeCategory.objects.filter(

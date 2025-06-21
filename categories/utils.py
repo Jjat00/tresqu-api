@@ -141,13 +141,13 @@ def get_or_create_user_expense_category(
         Tuple[UserExpenseCategory, bool]: (categoría, fue_creada)
     """
     try:
-        # Normalizar el nombre (primera letra mayúscula, resto como está)
-        normalized_name = name.strip().capitalize()
+        # Normalizar el nombre manteniendo el formato título para consistencia
+        normalized_name = name.strip().title()
 
-        # Intentar obtener la categoría existente
+        # Intentar obtener la categoría existente (case-insensitive)
         try:
             category = UserExpenseCategory.objects.get(
-                user=user, name=normalized_name)
+                user=user, name__iexact=normalized_name)
 
             # Actualizar campos si se proporcionan nuevos valores y están vacíos
             updated = False
@@ -222,13 +222,13 @@ def get_or_create_user_income_category(
         Tuple[UserIncomeCategory, bool]: (categoría, fue_creada)
     """
     try:
-        # Normalizar el nombre (primera letra mayúscula, resto como está)
-        normalized_name = name.strip().capitalize()
+        # Normalizar el nombre manteniendo el formato título para consistencia
+        normalized_name = name.strip().title()
 
-        # Intentar obtener la categoría existente
+        # Intentar obtener la categoría existente (case-insensitive)
         try:
             category = UserIncomeCategory.objects.get(
-                user=user, name=normalized_name)
+                user=user, name__iexact=normalized_name)
 
             # Actualizar campos si se proporcionan nuevos valores y están vacíos
             updated = False

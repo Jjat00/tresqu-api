@@ -16,12 +16,30 @@ from rest_framework import permissions
 
 from .models import Expense, Category
 from .serializers import ExpenseSerializer
+# Importar utilidades para categorías por usuario
+from categories.models import UserExpenseCategory
+from categories.utils import get_user_expense_categories_queryset
 
 # Configurar logger
 logger = logging.getLogger(__name__)
 
 # Zona horaria predeterminada (UTC-5)
 DEFAULT_TIMEZONE = pytz.timezone('America/Bogota')  # Equivalente a UTC-5
+
+
+def get_expense_category_name(expense):
+    """
+    Función auxiliar para obtener el nombre de la categoría de un gasto
+    priorizando user_expense_category sobre category legacy
+    """
+    if expense.user_expense_category:
+        return expense.user_expense_category.name
+    elif expense.category:
+        return expense.category.name
+    elif hasattr(expense, 'category_str') and expense.category_str:
+        return expense.category_str
+    else:
+        return 'Otros'
 
 
 class ExpenseViewSet(viewsets.ModelViewSet):
@@ -148,7 +166,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def by_category(self, request):
         """
-        Obtiene el total de gastos agrupados por categoría
+        Obtiene el total de gastos agrupados por categoría por usuario
         GET /api/expenses/by_category/
         """
         # Registrar información básica para depuración
@@ -168,7 +186,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 'examples': []
             })
 
-        result = queryset.values('category__name').annotate(
+        # Priorizar categorías por usuario, usar globales como fallback
+        result = queryset.values('user_expense_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -180,20 +199,35 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         examples = []
 
         for item in result:
-            category_name = item['category__name'] or 'Otros'
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_expense_category__name'] or item['category__name'] or 'Otros'
             categories.append(category_name)
             totals.append(float(item['total']))
 
-            # Obtener información adicional de la categoría
-            category = Category.objects.filter(name=category_name).first()
-            if category:
-                colors.append(category.color)
-                descriptions.append(category.description or '')
-                examples.append(category.examples or '')
+            # Obtener información adicional de la categoría (priorizar usuario)
+            user_category = None
+            if item['user_expense_category__name']:
+                user_category = UserExpenseCategory.objects.filter(
+                    user=request.user,
+                    name=item['user_expense_category__name']
+                ).first()
+
+            if user_category:
+                colors.append(user_category.color)
+                descriptions.append(user_category.description or '')
+                examples.append(user_category.examples or '')
             else:
-                colors.append('#CCCCCC')
-                descriptions.append('')
-                examples.append('')
+                # Fallback a categoría global
+                global_category = Category.objects.filter(
+                    name=category_name).first()
+                if global_category:
+                    colors.append(global_category.color)
+                    descriptions.append(global_category.description or '')
+                    examples.append(global_category.examples or '')
+                else:
+                    colors.append('#CCCCCC')
+                    descriptions.append('')
+                    examples.append('')
 
         return Response({
             'categories': categories,
@@ -217,7 +251,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def summary(self, request):
         """
-        Obtiene un resumen completo para el dashboard
+        Obtiene un resumen completo para el dashboard usando categorías por usuario
         GET /api/expenses/summary/?months=1
         """
         months = int(request.query_params.get('months', 1))
@@ -241,15 +275,16 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 timestamp__gte=self._convert_to_utc(start_date, False, user_timezone)))
         )
 
-        # Gastos por categoría
-        by_category = queryset.values('category__name').annotate(
+        # Gastos por categoría priorizando categorías por usuario
+        by_category = queryset.values('user_expense_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
         # Transformar datos de categorías para el gráfico de pastel
         categories_data = {}
         for item in by_category:
-            category_name = item['category__name'] or 'Otros'
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_expense_category__name'] or item['category__name'] or 'Otros'
             categories_data[category_name] = float(item['total'])
 
         # Total de gastos
@@ -353,7 +388,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             return Response([])
 
         # Obtener todas las categorías disponibles para el usuario
-        all_categories = list(set(expense.category.name if expense.category else 'Otros'
+        all_categories = list(set(get_expense_category_name(expense)
                                   for expense in queryset))
         if '' in all_categories:
             all_categories.remove('')
@@ -578,8 +613,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 'categories_info': []
             })
 
-        # Agrupar por categoría y calcular totales
-        by_category = queryset.values('category__name').annotate(
+        # Agrupar por categoría y calcular totales, priorizando categorías por usuario
+        by_category = queryset.values('user_expense_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -600,11 +635,28 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         categories_info = []
 
         for item in by_category:
-            category_name = item['category__name'] or 'Otros'
-            category = Category.objects.filter(name=category_name).first()
-            color = category.color if category else '#CCCCCC'
-            description = category.description if category else ''
-            examples = category.examples if category else ''
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_expense_category__name'] or item['category__name'] or 'Otros'
+
+            # Buscar primero en categorías por usuario
+            user_category = None
+            if item['user_expense_category__name']:
+                user_category = UserExpenseCategory.objects.filter(
+                    user=request.user,
+                    name=item['user_expense_category__name']
+                ).first()
+
+            # Si no se encuentra en categorías por usuario, buscar en globales
+            if user_category:
+                color = user_category.color
+                description = user_category.description or ''
+                examples = user_category.examples or ''
+            else:
+                global_category = Category.objects.filter(
+                    name=category_name).first()
+                color = global_category.color if global_category else '#CCCCCC'
+                description = global_category.description if global_category else ''
+                examples = global_category.examples if global_category else ''
 
             labels.append(category_name)
             data.append(float(item['total']))
@@ -814,8 +866,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 'categories_info': []
             })
 
-        # Agrupar por categoría y calcular totales
-        by_category = queryset.values('category__name').annotate(
+        # Agrupar por categoría y calcular totales, priorizando categorías por usuario
+        by_category = queryset.values('user_expense_category__name', 'category__name').annotate(
             total=Sum('amount')
         ).order_by('-total')
 
@@ -835,11 +887,28 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         categories_info = []
 
         for item in by_category:
-            category_name = item['category__name'] or 'Otros'
-            category = Category.objects.filter(name=category_name).first()
-            color = category.color if category else '#CCCCCC'
-            description = category.description if category else ''
-            examples = category.examples if category else ''
+            # Priorizar categoría por usuario, fallback a categoría global
+            category_name = item['user_expense_category__name'] or item['category__name'] or 'Otros'
+
+            # Buscar primero en categorías por usuario
+            user_category = None
+            if item['user_expense_category__name']:
+                user_category = UserExpenseCategory.objects.filter(
+                    user=request.user,
+                    name=item['user_expense_category__name']
+                ).first()
+
+            # Si no se encuentra en categorías por usuario, buscar en globales
+            if user_category:
+                color = user_category.color
+                description = user_category.description or ''
+                examples = user_category.examples or ''
+            else:
+                global_category = Category.objects.filter(
+                    name=category_name).first()
+                color = global_category.color if global_category else '#CCCCCC'
+                description = global_category.description if global_category else ''
+                examples = global_category.examples if global_category else ''
 
             labels.append(category_name)
             data.append(float(item['total']))
@@ -1485,15 +1554,24 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         # Obtener todas las categorías con gastos en el período
         categories = {}
         for expense in queryset:
-            category_name = expense.category.name if expense.category else 'Otros'
-            if category_name == '':
-                category_name = 'Otros'
-
+            category_name = get_expense_category_name(expense)
             if category_name not in categories:
-                category = expense.category
-                color = category.color if category else '#CCCCCC'
-                description = category.description if category and category.description else ''
-                examples = category.examples if category and category.examples else ''
+                # Obtener información de categoría priorizando user_expense_category
+                user_category = expense.user_expense_category
+                legacy_category = expense.category
+
+                if user_category:
+                    color = user_category.color
+                    description = user_category.description or ''
+                    examples = user_category.examples or ''
+                elif legacy_category:
+                    color = legacy_category.color
+                    description = legacy_category.description or ''
+                    examples = legacy_category.examples or ''
+                else:
+                    color = '#CCCCCC'
+                    description = ''
+                    examples = ''
 
                 categories[category_name] = {
                     'name': category_name,
@@ -1510,10 +1588,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 # Obtener las categorías con mayores gastos
                 category_totals = {}
                 for expense in queryset:
-                    category_name = expense.category.name if expense.category else 'Otros'
-                    if category_name == '':
-                        category_name = 'Otros'
-
+                    category_name = get_expense_category_name(expense)
                     if category_name not in category_totals:
                         category_totals[category_name] = 0
                     category_totals[category_name] += float(expense.amount)
@@ -1543,9 +1618,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             period_label = format_date_label(time_key, group_by)
 
             # Obtener categoría
-            category_name = expense.category.name if expense.category else 'Otros'
-            if category_name == '':
-                category_name = 'Otros'
+            category_name = get_expense_category_name(expense)
 
             # Asignar solo si la categoría está en las seleccionadas
             if period_label in time_category_data and category_name in categories:
@@ -1574,10 +1647,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         # Calcular total general
         total_amount = 0
         for expense in queryset:
-            category_name = expense.category.name if expense.category else 'Otros'
-            if category_name == '':
-                category_name = 'Otros'
-
+            category_name = get_expense_category_name(expense)
             if category_name in categories:
                 total_amount += float(expense.amount)
 
@@ -1615,26 +1685,45 @@ class ExpenseViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['get'])
     def categories_info(self, request):
         """
-        Obtiene información completa de todas las categorías disponibles incluyendo colores, descripciones y ejemplos.
+        Obtiene información completa de todas las categorías disponibles para el usuario
+        incluyendo colores, descripciones y ejemplos.
 
         GET /api/expenses/categories_info/
         """
         logger.info(
             f"Endpoint /categories_info/ accedido por usuario: {request.user}")
 
-        # Obtener todas las categorías
-        categories = Category.objects.all().order_by('name')
+        # Obtener categorías de gastos del usuario
+        user_categories = get_user_expense_categories_queryset(request.user)
 
         # Preparar respuesta con información detallada
         result = []
-        for category in categories:
+        for category in user_categories:
             result.append({
                 'id': category.id,
                 'name': category.name,
                 'color': category.color,
                 'description': category.description or '',
-                'examples': category.examples or ''
+                'examples': category.examples or '',
+                'is_default': category.is_default,
+                'type': 'user_category'
             })
+
+        # Si no hay categorías por usuario, devolver categorías globales como fallback
+        if not result:
+            logger.warning(
+                f"No hay categorías por usuario para {request.user}, usando categorías globales")
+            global_categories = Category.objects.all().order_by('name')
+            for category in global_categories:
+                result.append({
+                    'id': category.id,
+                    'name': category.name,
+                    'color': category.color,
+                    'description': category.description or '',
+                    'examples': category.examples or '',
+                    'is_default': False,
+                    'type': 'global_category'
+                })
 
         return Response(result)
 
@@ -1866,7 +1955,7 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 'id': instance.id,
                 'amount': instance.amount,
                 'currency': instance.currency,
-                'category': instance.category.name if instance.category else 'Sin categoría',
+                'category': get_expense_category_name(instance),
                 'description': instance.description
             }
 
