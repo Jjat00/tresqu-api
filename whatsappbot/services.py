@@ -23,7 +23,9 @@ from telegrambot.tools import (
     is_greeting,
     create_expense,
     parse_expenses,
-    get_or_create_category,
+    get_or_create_category,  # LEGACY - será deprecado
+    get_or_create_user_category_for_expense,  # NUEVO
+    get_or_create_user_category_for_income,   # NUEVO
     parse_relative_date,
     update_expense,
     delete_expense,
@@ -43,7 +45,7 @@ from telegrambot.tools import (
     search_incomes_by_text,
     get_incomes_by_category,
     get_top_income_categories,
-    get_or_create_income_category,
+    get_or_create_income_category,  # LEGACY - será deprecado
 )
 
 from whatsappbot.utils import get_existing_categories, get_categories_with_details, get_existing_income_categories
@@ -387,8 +389,8 @@ async def process_message(user: User, raw_text: str) -> str:
         # Combinar todas las herramientas
         async_tools = basic_tools + additional_tools
 
-        # 2. Obtener las categorías con sus detalles para construir el prompt
-        categories_with_details = await get_categories_with_details()
+        # 2. Obtener las categorías con sus detalles específicas del usuario
+        categories_with_details = await get_categories_with_details(user)
 
         # Construir información detallada de categorías para el prompt
         expense_categories_info = []
@@ -414,9 +416,9 @@ async def process_message(user: User, raw_text: str) -> str:
         # Combinar ambas secciones
         categories_detailed_str = f"{expenses_detailed_str}\n\n{incomes_detailed_str}"
 
-        # Obtener solo la lista de nombres para mantener la compatibilidad
-        existing_expense_categories = await get_existing_categories()
-        existing_income_categories = await get_existing_income_categories()
+        # NUEVO: Obtener categorías específicas del usuario
+        existing_expense_categories = await get_existing_categories(user)
+        existing_income_categories = await get_existing_income_categories(user)
 
         expense_categories_str = 'Gastos: ' + \
             ', '.join(existing_expense_categories)

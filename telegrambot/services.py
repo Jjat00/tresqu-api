@@ -326,8 +326,8 @@ async def process_message(user: User, raw_text: str) -> str:
             get_top_expense_categories, get_top_income_categories_for_user
         ])
 
-        # Obtener las categorías con sus detalles
-        categories_with_details = await get_categories_with_details()
+        # Obtener las categorías con sus detalles específicas del usuario
+        categories_with_details = await get_categories_with_details(user)
 
         # Construir información detallada de categorías para el prompt
         expense_categories_info = []
@@ -353,9 +353,9 @@ async def process_message(user: User, raw_text: str) -> str:
         # Combinar ambas secciones
         categories_detailed_str = f"{expenses_detailed_str}\n\n{incomes_detailed_str}"
 
-        # Obtener solo la lista de nombres para mantener la compatibilidad
-        existing_expense_categories = await get_existing_categories()
-        existing_income_categories = await get_existing_income_categories()
+        # NUEVO: Obtener categorías específicas del usuario
+        existing_expense_categories = await get_existing_categories(user)
+        existing_income_categories = await get_existing_income_categories(user)
 
         expense_categories_str = 'Gastos: ' + \
             ', '.join(existing_expense_categories)

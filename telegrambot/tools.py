@@ -10,8 +10,10 @@ from pydantic import BaseModel
 from typing import List, Dict, Any
 # models
 from expenses.models import Expense
+from income.models import Income, IncomeCategory
 from users.models import User
-from categories.models import Category
+from categories.models import Category, UserExpenseCategory, UserIncomeCategory
+from categories.utils import get_or_create_user_expense_category, get_or_create_user_income_category
 # serializasers
 from .serializasers import ExpenseData, IncomeData
 from .currencies import is_valid_currency
@@ -230,7 +232,11 @@ def is_greeting(text: str) -> bool:
 @tool
 def get_or_create_category(name: str, description: str | None = None, examples: str | None = None, color: str | None = None) -> Dict[str, str]:
     """
-    Crea una nueva categoría en la base de datos.
+    FUNCIÓN LEGACY: Crea una categoría GLOBAL en la base de datos.
+
+    ⚠️ ESTA FUNCIÓN ESTÁ DEPRECATED Y SERÁ ELIMINADA.
+    ⚠️ USA get_or_create_user_category_for_expense PARA NUEVOS DESARROLLOS.
+
     Útil cuando un usuario registra un gasto con una categoría que no existe.
     IMPORTANTE: Siempre usar el mismo idioma que está usando el usuario para el nombre, descripción y ejemplos.
 
@@ -383,6 +389,122 @@ def get_or_create_income_category(name: str, description: str | None = None, exa
         }
 
 
+# NUEVAS HERRAMIENTAS PARA CATEGORÍAS POR USUARIO
+
+@tool
+def get_or_create_user_category_for_expense(
+    user_external_id: str,
+    name: str,
+    description: str | None = None,
+    examples: str | None = None,
+    color: str | None = None
+) -> Dict[str, str]:
+    """
+    Crea o obtiene una categoría de gastos para un usuario específico.
+    NUEVA FUNCIÓN: Reemplaza get_or_create_category para categorías por usuario.
+
+    Args:
+        user_external_id: ID externo del usuario
+        name: Nombre de la categoría
+        description: Descripción opcional de la categoría
+        examples: Ejemplos opcionales de gastos para esta categoría
+        color: Color hexadecimal opcional (formato: #RRGGBB)
+
+    Devuelve un diccionario con el resultado de la operación.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+
+        category, created = get_or_create_user_expense_category(
+            user=user,
+            name=name,
+            description=description,
+            examples=examples,
+            color=color
+        )
+
+        status = "success" if created else "info"
+        message = f"Categoría '{category.name}' {'creada' if created else 'ya existe'} para el usuario"
+
+        return {
+            "status": status,
+            "message": message,
+            "id": str(category.id),
+            "color": category.color,
+            "is_default": category.is_default
+        }
+
+    except User.DoesNotExist:
+        logger.error(f"Usuario no encontrado: {user_external_id}")
+        return {
+            "status": "error",
+            "message": f"Usuario no encontrado: {user_external_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error al crear categoría de gastos del usuario: {e}")
+        return {
+            "status": "error",
+            "message": f"Error al crear categoría: {str(e)}"
+        }
+
+
+@tool
+def get_or_create_user_category_for_income(
+    user_external_id: str,
+    name: str,
+    description: str | None = None,
+    example: str | None = None,
+    color: str | None = None
+) -> Dict[str, str]:
+    """
+    Crea o obtiene una categoría de ingresos para un usuario específico.
+    NUEVA FUNCIÓN: Reemplaza get_or_create_income_category para categorías por usuario.
+
+    Args:
+        user_external_id: ID externo del usuario
+        name: Nombre de la categoría
+        description: Descripción opcional de la categoría
+        example: Ejemplo opcional de ingresos para esta categoría
+        color: Color hexadecimal opcional (formato: #RRGGBB)
+
+    Devuelve un diccionario con el resultado de la operación.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+
+        category, created = get_or_create_user_income_category(
+            user=user,
+            name=name,
+            description=description,
+            example=example,
+            color=color
+        )
+
+        status = "success" if created else "info"
+        message = f"Categoría de ingreso '{category.name}' {'creada' if created else 'ya existe'} para el usuario"
+
+        return {
+            "status": status,
+            "message": message,
+            "id": str(category.id),
+            "color": category.color,
+            "is_default": category.is_default
+        }
+
+    except User.DoesNotExist:
+        logger.error(f"Usuario no encontrado: {user_external_id}")
+        return {
+            "status": "error",
+            "message": f"Usuario no encontrado: {user_external_id}"
+        }
+    except Exception as e:
+        logger.error(f"Error al crear categoría de ingresos del usuario: {e}")
+        return {
+            "status": "error",
+            "message": f"Error al crear categoría: {str(e)}"
+        }
+
+
 @tool
 def create_expense(
     user_external_id: str,
@@ -411,36 +533,41 @@ def create_expense(
     # Normalizar el nombre de la categoría para mostrar (primera letra mayúscula)
     display_category_name = category.strip().capitalize()
 
-    # Buscar la categoría de forma insensible a mayúsculas/minúsculas
+    # NUEVO: Buscar o crear categoría por usuario
     try:
-        # Buscar categoría existente (case-insensitive)
-        category_obj = Category.objects.filter(
-            name__iexact=category.strip()).first()
-        if category_obj:
-            # Si existe, usar el nombre exacto de la categoría existente
-            category_name = category_obj.name
+        # Crear o obtener la categoría específica del usuario
+        result = get_or_create_user_category_for_expense.invoke({
+            "user_external_id": user_external_id,
+            "name": display_category_name
+        })
+
+        if result["status"] in ["success", "info"]:
+            # Obtener la categoría del usuario recién creada/encontrada
+            user_category = UserExpenseCategory.objects.get(
+                user=user,
+                name=display_category_name.capitalize()
+            )
+            category_name = user_category.name
         else:
-            # Si no existe, la vamos a crear con normalize_name
-            category_name = display_category_name
-            # Crear la categoría
-            result = get_or_create_category.invoke({"name": category_name})
-            if result["status"] == "success" or result["status"] == "info":
-                # Obtener la categoría recién creada
-                category_obj = Category.objects.get(name=category_name)
-            else:
-                # Si hubo un error al crear la categoría, registrar el error
-                logger.error(f"Error al crear categoría para gasto: {result}")
-                # Crear una categoría por defecto para evitar gastos sin categoría
-                category_obj, created = Category.objects.get_or_create(name="Otros",
-                                                                       defaults={"description": "Categoría por defecto para gastos sin clasificar",
-                                                                                 "examples": "Gastos varios, misceláneos"})
-                category_name = "Otros"
+            # Si hubo un error al crear la categoría, crear una por defecto
+            logger.error(f"Error al crear categoría para gasto: {result}")
+            user_category, created = get_or_create_user_expense_category(
+                user=user,
+                name="Otros",
+                description="Categoría por defecto para gastos sin clasificar",
+                examples="Gastos varios, misceláneos"
+            )
+            category_name = "Otros"
+
     except Exception as e:
-        logger.error(f"Error al buscar/crear categoría: {e}")
+        logger.error(f"Error al buscar/crear categoría del usuario: {e}")
         # Crear una categoría por defecto para evitar gastos sin categoría
-        category_obj, created = Category.objects.get_or_create(name="Otros",
-                                                               defaults={"description": "Categoría por defecto para gastos sin clasificar",
-                                                                         "examples": "Gastos varios, misceláneos"})
+        user_category, created = get_or_create_user_expense_category(
+            user=user,
+            name="Otros",
+            description="Categoría por defecto para gastos sin clasificar",
+            examples="Gastos varios, misceláneos"
+        )
         category_name = "Otros"
 
     # Crear el texto para el embedding
@@ -453,12 +580,19 @@ def create_expense(
     except Exception as e:
         logger.error(f"Error al generar embedding para gasto: {e}")
 
+    # NUEVO: Crear gasto con categoría por usuario
     expense = Expense.objects.create(
-        user=user, amount=amount, currency=currency,
-        category=category_obj, category_str=category_name,
-        spent_at=date, note=note,
-        timestamp=timezone.now(), embedding=embedding,
-        raw_message=expense_text  # Usar texto plano en lugar de JSON
+        user=user,
+        amount=amount,
+        currency=currency,
+        category=None,  # DEJAR EN NULL - No usar categoría global
+        category_str=category_name,
+        user_expense_category=user_category,  # USAR NUEVA CATEGORÍA POR USUARIO
+        spent_at=date,
+        note=note,
+        timestamp=timezone.now(),
+        embedding=embedding,
+        raw_message=expense_text
     )
     return (
         f"✅ ¡Gasto registrado!\n"
@@ -826,13 +960,40 @@ def create_income(
         normalized_category = " ".join(word.capitalize()
                                        for word in category.strip().split())
 
-        # Obtener o crear la categoría de ingreso (búsqueda insensible a mayúsculas/minúsculas)
-        category_obj = IncomeCategory.objects.filter(
-            name__iexact=normalized_category).first()
-        if not category_obj:
-            # Si no existe, la creamos
-            category_obj = IncomeCategory.objects.create(
-                name=normalized_category)
+        # NUEVO: Buscar o crear categoría de ingreso por usuario
+        try:
+            # Crear o obtener la categoría específica del usuario
+            result = get_or_create_user_category_for_income.invoke({
+                "user_external_id": user_external_id,
+                "name": normalized_category
+            })
+
+            if result["status"] in ["success", "info"]:
+                # Obtener la categoría del usuario recién creada/encontrada
+                user_income_category = UserIncomeCategory.objects.get(
+                    user=user,
+                    name=normalized_category
+                )
+            else:
+                # Si hubo un error al crear la categoría, crear una por defecto
+                logger.error(f"Error al crear categoría de ingreso: {result}")
+                user_income_category, created = get_or_create_user_income_category(
+                    user=user,
+                    name="Otros Ingresos",
+                    description="Categoría por defecto para ingresos sin clasificar",
+                    example="Ingresos varios, misceláneos"
+                )
+
+        except Exception as e:
+            logger.error(
+                f"Error al buscar/crear categoría de ingreso del usuario: {e}")
+            # Crear una categoría por defecto para evitar ingresos sin categoría
+            user_income_category, created = get_or_create_user_income_category(
+                user=user,
+                name="Otros Ingresos",
+                description="Categoría por defecto para ingresos sin clasificar",
+                example="Ingresos varios, misceláneos"
+            )
 
         # Fecha de recepción
         if received_at:
@@ -844,18 +1005,19 @@ def create_income(
         else:
             received_date = timezone.now().date()
 
-        # Crear el objeto Income
-        income_text = f"Ingreso de {amount} {currency} en {category_obj.name} el {received_date}. {note}"
+        # NUEVO: Crear el objeto Income con categoría por usuario
+        income_text = f"Ingreso de {amount} {currency} en {user_income_category.name} el {received_date}. {note}"
         income = Income.objects.create(
             user=user,
             amount=amount,
             currency=currency,
-            category=category_obj,
-            category_str=category_obj.name,  # Usar el nombre normalizado de la categoría
+            category=None,  # DEJAR EN NULL - No usar categoría global
+            category_str=user_income_category.name,
+            user_income_category=user_income_category,  # USAR NUEVA CATEGORÍA POR USUARIO
             timestamp=timezone.now(),
             received_at=received_date,
             note=note,
-            raw_message=income_text  # Usar texto plano en lugar de JSON
+            raw_message=income_text
         )
 
         # Generar embedding para la búsqueda semántica
@@ -865,7 +1027,7 @@ def create_income(
         except Exception as e:
             logger.error(f"Error generando embedding para ingreso: {e}")
 
-        return f"Ingreso registrado: {amount} {currency} en {category_obj.name} ({received_date}) {currency_message}".strip()
+        return f"Ingreso registrado: {amount} {currency} en {user_income_category.name} ({received_date}) {currency_message}".strip()
 
     except Exception as e:
         return f"Error al registrar el ingreso: {str(e)}"
