@@ -94,7 +94,30 @@ def get_categories_with_details(user=None):
     """
     try:
         if user:
-            return get_user_categories_with_details(user)
+            # Obtener categorías del usuario y convertir al formato esperado
+            user_categories = get_user_categories_with_details(user)
+            result = {}
+
+            # Procesar categorías de gastos
+            for category in user_categories['expense_categories']:
+                result[category['name']] = {
+                    'description': category['description'],
+                    'examples': category['examples'],
+                    'color': category['color'],
+                    'type': 'expense'
+                }
+
+            # Procesar categorías de ingresos
+            for category in user_categories['income_categories']:
+                result[category['name']] = {
+                    'description': category['description'],
+                    # Nota: 'example' en singular para ingresos
+                    'examples': category['example'],
+                    'color': category['color'],
+                    'type': 'income'
+                }
+
+            return result
         else:
             # Fallback a lógica original (categorías globales)
             # Obtener categorías de gastos

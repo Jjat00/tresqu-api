@@ -692,7 +692,7 @@ def get_expenses_by_user(user_external_id: str):
             'id': str(expense.id),
             'amount': expense.amount,
             'currency': expense.currency,
-            'category': expense.category_str,
+            'category': expense.user_expense_category.name if expense.user_expense_category else (expense.category.name if expense.category else expense.category_str),
             'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
             'note': expense.note,
             'raw_message': expense.raw_message
@@ -711,7 +711,7 @@ def get_expense_by_id(expense_id: str):
             'id': str(expense.id),
             'amount': expense.amount,
             'currency': expense.currency,
-            'category': expense.category_str,
+            'category': expense.user_expense_category.name if expense.user_expense_category else (expense.category.name if expense.category else expense.category_str),
             'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
             'note': expense.note,
             'raw_message': expense.raw_message
@@ -739,7 +739,7 @@ def search_expenses_by_text(user_external_id: str, search_text: str) -> List[Dic
             'id': str(expense.id),
             'amount': expense.amount,
             'currency': expense.currency,
-            'category': expense.category_str,
+            'category': expense.user_expense_category.name if expense.user_expense_category else (expense.category.name if expense.category else expense.category_str),
             'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
             'note': expense.note,
             'raw_message': expense.raw_message
@@ -758,7 +758,7 @@ def get_expenses_by_category(user_external_id: str, category: str, start_date: s
     try:
         user = User.objects.get(external_id=user_external_id)
         query = Expense.objects.filter(
-            user=user, category_str__iexact=category)
+            user=user, user_expense_category__name__iexact=category)
 
         if start_date:
             query = query.filter(spent_at__gte=start_date)
@@ -803,19 +803,19 @@ def get_top_categories(user_external_id: str, start_date: str | None = None, end
         if end_date:
             query = query.filter(spent_at__lte=end_date)
 
-        # Agrupar por categoría y sumar montos
-        categories = query.values('category_str').annotate(
+        # Agrupar por categoría de usuario y sumar montos
+        categories = query.values('user_expense_category__name').annotate(
             total=models.Sum('amount')
         ).order_by('-total')
 
         return [{
-            'category': cat['category_str'],
+            'category': cat['user_expense_category__name'] or 'Sin categoría',
             'total': float(cat['total']),
             'currency': user.default_currency
-        } for cat in categories]
+        } for cat in categories if cat['user_expense_category__name']]
     except Exception as e:
         logger.error(f"Error al obtener top categorías: {e}")
-        return {'error': str(e)}
+        return []
 
 
 class IncomeList(BaseModel):
@@ -1143,7 +1143,7 @@ def get_incomes_by_user(user_external_id: str, start_date: str | None = None, en
                 "id": str(income.id),
                 "amount": float(income.amount),
                 "currency": income.currency,
-                "category": income.category.name if income.category else income.category_str,
+                "category": income.user_income_category.name if income.user_income_category else (income.category.name if income.category else income.category_str),
                 "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
                 "note": income.note
             }
@@ -1169,7 +1169,7 @@ def get_income_by_id(income_id: str) -> Dict[str, Any]:
             "id": str(income.id),
             "amount": float(income.amount),
             "currency": income.currency,
-            "category": income.category.name if income.category else income.category_str,
+            "category": income.user_income_category.name if income.user_income_category else (income.category.name if income.category else income.category_str),
             "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
             "note": income.note
         }
@@ -1201,7 +1201,7 @@ def search_incomes_by_text(user_external_id: str, search_text: str) -> List[Dict
                 "id": str(income.id),
                 "amount": float(income.amount),
                 "currency": income.currency,
-                "category": income.category.name if income.category else income.category_str,
+                "category": income.user_income_category.name if income.user_income_category else (income.category.name if income.category else income.category_str),
                 "received_at": income.received_at.strftime("%Y-%m-%d") if income.received_at else None,
                 "note": income.note
             }
@@ -1227,15 +1227,10 @@ def get_incomes_by_category(user_external_id: str, category: str, start_date: st
         if not user:
             return {"error": "Usuario no encontrado"}
 
-        # Buscar la categoría
-        categories = IncomeCategory.objects.filter(name__icontains=category)
-        if not categories.exists():
-            return {"error": f"Categoría {category} no encontrada"}
-
-        # Preparar filtros
+        # Preparar filtros usando categorías de usuario
         query = Income.objects.filter(
             user=user,
-            category__in=categories
+            user_income_category__name__iexact=category
         )
 
         if start_date:
@@ -1308,21 +1303,22 @@ def get_top_income_categories(user_external_id: str, start_date: str | None = No
             except ValueError:
                 pass
 
-        # Agrupar por categoría y sumar montos
+        # Agrupar por categoría de usuario y sumar montos
         result = []
         categories = query.values(
-            'category__name', 'category_str'
+            'user_income_category__name'
         ).annotate(
             total=Sum('amount')
         ).order_by('-total')
 
         for cat in categories:
-            category_name = cat['category__name'] or cat['category_str'] or 'Sin categoría'
-            result.append({
-                "category": category_name,
-                "total": float(cat['total']),
-                "currency": user.default_currency
-            })
+            category_name = cat['user_income_category__name'] or 'Sin categoría'
+            if category_name != 'Sin categoría':  # Solo incluir categorías válidas
+                result.append({
+                    "category": category_name,
+                    "total": float(cat['total']),
+                    "currency": user.default_currency
+                })
 
         return result
     except Exception as e:

@@ -23,9 +23,10 @@ from telegrambot.tools import (
     is_greeting,
     create_expense,
     parse_expenses,
-    get_or_create_category,  # LEGACY - será deprecado
-    get_or_create_user_category_for_expense,  # NUEVO
-    get_or_create_user_category_for_income,   # NUEVO
+    # Para crear categorías de gastos por usuario
+    get_or_create_user_category_for_expense,
+    # Para crear categorías de ingresos por usuario
+    get_or_create_user_category_for_income,
     parse_relative_date,
     update_expense,
     delete_expense,
@@ -45,7 +46,7 @@ from telegrambot.tools import (
     search_incomes_by_text,
     get_incomes_by_category,
     get_top_income_categories,
-    get_or_create_income_category,  # LEGACY - será deprecado
+
 )
 
 from whatsappbot.utils import get_existing_categories, get_categories_with_details, get_existing_income_categories
@@ -200,8 +201,9 @@ def make_create_income_tool(user_external_id: str):
         category_color: str | None = None
     ) -> str:
         """Registra un ingreso en la base de datos y confirma el registro."""
-        # Primero crear la categoría de ingreso si no existe de forma asíncrona
-        await get_or_create_income_category.ainvoke({
+        # Primero crear la categoría de ingreso por usuario si no existe de forma asíncrona
+        await get_or_create_user_category_for_income.ainvoke({
+            "user_external_id": user_external_id,
             "name": category,
             "description": category_description,
             "example": category_example,
@@ -262,7 +264,7 @@ async def process_message(user: User, raw_text: str) -> str:
             make_create_income_tool(user.external_id),
             parse_expenses,
             parse_incomes,
-            get_or_create_category,
+            get_or_create_user_category_for_expense,
             parse_relative_date_for_user,
             update_expense,
             update_income,
@@ -468,7 +470,7 @@ async def process_message(user: User, raw_text: str) -> str:
                      - Busca la categoría más apropiada basada en la descripción y ejemplos
                      - Si hay una categoría similar, úsala en lugar de crear una nueva
                 13.2 SOLO SI ES NECESARIO: Si ninguna categoría existente es adecuada:
-                     - Usa get_or_create_category o get_or_create_income_category según corresponda
+                     - Usa get_or_create_user_category_for_expense o get_or_create_user_category_for_income según corresponda
                      - Proporciona nombre, descripción, ejemplos y color
                      - Asegúrate de que la nueva categoría sea realmente necesaria
                 13.3 Si dudas entre dos categorías existentes:
@@ -528,7 +530,7 @@ async def process_message(user: User, raw_text: str) -> str:
                     * Si se especifica un rango de fechas, filtra por ese rango
 
             CREACIÓN DE CATEGORÍAS DE INGRESOS:
-            21. Al crear nuevas categorías de ingresos con get_or_create_income_category:
+            21. Al crear nuevas categorías de ingresos con get_or_create_user_category_for_income:
                 21.1 SOLO crear una nueva categoría si:
                     - No existe una categoría similar en la lista proporcionada
                     - El ingreso no puede clasificarse en ninguna categoría existente
