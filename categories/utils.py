@@ -3,13 +3,15 @@ Utilidades para manejo de categorías por usuario.
 Proporciona funciones para la transición gradual de categorías globales a categorías por usuario.
 """
 
-from typing import List, Dict, Any, Optional, Tuple
+from typing import List, Dict, Any, Optional, Tuple, Union
+from django.db.models import QuerySet
 from django.contrib.auth import get_user_model
-from .models import Category, UserExpenseCategory, UserIncomeCategory
+from .models import UserExpenseCategory, UserIncomeCategory, Category
 from income.models import IncomeCategory
+from users.models import User
 
-User = get_user_model()
 
+# FUNCIONES PRINCIPALES PARA CATEGORÍAS POR USUARIO
 
 def get_user_expense_categories(user: User) -> List[str]:
     """
@@ -22,6 +24,19 @@ def get_user_expense_categories(user: User) -> List[str]:
     except Exception as e:
         print(f"Error al obtener categorías de gastos del usuario: {e}")
         return []
+
+
+def get_user_expense_categories_queryset(user: User) -> QuerySet[UserExpenseCategory]:
+    """
+    Obtiene el QuerySet de categorías de gastos para un usuario específico.
+    Usado por las vistas y serializers.
+    """
+    try:
+        return UserExpenseCategory.objects.filter(user=user).order_by('name')
+    except Exception as e:
+        print(
+            f"Error al obtener QuerySet de categorías de gastos del usuario: {e}")
+        return UserExpenseCategory.objects.none()
 
 
 def get_user_income_categories(user: User) -> List[str]:
@@ -37,48 +52,72 @@ def get_user_income_categories(user: User) -> List[str]:
         return []
 
 
+def get_user_income_categories_queryset(user: User) -> QuerySet[UserIncomeCategory]:
+    """
+    Obtiene el QuerySet de categorías de ingresos para un usuario específico.
+    Usado por las vistas y serializers.
+    """
+    try:
+        return UserIncomeCategory.objects.filter(user=user).order_by('name')
+    except Exception as e:
+        print(
+            f"Error al obtener QuerySet de categorías de ingresos del usuario: {e}")
+        return UserIncomeCategory.objects.none()
+
+
 def get_user_categories_with_details(user: User) -> Dict[str, Dict[str, Any]]:
     """
     Obtiene un diccionario con todas las categorías del usuario (gastos e ingresos)
     incluyendo su descripción, ejemplos y color.
 
     Returns:
-        dict: Diccionario donde cada clave es el nombre de la categoría y cada valor
-              es otro diccionario con 'description', 'examples', 'color', 'type'.
+        dict: Diccionario con 'expense_categories' e 'income_categories'
     """
     try:
-        result = {}
-
         # Obtener categorías de gastos del usuario
         expense_categories = UserExpenseCategory.objects.filter(user=user).values(
-            'name', 'description', 'examples', 'color')
+            'id', 'name', 'description', 'examples', 'color', 'is_default')
 
         # Obtener categorías de ingresos del usuario
         income_categories = UserIncomeCategory.objects.filter(user=user).values(
-            'name', 'description', 'example', 'color')
+            'id', 'name', 'description', 'example', 'color', 'is_default')
 
         # Procesar categorías de gastos
+        expense_list = []
         for category in expense_categories:
-            result[category['name']] = {
+            expense_list.append({
+                'id': category['id'],
+                'name': category['name'],
                 'description': category['description'] or '',
                 'examples': category['examples'] or '',
                 'color': category['color'],
+                'is_default': category['is_default'],
                 'type': 'expense'
-            }
+            })
 
         # Procesar categorías de ingresos
+        income_list = []
         for category in income_categories:
-            result[category['name']] = {
+            income_list.append({
+                'id': category['id'],
+                'name': category['name'],
                 'description': category['description'] or '',
-                'examples': category['example'] or '',
+                'example': category['example'] or '',
                 'color': category['color'],
+                'is_default': category['is_default'],
                 'type': 'income'
-            }
+            })
 
-        return result
+        return {
+            'expense_categories': expense_list,
+            'income_categories': income_list
+        }
     except Exception as e:
         print(f"Error al obtener categorías del usuario con detalles: {e}")
-        return {}
+        return {
+            'expense_categories': [],
+            'income_categories': []
+        }
 
 
 def get_or_create_user_expense_category(
