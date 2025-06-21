@@ -604,50 +604,56 @@ def create_expense(
 
 @tool
 def update_expense(expense_id: str, amount: float, currency: str, category: str, spent_at: str | None = None, note: str | None = ""):
-    """Actualiza un gasto en la base de datos."""
+    """Actualiza un gasto en la base de datos usando categorías por usuario."""
     try:
         expense = Expense.objects.get(id=expense_id)
+        user = expense.user
 
-        # Normalizar el nombre de la categoría para mostrar (primera letra mayúscula)
-        display_category_name = category.strip().capitalize()
+        # Obtener o crear la categoría de usuario
+        result = get_or_create_user_category_for_expense.invoke({
+            "user_external_id": user.external_id,
+            "name": category,
+            "description": None,
+            "examples": None,
+            "color": None
+        })
 
-        # Buscar la categoría de forma insensible a mayúsculas/minúsculas
-        try:
-            # Buscar categoría existente (case-insensitive)
-            category_obj = Category.objects.filter(
-                name__iexact=category.strip()).first()
-            if category_obj:
-                # Si existe, usar el nombre exacto de la categoría existente
-                category_name = category_obj.name
+        if result["status"] == "success" or result["status"] == "info":
+            # Buscar la categoría de usuario recién creada/encontrada
+            user_category = UserExpenseCategory.objects.filter(
+                user=user, name__iexact=category.strip()).first()
+
+            if user_category:
+                category_name = user_category.name
             else:
-                # Si no existe, la vamos a crear con normalize_name
-                category_name = display_category_name
-                # Crear la categoría
-                result = get_or_create_category.invoke({"name": category_name})
-                if result["status"] == "success" or result["status"] == "info":
-                    # Obtener la categoría recién creada
-                    category_obj = Category.objects.get(name=category_name)
-                else:
-                    # Si hubo un error al crear la categoría, registrar el error
-                    logger.error(
-                        f"Error al crear categoría para gasto: {result}")
-                    # Crear una categoría por defecto para evitar gastos sin categoría
-                    category_obj, created = Category.objects.get_or_create(name="Otros",
-                                                                           defaults={"description": "Categoría por defecto para gastos sin clasificar",
-                                                                                     "examples": "Gastos varios, misceláneos"})
-                    category_name = "Otros"
-        except Exception as e:
-            logger.error(f"Error al buscar/crear categoría: {e}")
-            # Crear una categoría por defecto para evitar gastos sin categoría
-            category_obj, created = Category.objects.get_or_create(name="Otros",
-                                                                   defaults={"description": "Categoría por defecto para gastos sin clasificar",
-                                                                             "examples": "Gastos varios, misceláneos"})
+                # Fallback: buscar por el nombre normalizado
+                normalized_name = category.strip().title()
+                user_category = UserExpenseCategory.objects.filter(
+                    user=user, name__iexact=normalized_name).first()
+                category_name = user_category.name if user_category else normalized_name
+        else:
+            logger.error(
+                f"Error al crear/obtener categoría de usuario: {result}")
+            # Fallback: buscar una categoría existente o usar "Otros"
+            user_category = UserExpenseCategory.objects.filter(
+                user=user, name__iexact="Otros").first()
+            if not user_category:
+                # Crear categoría "Otros" si no existe
+                user_category = UserExpenseCategory.objects.create(
+                    user=user,
+                    name="Otros",
+                    description="Categoría por defecto para gastos sin clasificar",
+                    examples="Gastos varios, misceláneos",
+                    is_default=False
+                )
             category_name = "Otros"
 
+        # Actualizar el gasto
         expense.amount = amount
         expense.currency = currency
-        expense.category = category_obj
-        expense.category_str = category_name
+        expense.user_expense_category = user_category
+        expense.category_str = category_name  # Mantener por compatibilidad
+
         if spent_at:
             expense.spent_at = datetime.strptime(spent_at, "%Y-%m-%d").date()
         if note:
@@ -655,7 +661,7 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
 
         # Actualizar el raw_message
         expense_text = f"Gasto de {amount} {currency} en {category_name} el {expense.spent_at}. {note}"
-        expense.raw_message = expense_text  # Usar texto plano en lugar de JSON
+        expense.raw_message = expense_text
 
         # Actualizar embedding
         try:
@@ -664,7 +670,7 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
             logger.error(f"Error actualizando embedding para gasto: {e}")
 
         expense.save()
-        return f"✅ ¡Gasto actualizado!\n"
+        return f"✅ ¡Gasto actualizado!\n📊 Categoría: {category_name}\n💰 Monto: {amount} {currency}\n📅 Fecha: {expense.spent_at}\n📝 Nota: {note}"
     except Exception as e:
         logger.error(f"Error al actualizar gasto: {e}")
         return f"❌ Error al actualizar el gasto: {str(e)}"
@@ -1035,33 +1041,63 @@ def create_income(
 @tool
 def update_income(income_id: str, amount: float, currency: str, category: str, received_at: str | None = None, note: str | None = ""):
     """
-    Actualiza un ingreso existente.
+    Actualiza un ingreso existente usando categorías por usuario.
     """
     try:
-        from income.models import Income, IncomeCategory
+        from income.models import Income
+        from categories.models import UserIncomeCategory
         from datetime import datetime
-        import json
 
         income = Income.objects.filter(id=income_id).first()
         if not income:
             return f"Error: Ingreso con ID {income_id} no encontrado."
 
-        # Normalizar el nombre de la categoría (primera letra mayúscula de cada palabra)
-        normalized_category = " ".join(word.capitalize()
-                                       for word in category.strip().split())
+        user = income.user
 
-        # Obtener o crear la categoría (búsqueda insensible a mayúsculas/minúsculas)
-        category_obj = IncomeCategory.objects.filter(
-            name__iexact=normalized_category).first()
-        if not category_obj:
-            # Si no existe, la creamos
-            category_obj = IncomeCategory.objects.create(
-                name=normalized_category)
+        # Obtener o crear la categoría de usuario
+        result = get_or_create_user_category_for_income.invoke({
+            "user_external_id": user.external_id,
+            "name": category,
+            "description": None,
+            "example": None,
+            "color": None
+        })
 
+        if result["status"] == "success" or result["status"] == "info":
+            # Buscar la categoría de usuario recién creada/encontrada
+            user_category = UserIncomeCategory.objects.filter(
+                user=user, name__iexact=category.strip()).first()
+
+            if user_category:
+                category_name = user_category.name
+            else:
+                # Fallback: buscar por el nombre normalizado
+                normalized_name = category.strip().title()
+                user_category = UserIncomeCategory.objects.filter(
+                    user=user, name__iexact=normalized_name).first()
+                category_name = user_category.name if user_category else normalized_name
+        else:
+            logger.error(
+                f"Error al crear/obtener categoría de ingreso de usuario: {result}")
+            # Fallback: buscar una categoría existente o usar "Otros"
+            user_category = UserIncomeCategory.objects.filter(
+                user=user, name__iexact="Otros").first()
+            if not user_category:
+                # Crear categoría "Otros" si no existe
+                user_category = UserIncomeCategory.objects.create(
+                    user=user,
+                    name="Otros",
+                    description="Categoría por defecto para ingresos sin clasificar",
+                    example="Ingresos varios, misceláneos",
+                    is_default=False
+                )
+            category_name = "Otros"
+
+        # Actualizar el ingreso
         income.amount = amount
         income.currency = currency
-        income.category = category_obj
-        income.category_str = category_obj.name  # Usar el nombre normalizado
+        income.user_income_category = user_category
+        income.category_str = category_name  # Mantener por compatibilidad
 
         if received_at:
             try:
@@ -1073,8 +1109,8 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
         income.note = note
 
         # Actualizar el raw_message
-        income_text = f"Ingreso de {amount} {currency} en {category_obj.name} el {income.received_at}. {note}"
-        income.raw_message = income_text  # Usar texto plano en lugar de JSON
+        income_text = f"Ingreso de {amount} {currency} en {category_name} el {income.received_at}. {note}"
+        income.raw_message = income_text
 
         # Actualizar embedding
         try:
@@ -1083,7 +1119,7 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
             logger.error(f"Error actualizando embedding para ingreso: {e}")
 
         income.save()
-        return f"Ingreso actualizado: {amount} {currency} en {category_obj.name}"
+        return f"✅ ¡Ingreso actualizado!\n📊 Categoría: {category_name}\n💰 Monto: {amount} {currency}\n📅 Fecha: {income.received_at}\n📝 Nota: {note}"
 
     except Exception as e:
         return f"Error al actualizar el ingreso: {str(e)}"
