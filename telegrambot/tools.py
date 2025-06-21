@@ -529,8 +529,8 @@ def create_expense(
     else:
         date = timezone.now().date()
 
-    # Normalizar el nombre de la categoría para mostrar (primera letra mayúscula)
-    display_category_name = category.strip().capitalize()
+    # Normalizar el nombre de la categoría para mostrar (capitalizar cada palabra)
+    display_category_name = category.strip().title()
 
     # NUEVO: Buscar o crear categoría por usuario
     try:
@@ -541,12 +541,34 @@ def create_expense(
         })
 
         if result["status"] in ["success", "info"]:
-            # Obtener la categoría del usuario recién creada/encontrada
-            user_category = UserExpenseCategory.objects.get(
+            # Obtener la categoría del usuario recién creada/encontrada usando búsqueda case-insensitive
+            user_category = UserExpenseCategory.objects.filter(
                 user=user,
-                name=display_category_name.capitalize()
-            )
-            category_name = user_category.name
+                name__iexact=display_category_name
+            ).first()
+
+            if user_category:
+                category_name = user_category.name
+            else:
+                # Fallback: buscar cualquier categoría similar
+                user_category = UserExpenseCategory.objects.filter(
+                    user=user,
+                    name__icontains=category.strip()
+                ).first()
+
+                if user_category:
+                    category_name = user_category.name
+                else:
+                    # Si no se encuentra, crear categoría "Otros"
+                    logger.warning(
+                        f"No se encontró categoría '{display_category_name}' para usuario {user.external_id}, usando 'Otros'")
+                    user_category, created = get_or_create_user_expense_category(
+                        user=user,
+                        name="Otros",
+                        description="Categoría por defecto para gastos sin clasificar",
+                        examples="Gastos varios, misceláneos"
+                    )
+                    category_name = "Otros"
         else:
             # Si hubo un error al crear la categoría, crear una por defecto
             logger.error(f"Error al crear categoría para gasto: {result}")
