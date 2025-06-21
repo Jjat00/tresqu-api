@@ -9,10 +9,23 @@ class Expense(models.Model):
         User, on_delete=models.CASCADE, related_name='expenses')
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     currency = models.CharField(max_length=10, default='COP')
+
+    # CAMPO ORIGINAL - Se mantendrá temporalmente durante la migración
     category = models.ForeignKey(
         Category, on_delete=models.SET_NULL, null=True, blank=True)
     category_str = models.CharField(
         max_length=100, blank=True, null=True)
+
+    # NUEVO CAMPO - Categoría por usuario
+    user_expense_category = models.ForeignKey(
+        'categories.UserExpenseCategory',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='expenses',
+        help_text='Categoría de gasto personalizada por usuario'
+    )
+
     description = models.TextField(blank=True)
     timestamp = models.DateTimeField()
     spent_at = models.DateField(null=True, blank=True)
@@ -35,7 +48,13 @@ class Expense(models.Model):
         ]
 
     def __str__(self):
-        category_name = self.category.name if self.category else self.category_str
+        # Priorizar user_expense_category sobre category
+        if self.user_expense_category:
+            category_name = self.user_expense_category.name
+        elif self.category:
+            category_name = self.category.name
+        else:
+            category_name = self.category_str
         return f"{category_name}: {self.amount} {self.currency} ({self.timestamp})"
 
     @classmethod
