@@ -6,6 +6,8 @@ from openai import OpenAI
 from typing import List, Dict, Any
 import asyncio
 from datetime import datetime
+import time
+import random
 
 from django.conf import settings
 from users.models import User
@@ -44,18 +46,70 @@ from telegrambot.tools import (
     get_or_create_income_category,
 )
 
-from telegrambot.utils import get_existing_categories, get_categories_with_details, get_existing_income_categories
+from telegrambot.utils import get_existing_categories, get_categories_with_details, get_existing_income_categories, log_ssl_error_details
+from telegrambot.config import (
+    OPENAI_REQUEST_TIMEOUT, OPENAI_MAX_RETRIES, AGENT_EXECUTION_TIMEOUT,
+    AGENT_MAX_ITERATIONS, RETRY_BASE_DELAY, RETRY_MAX_DELAY, RETRY_MAX_ATTEMPTS,
+    RETRYABLE_ERROR_PATTERNS, ERROR_MESSAGES
+)
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-llm = ChatOpenAI(model="gpt-4.1", temperature=0.1,
-                 api_key=settings.OPENAI_API_KEY)
+# Configurar LLM con timeout y reintentos mejorados
+llm = ChatOpenAI(
+    model="gpt-4.1",
+    temperature=0.1,
+    api_key=settings.OPENAI_API_KEY,
+    request_timeout=OPENAI_REQUEST_TIMEOUT,
+    max_retries=OPENAI_MAX_RETRIES
+)
 
-# Cliente de OpenAI para transcripción de audio
-openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+# Cliente de OpenAI para transcripción de audio con timeout
+openai_client = OpenAI(
+    api_key=settings.OPENAI_API_KEY,
+    timeout=float(OPENAI_REQUEST_TIMEOUT)
+)
+
+
+async def retry_with_backoff(func, max_retries=None, base_delay=None, max_delay=None, *args, **kwargs):
+    """
+    Ejecuta una función con reintentos exponenciales para manejar errores de red/SSL
+    """
+    max_retries = max_retries or RETRY_MAX_ATTEMPTS
+    base_delay = base_delay or RETRY_BASE_DELAY
+    max_delay = max_delay or RETRY_MAX_DELAY
+
+    for attempt in range(max_retries):
+        try:
+            return await func(*args, **kwargs) if asyncio.iscoroutinefunction(func) else func(*args, **kwargs)
+        except Exception as e:
+            error_str = str(e).lower()
+
+            # Verificar si es un error de SSL/conexión que se puede reintentar
+            is_retryable_error = any(
+                error_type in error_str for error_type in RETRYABLE_ERROR_PATTERNS)
+
+            if not is_retryable_error or attempt == max_retries - 1:
+                # Log detailed error information for SSL/connection errors
+                if is_retryable_error:
+                    log_ssl_error_details(
+                        e, f"Retry attempt {attempt + 1}/{max_retries} failed")
+                logger.error(f"Error no recuperable o último intento: {e}")
+                raise
+
+            # Calcular delay con backoff exponencial y jitter
+            delay = min(base_delay * (2 ** attempt) +
+                        random.uniform(0, 1), max_delay)
+            logger.warning(
+                f"Error de conexión (intento {attempt + 1}/{max_retries}): {e}. Reintentando en {delay:.2f}s")
+
+            if asyncio.iscoroutinefunction(func):
+                await asyncio.sleep(delay)
+            else:
+                time.sleep(delay)
 
 
 async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
@@ -78,6 +132,10 @@ def build_agent(tools, prompt, memory) -> AgentExecutor:
         memory=memory,
         return_intermediate_steps=True,
         verbose=True,
+        handle_parsing_errors=True,  # Manejar errores de parsing automáticamente
+        max_execution_time=AGENT_EXECUTION_TIMEOUT,  # Timeout configurable
+        # Límite de iteraciones para evitar loops infinitos
+        max_iterations=AGENT_MAX_ITERATIONS,
     )
 
 
@@ -153,9 +211,9 @@ def make_create_income_tool(user_external_id: str):
 
 async def transcribe_audio(audio_file_path: str) -> str:
     """
-    Transcribe un archivo de audio usando la API de OpenAI
+    Transcribe un archivo de audio usando la API de OpenAI con reintentos
     """
-    try:
+    def do_transcription():
         with open(audio_file_path, 'rb') as audio_file:
             # Usar la API de OpenAI para transcribir
             transcription = openai_client.audio.transcriptions.create(
@@ -163,8 +221,12 @@ async def transcribe_audio(audio_file_path: str) -> str:
                 file=audio_file
             )
             return transcription.text
+
+    try:
+        return await retry_with_backoff(do_transcription, max_retries=3)
     except Exception as e:
-        logger.error(f"Error transcribiendo audio: {e}")
+        log_ssl_error_details(e, "Audio transcription")
+        logger.error(f"Error transcribiendo audio después de reintentos: {e}")
         return ""
 
 
@@ -538,20 +600,37 @@ async def process_message(user: User, raw_text: str) -> str:
         # 4. ejecutor con timeout
         executor = build_agent(tools, prompt, memory)
 
-        # 5. invocación con manejo de timeout
+        # 5. invocación con manejo de timeout y reintentos para errores SSL
+        async def execute_with_retries():
+            try:
+                result = await asyncio.wait_for(
+                    executor.ainvoke({"input": raw_text}),
+                    timeout=120.0  # 120 segundos de timeout
+                )
+                return result["output"]
+            except asyncio.TimeoutError:
+                logger.error("Timeout al procesar mensaje")
+                raise Exception("Timeout: La operación tomó demasiado tiempo")
+
         try:
-            result = await asyncio.wait_for(
-                executor.ainvoke({"input": raw_text}),
-                timeout=120.0  # 120 segundos de timeout
-            )
-            return result["output"]
-        except asyncio.TimeoutError:
-            logger.error("Timeout al procesar mensaje")
-            return "Lo siento, la operación tomó demasiado tiempo. Por favor, intenta de nuevo con un mensaje más corto o específico."
+            return await retry_with_backoff(execute_with_retries)
+        except Exception as e:
+            error_str = str(e).lower()
+
+            # Determinar el tipo de error y devolver mensaje apropiado
+            if "timeout" in error_str:
+                return ERROR_MESSAGES['timeout']
+            elif any(ssl_error in error_str for ssl_error in ['ssl', 'eof detected']):
+                return ERROR_MESSAGES['ssl']
+            elif any(conn_error in error_str for conn_error in ['connection', 'network']):
+                return ERROR_MESSAGES['connection']
+            else:
+                logger.error(f"Error al procesar mensaje: {e}")
+                return ERROR_MESSAGES['default']
 
     except Exception as e:
-        logger.error(f"Error al procesar mensaje: {e}")
+        logger.error(f"Error inesperado al procesar mensaje: {e}")
         return (
-            "Lo siento, hubo un error al procesar tu mensaje. "
+            "Lo siento, hubo un error inesperado. "
             "Por favor, intenta de nuevo."
         )

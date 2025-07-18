@@ -8,6 +8,7 @@ from django.conf import settings
 from django.views.decorators.http import require_GET
 from telegram import Update
 from .bot import setup_bot
+from django.utils import timezone
 
 # Variable global para almacenar la aplicación del bot
 application = None
@@ -163,3 +164,49 @@ def env_debug(request):
     }
 
     return JsonResponse({"status": "ok", "env_info": env_info})
+
+
+@require_GET
+def healthcheck(request):
+    """
+    Endpoint para verificar el estado del bot y la conectividad con OpenAI
+    """
+    health_status = {
+        "status": "ok",
+        "timestamp": timezone.now().isoformat(),
+        "checks": {}
+    }
+
+    try:
+        # Verificar configuración básica
+        health_status["checks"]["telegram_token"] = bool(
+            settings.TELEGRAM_BOT_TOKEN)
+        health_status["checks"]["openai_key"] = bool(settings.OPENAI_API_KEY)
+        health_status["checks"]["webhook_url"] = bool(
+            settings.TELEGRAM_WEBHOOK_URL)
+
+        # Verificar bot application
+        health_status["checks"]["bot_initialized"] = application is not None
+        health_status["checks"]["event_loop_active"] = event_loop is not None and not event_loop.is_closed()
+
+        # Simple check de OpenAI (solo verificar que el cliente se puede crear)
+        try:
+            from telegrambot.services import openai_client
+            health_status["checks"]["openai_client"] = True
+        except Exception as e:
+            health_status["checks"]["openai_client"] = False
+            health_status["checks"]["openai_error"] = str(e)
+
+        # Determinar estado general
+        critical_checks = ["telegram_token", "openai_key", "bot_initialized"]
+        if all(health_status["checks"].get(check, False) for check in critical_checks):
+            health_status["status"] = "healthy"
+        else:
+            health_status["status"] = "degraded"
+
+    except Exception as e:
+        health_status["status"] = "error"
+        health_status["error"] = str(e)
+
+    status_code = 200 if health_status["status"] in ["ok", "healthy"] else 503
+    return JsonResponse(health_status, status=status_code)

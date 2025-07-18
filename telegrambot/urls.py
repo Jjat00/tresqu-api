@@ -5,4 +5,5 @@ urlpatterns = [
     path('webhook/', views.telegram_webhook, name='telegram_webhook'),
     path('set-webhook/', views.set_webhook, name='set_webhook'),
     path('debug/', views.env_debug, name='env_debug'),
+    path('health/', views.healthcheck, name='healthcheck'),
 ]

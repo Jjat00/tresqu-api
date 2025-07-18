@@ -286,7 +286,7 @@ class Command(BaseCommand):
     def send_meta_whatsapp_template(self, phone_number, template_name, language_code, parameters=None):
         """Envía un template de WhatsApp usando la API de Meta"""
         try:
-            url = f"https://graph.facebook.com/v18.0/{settings.WHATSAPP_PHONE_NUMBER_ID}/messages"
+            url = f"https://graph.facebook.com/v22.0/{settings.META_WHATSAPP_PHONE_NUMBER_ID}/messages"
 
             payload = {
                 "messaging_product": "whatsapp",
@@ -305,7 +305,7 @@ class Command(BaseCommand):
                 payload["template"]["components"] = parameters
 
             headers = {
-                "Authorization": f"Bearer {settings.WHATSAPP_ACCESS_TOKEN}",
+                "Authorization": f"Bearer {settings.META_WHATSAPP_ACCESS_TOKEN}",
                 "Content-Type": "application/json",
             }
 

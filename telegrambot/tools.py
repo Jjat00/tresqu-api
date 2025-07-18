@@ -22,15 +22,24 @@ from datetime import datetime, timedelta
 from django.db import models
 import pytz
 import json
+# Import config
+from .config import OPENAI_REQUEST_TIMEOUT, OPENAI_MAX_RETRIES
 
 embeddings = OpenAIEmbeddings(
     api_key=settings.OPENAI_API_KEY,
     model="text-embedding-3-small",
+    request_timeout=OPENAI_REQUEST_TIMEOUT,
+    max_retries=OPENAI_MAX_RETRIES
 )
 
 
-llm = ChatOpenAI(model="gpt-4o", temperature=0.3,
-                 api_key=settings.OPENAI_API_KEY)
+llm = ChatOpenAI(
+    model="gpt-4o",
+    temperature=0.3,
+    api_key=settings.OPENAI_API_KEY,
+    request_timeout=OPENAI_REQUEST_TIMEOUT,
+    max_retries=OPENAI_MAX_RETRIES
+)
 
 # Configuración de logging
 logging.basicConfig(

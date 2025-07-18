@@ -191,3 +191,44 @@ def get_user_categories_with_details_async(user):
     except Exception as e:
         print(f"Error al obtener categorías del usuario con detalles: {e}")
         return {}
+
+
+def log_ssl_error_details(error, context="Unknown"):
+    """
+    Log detailed information about SSL errors for monitoring and debugging
+    """
+    import logging
+    import datetime
+
+    logger = logging.getLogger(__name__)
+
+    error_details = {
+        'timestamp': datetime.datetime.now().isoformat(),
+        'context': context,
+        'error_type': type(error).__name__,
+        'error_message': str(error),
+        'error_str_lower': str(error).lower()
+    }
+
+    # Categorize the SSL error
+    error_str = str(error).lower()
+    if 'eof detected' in error_str:
+        error_category = 'SSL_EOF'
+    elif 'certificate' in error_str:
+        error_category = 'SSL_CERTIFICATE'
+    elif 'connection' in error_str:
+        error_category = 'CONNECTION'
+    elif 'timeout' in error_str:
+        error_category = 'TIMEOUT'
+    else:
+        error_category = 'OTHER'
+
+    error_details['category'] = error_category
+
+    logger.error(f"SSL Error Details: {error_details}")
+
+    # You could also send this to monitoring services like Sentry, DataDog, etc.
+    # Example:
+    # sentry_sdk.capture_exception(error, extra=error_details)
+
+    return error_details
