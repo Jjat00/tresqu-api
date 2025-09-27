@@ -4,6 +4,8 @@ from django.utils import timezone
 import datetime
 import random
 import string
+import secrets
+from cashbotapp.settings import WHATSAPP_BOT_NUMBER
 
 
 class TelegramVerification(models.Model):
@@ -25,6 +27,128 @@ class TelegramVerification(models.Model):
     def is_expired(self):
         """Verifica si el código ha expirado (5 minutos)"""
         return timezone.now() > self.created_at + datetime.timedelta(minutes=5)
+
+
+class TrackingLink(models.Model):
+    """
+    Modelo para rastrear enlaces de referido de empresas/partners
+    """
+    code = models.CharField(
+        max_length=50,
+        unique=True,
+        help_text="Código único del enlace (ej: empresa_abc_2024)"
+    )
+    name = models.CharField(
+        max_length=200,
+        help_text="Nombre descriptivo (ej: Campaña Empresa ABC)"
+    )
+    description = models.TextField(
+        blank=True,
+        help_text="Descripción opcional del enlace o campaña"
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    is_active = models.BooleanField(
+        default=True,
+        help_text="Si el enlace está activo para recibir nuevos usuarios"
+    )
+    expires_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Fecha de expiración del enlace (opcional)"
+    )
+
+    # Campos para analytics
+    total_clicks = models.PositiveIntegerField(
+        default=0,
+        help_text="Total de clics registrados (si se implementa tracking de clics)"
+    )
+    total_registrations = models.PositiveIntegerField(
+        default=0,
+        help_text="Total de usuarios registrados desde este enlace"
+    )
+
+    class Meta:
+        verbose_name = "Enlace de Seguimiento"
+        verbose_name_plural = "Enlaces de Seguimiento"
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"{self.name} ({self.code})"
+
+    @property
+    def is_expired(self):
+        """Verifica si el enlace ha expirado"""
+        if not self.expires_at:
+            return False
+        return timezone.now() > self.expires_at
+
+    @property
+    def conversion_rate(self):
+        """Calcula la tasa de conversión (registros/clics)"""
+        if self.total_clicks == 0:
+            return 0
+        return (self.total_registrations / self.total_clicks) * 100
+
+    @classmethod
+    def generate_code(cls, base_name=None):
+        """Genera un código único para el enlace"""
+        if base_name:
+            # Limpiar el nombre base
+            clean_name = base_name.lower().replace(' ', '_').replace('-', '_')
+            # Limitar a caracteres alfanuméricos y guiones bajos
+            clean_name = ''.join(
+                c for c in clean_name if c.isalnum() or c == '_')
+            # Agregar sufijo aleatorio para garantizar unicidad
+            suffix = secrets.token_hex(4)
+            code = f"{clean_name}_{suffix}"
+        else:
+            # Código completamente aleatorio
+            code = f"ref_{secrets.token_hex(6)}"
+
+        # Verificar que no exista
+        while cls.objects.filter(code=code).exists():
+            suffix = secrets.token_hex(4)
+            if base_name:
+                clean_name = base_name.lower().replace(' ', '_').replace('-', '_')
+                clean_name = ''.join(
+                    c for c in clean_name if c.isalnum() or c == '_')
+                code = f"{clean_name}_{suffix}"
+            else:
+                code = f"ref_{secrets.token_hex(6)}"
+
+        return code
+
+    def increment_registrations(self):
+        """Incrementa el contador de registros"""
+        self.total_registrations += 1
+        self.save(update_fields=['total_registrations'])
+
+    def get_whatsapp_link(self, bot_phone_number):
+        """
+        Genera el enlace de WhatsApp del bot de IA con el código de referido embebido
+
+        Args:
+            bot_phone_number: Número de WhatsApp del bot de IA (siempre el mismo bot, pero configurable)
+
+        Returns:
+            str: URL de WhatsApp que dirige al bot con el código de referido como mensaje predefinido
+        """
+        # Normalizar número de teléfono del bot (remover espacios, guiones, paréntesis, etc.)
+        clean_phone = ''.join(filter(str.isdigit, bot_phone_number))
+
+        # Si el número está vacío, usar número por defecto de Colombia
+        if not clean_phone:
+            clean_phone = WHATSAPP_BOT_NUMBER  # Número de ejemplo del bot
+
+        # Si el número no tiene código de país, agregar Colombia por defecto
+        elif len(clean_phone) == 10:
+            clean_phone = f"57{clean_phone}"
+        # Si ya tiene código de país (11+ dígitos), usar tal como está
+
+        # Mensaje predefinido con el código de la empresa
+        message = f"Hola, vengo de {self.code.upper()}"
+        return f"https://wa.me/{clean_phone}?text={message.replace(' ', '%20')}"
 
 
 class SubscriptionPlan(models.Model):
@@ -138,6 +262,16 @@ class User(models.Model):
         help_text="Zona horaria del usuario (ej: America/Bogota, America/New_York)")
     # Campo para almacenar embeddings (opcional)
     embedding = VectorField(dimensions=1536, null=True)
+
+    # Tracking de origen
+    source_tracking_link = models.ForeignKey(
+        TrackingLink,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='users',
+        help_text="Enlace de seguimiento de origen del usuario"
+    )
 
     # Plan de suscripción
     subscription_plan = models.ForeignKey(

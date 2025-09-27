@@ -17,7 +17,7 @@ from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated, AllowAny
 from rest_framework_simplejwt.tokens import RefreshToken
-from .models import User, SubscriptionPlan, Subscription, Organization, OrganizationMembership, OrganizationInvitation, TelegramVerification
+from .models import User, SubscriptionPlan, Subscription, Organization, OrganizationMembership, OrganizationInvitation, TelegramVerification, TrackingLink
 from .serializers import (
     UserSerializer,
     SubscriptionPlanSerializer,
@@ -26,7 +26,10 @@ from .serializers import (
     OrganizationDetailSerializer,
     OrganizationCreateSerializer,
     OrganizationMembershipSerializer,
-    OrganizationInvitationSerializer
+    OrganizationInvitationSerializer,
+    TrackingLinkSerializer,
+    TrackingLinkCreateSerializer,
+    TrackingLinkStatsSerializer
 )
 
 # Importar información de monedas
@@ -651,3 +654,117 @@ def verify_code(request):
             {"error": "Código inválido"},
             status=status.HTTP_400_BAD_REQUEST
         )
+
+
+class TrackingLinkViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet para gestionar enlaces de seguimiento de empresas
+    """
+    queryset = TrackingLink.objects.all()
+    # Solo usuarios autenticados pueden gestionar enlaces
+    permission_classes = [IsAuthenticated]
+
+    def get_serializer_class(self):
+        """Usar diferentes serializers según la acción"""
+        if self.action == 'create':
+            return TrackingLinkCreateSerializer
+        elif self.action == 'stats':
+            return TrackingLinkStatsSerializer
+        return TrackingLinkSerializer
+
+    def get_queryset(self):
+        """Filtrar enlaces activos por defecto"""
+        queryset = TrackingLink.objects.all()
+
+        # Filtros opcionales
+        is_active = self.request.query_params.get('is_active', None)
+        if is_active is not None:
+            queryset = queryset.filter(is_active=is_active.lower() == 'true')
+
+        # Filtrar por código
+        code = self.request.query_params.get('code', None)
+        if code:
+            queryset = queryset.filter(code__icontains=code)
+
+        # Filtrar por nombre
+        name = self.request.query_params.get('name', None)
+        if name:
+            queryset = queryset.filter(name__icontains=name)
+
+        return queryset.order_by('-created_at')
+
+    @action(detail=True, methods=['get'])
+    def stats(self, request, pk=None):
+        """
+        Obtiene estadísticas detalladas de un enlace específico
+        """
+        tracking_link = self.get_object()
+        serializer = TrackingLinkStatsSerializer(tracking_link)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'])
+    def toggle_active(self, request, pk=None):
+        """
+        Activa o desactiva un enlace de seguimiento
+        """
+        tracking_link = self.get_object()
+        tracking_link.is_active = not tracking_link.is_active
+        tracking_link.save()
+
+        serializer = TrackingLinkSerializer(tracking_link)
+        return Response({
+            'message': f'Enlace {"activado" if tracking_link.is_active else "desactivado"} correctamente',
+            'tracking_link': serializer.data
+        })
+
+    @action(detail=False, methods=['get'])
+    def summary(self, request):
+        """
+        Obtiene un resumen general de todos los enlaces
+        """
+        total_links = TrackingLink.objects.count()
+        active_links = TrackingLink.objects.filter(is_active=True).count()
+        total_registrations = sum(
+            link.total_registrations for link in TrackingLink.objects.all())
+
+        # Top 5 enlaces con más registros
+        top_links = TrackingLink.objects.order_by('-total_registrations')[:5]
+        top_links_data = TrackingLinkSerializer(top_links, many=True).data
+
+        return Response({
+            'summary': {
+                'total_links': total_links,
+                'active_links': active_links,
+                'inactive_links': total_links - active_links,
+                'total_registrations': total_registrations
+            },
+            'top_performing_links': top_links_data
+        })
+
+    @action(detail=True, methods=['get'])
+    def generate_links(self, request, pk=None):
+        """
+        Genera enlaces listos para usar en diferentes plataformas
+        """
+        tracking_link = self.get_object()
+
+        # Obtener número del bot de WhatsApp desde configuración o usar uno por defecto
+        bot_whatsapp_number = getattr(
+            settings, 'WHATSAPP_BOT_NUMBER', '573001234567')
+
+        links = {
+            'whatsapp': tracking_link.get_whatsapp_link(bot_whatsapp_number),
+            # Actualizar con tu bot de Telegram
+            'telegram': f"https://t.me/tu_bot?start={tracking_link.code}",
+            'direct_code': tracking_link.code
+        }
+
+        return Response({
+            'tracking_link': TrackingLinkSerializer(tracking_link).data,
+            'generated_links': links,
+            'instructions': {
+                'whatsapp': 'Comparte este enlace para que los usuarios lleguen directamente a WhatsApp con el código',
+                'telegram': 'Comparte este enlace para que los usuarios lleguen directamente a Telegram con el código',
+                'direct_code': 'Los usuarios pueden usar este código manualmente durante el registro'
+            }
+        })

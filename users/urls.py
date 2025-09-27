@@ -6,6 +6,7 @@ from .views import (
     SubscriptionViewSet,
     OrganizationViewSet,
     OrganizationInvitationViewSet,
+    TrackingLinkViewSet,
     telegram_auth_widget,
     request_verification_code,
     verify_code
@@ -17,6 +18,7 @@ router.register(r'subscription-plans', SubscriptionPlanViewSet)
 router.register(r'subscriptions', SubscriptionViewSet)
 router.register(r'organizations', OrganizationViewSet)
 router.register(r'organization-invitations', OrganizationInvitationViewSet)
+router.register(r'tracking-links', TrackingLinkViewSet)
 
 urlpatterns = router.urls + [
     # URLs para autenticación Telegram

@@ -25,8 +25,9 @@ logger = logging.getLogger(__name__)
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
-
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+WHATSAPP_BOT_NUMBER = os.getenv("WHATSAPP_BOT_NUMBER")
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-tu+u#i1h(6eq-m5l638yf-2as0w@wvu)4+m-ug364dno^s(bn3'
