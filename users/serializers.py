@@ -1,4 +1,5 @@
 from rest_framework import serializers
+from django.conf import settings
 from .models import User, SubscriptionPlan, Subscription, Organization, OrganizationMembership, OrganizationInvitation, TrackingLink
 from cashbotapp.settings import WHATSAPP_BOT_NUMBER
 
@@ -106,13 +107,14 @@ class TrackingLinkSerializer(serializers.ModelSerializer):
     conversion_rate = serializers.ReadOnlyField()
     is_expired = serializers.ReadOnlyField()
     whatsapp_link = serializers.SerializerMethodField()
+    telegram_link = serializers.SerializerMethodField()
 
     class Meta:
         model = TrackingLink
         fields = [
             'id', 'code', 'name', 'description', 'is_active', 'expires_at',
             'total_clicks', 'total_registrations', 'conversion_rate',
-            'is_expired', 'whatsapp_link', 'created_at', 'updated_at'
+            'is_expired', 'whatsapp_link', 'telegram_link', 'created_at', 'updated_at'
         ]
         read_only_fields = (
             'total_clicks', 'total_registrations', 'created_at', 'updated_at')
@@ -122,6 +124,12 @@ class TrackingLinkSerializer(serializers.ModelSerializer):
         # Número del bot de IA - en producción obtenerlo de settings
         bot_phone_number = WHATSAPP_BOT_NUMBER
         return obj.get_whatsapp_link(bot_phone_number)
+
+    def get_telegram_link(self, obj):
+        """Genera el enlace de Telegram del bot"""
+        # Nombre de usuario del bot de Telegram - en producción obtenerlo de settings
+        bot_username = getattr(settings, 'TELEGRAM_BOT_USERNAME', 'TresquBot')
+        return obj.get_telegram_link(bot_username)
 
 
 class TrackingLinkCreateSerializer(serializers.ModelSerializer):

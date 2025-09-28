@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.urls import reverse
 from django.utils.safestring import mark_safe
+from django.conf import settings
 from .models import (
     User, SubscriptionPlan, Subscription, Organization,
     OrganizationMembership, OrganizationInvitation,
@@ -63,20 +64,30 @@ class TrackingLinkAdmin(admin.ModelAdmin):
     is_expired_display.short_description = "Estado"
 
     def whatsapp_link_display(self, obj):
-        """Muestra el enlace de WhatsApp generado"""
+        """Muestra los enlaces de WhatsApp y Telegram generados"""
         if obj.pk:  # Solo si el objeto ya existe
-            # Número del bot de IA (deberás cambiarlo por el número real de tu bot)
-            # Cambia por el número real de tu bot de WhatsApp
+            # Enlace de WhatsApp
             bot_phone_number = WHATSAPP_BOT_NUMBER
-            link = obj.get_whatsapp_link(bot_phone_number)
+            whatsapp_link = obj.get_whatsapp_link(bot_phone_number)
+
+            # Enlace de Telegram
+            bot_username = getattr(
+                settings, 'TELEGRAM_BOT_USERNAME', 'TresquBot')
+            telegram_link = obj.get_telegram_link(bot_username)
+
             return format_html(
                 '<div style="margin: 10px 0;">'
-                '<strong>Enlace WhatsApp del Bot:</strong><br>'
+                '<strong>📱 WhatsApp:</strong><br>'
                 '<a href="{}" target="_blank" style="color: #25D366;">{}</a><br>'
-                '<small style="color: #666;">Clic para probar el enlace</small><br>'
-                '<small style="color: #999;">Dirige al bot con código: {}</small>'
+                '<small style="color: #666;">Mensaje predefinido con código</small><br><br>'
+                '<strong>📱 Telegram:</strong><br>'
+                '<a href="{}" target="_blank" style="color: #0088cc;">{}</a><br>'
+                '<small style="color: #666;">Deep link con parámetro /start</small><br><br>'
+                '<small style="color: #999;">Código de referido: <strong>{}</strong></small>'
                 '</div>',
-                link, link, obj.code.upper()
+                whatsapp_link, whatsapp_link,
+                telegram_link, telegram_link,
+                obj.code.upper()
             )
         return "Guarda primero para generar enlaces"
     whatsapp_link_display.short_description = "Enlaces Generados"

@@ -225,11 +225,53 @@ def get_whatsapp_link(self, bot_phone_number):
 
 3. **Usuario envía mensaje**: "Hola, vengo de BANCO_XYZ_Q1_2024"
 
-4. **Bot detecta código**: Durante el proceso de registro (Paso 2 - próximamente)
+4. **Bot detecta código**: Durante el proceso de registro ✅ **COMPLETADO**
 
 5. **Usuario se asocia**: Se vincula automáticamente con el `TrackingLink`
 
 6. **Contador se incrementa**: `total_registrations` aumenta automáticamente
+
+## 📱 Integración con Telegram
+
+### Flujo Completo
+
+1. **Empresa recibe enlace**:
+
+   ```
+   https://t.me/TresquBot?start=BANCO_XYZ_Q1_2024
+   ```
+
+2. **Usuario hace clic**: Se abre Telegram con el bot y el código como parámetro
+
+3. **Bot detecta código**: Automáticamente desde el comando `/start BANCO_XYZ_Q1_2024`
+
+4. **Usuario se registra**: Usa `/registrar` o comparte su contacto
+
+5. **Usuario se asocia**: Se vincula automáticamente con el `TrackingLink`
+
+6. **Contador se incrementa**: `total_registrations` aumenta automáticamente
+
+### Métodos de Detección en Telegram
+
+El bot de Telegram detecta códigos de referido en múltiples formas:
+
+1. **Parámetro de /start**: `/start EMPRESA_ABC_123`
+2. **Mensaje de texto**: "Hola, vengo de EMPRESA_ABC_123"
+3. **Comando /registrar**: "/registrar vengo de EMPRESA_ABC_123"
+
+### Generación de Enlaces para Telegram
+
+```python
+# En el modelo TrackingLink
+def get_telegram_link(self, bot_username="TresquBot"):
+    """
+    Genera enlace de Telegram con deep linking
+
+    Returns:
+        str: https://t.me/TresquBot?start=CODIGO
+    """
+    return f"https://t.me/{bot_username}?start={self.code}"
+```
 
 ## 🛠️ API Endpoints Completos
 

@@ -6,11 +6,12 @@ import time
 import tempfile
 import os
 import asyncio
+import re
 from django.db import transaction, connections, connection, InterfaceError
 import pytz
 
 from django.conf import settings
-from users.models import User, Chat, Message
+from users.models import User, Chat, Message, TrackingLink
 from .services import process_message
 from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name
 
@@ -170,17 +171,26 @@ def get_user_by_phone_number(phone_number):
     return User.objects.filter(phone_number=normalized_phone).first()
 
 
-def create_user(external_id, platform, first_name, username, phone_number=None, default_currency='USD'):
+def create_user(external_id, platform, first_name, username, phone_number=None, default_currency='USD', source_tracking_link=None):
     # Normalizar el número de teléfono (eliminar el signo + si existe)
     normalized_phone = normalize_phone_number(phone_number)
-    return User.objects.create(
+    user = User.objects.create(
         external_id=external_id,
         platform=platform,
         first_name=first_name or "",
         username=username or "",
         phone_number=normalized_phone,
-        default_currency=default_currency
+        default_currency=default_currency,
+        source_tracking_link=source_tracking_link
     )
+
+    # Si hay un tracking link, incrementar el contador de registros
+    if source_tracking_link:
+        source_tracking_link.increment_registrations()
+        logger.info(
+            f"Usuario {user.id} asociado con TrackingLink: {source_tracking_link.name} ({source_tracking_link.code})")
+
+    return user
 
 
 def update_chat_user(chat, user):
@@ -298,6 +308,109 @@ def update_user_timezone(user, timezone_str):
 update_user_timezone_async = sync_to_async(update_user_timezone)
 
 
+def extract_referral_code(message_text):
+    """
+    Extrae el código de referido de un mensaje de Telegram
+
+    Busca patrones como:
+    - "Hola, vengo de EMPRESA_ABC_123"
+    - "EMPRESA_ABC_123"
+    - "Vengo de empresa_abc_123"
+    - También maneja parámetros de /start como "/start EMPRESA_ABC_123"
+
+    Returns:
+        str: Código de referido encontrado o None
+    """
+    if not message_text:
+        logger.info("extract_referral_code: mensaje vacío")
+        return None
+
+    logger.info(f"extract_referral_code: analizando mensaje: '{message_text}'")
+
+    # Patrones para detectar códigos de referido (case-insensitive)
+    patterns = [
+        r'/start\s+([A-Za-z0-9_]+)',       # "/start EMPRESA_ABC_123"
+        r'vengo\s+de\s+([A-Za-z0-9_]+)',  # "vengo de EMPRESA_ABC_123"
+        r'desde\s+([A-Za-z0-9_]+)',       # "desde EMPRESA_ABC_123"
+        r'^([A-Za-z0-9_]{5,})$',          # Solo el código "EMPRESA_ABC_123"
+        r'código\s+([A-Za-z0-9_]+)',      # "código EMPRESA_ABC_123"
+        r'referido\s+([A-Za-z0-9_]+)',    # "referido EMPRESA_ABC_123"
+    ]
+
+    # Normalizar el texto (limpiar espacios extra)
+    normalized_text = message_text.strip()
+    logger.info(
+        f"extract_referral_code: texto normalizado: '{normalized_text}'")
+
+    for i, pattern in enumerate(patterns):
+        logger.info(f"extract_referral_code: probando patrón {i+1}: {pattern}")
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
+        if match:
+            code = match.group(1)
+            logger.info(
+                f"✅ Código de referido detectado: {code} (patrón {i+1})")
+            return code
+        else:
+            logger.info(f"extract_referral_code: patrón {i+1} no coincide")
+
+    logger.info("extract_referral_code: ningún patrón coincidió")
+    return None
+
+
+def find_tracking_link(referral_code):
+    """
+    Busca un TrackingLink activo por código
+
+    Args:
+        referral_code (str): Código de referido a buscar
+
+    Returns:
+        TrackingLink: Enlace encontrado o None
+    """
+    if not referral_code:
+        logger.info("find_tracking_link: código vacío")
+        return None
+
+    logger.info(f"find_tracking_link: buscando código: '{referral_code}'")
+
+    try:
+        # Primero verificar si existe algún TrackingLink con ese código (sin filtros)
+        all_links = TrackingLink.objects.filter(code__iexact=referral_code)
+        logger.info(
+            f"find_tracking_link: encontrados {all_links.count()} enlaces con código '{referral_code}'")
+
+        for link in all_links:
+            logger.info(
+                f"find_tracking_link: enlace encontrado - ID: {link.id}, Código: '{link.code}', Activo: {link.is_active}, Expirado: {link.is_expired}")
+
+        tracking_link = TrackingLink.objects.get(
+            code__iexact=referral_code,  # Búsqueda case-insensitive
+            is_active=True
+        )
+
+        # Verificar si no ha expirado
+        if tracking_link.is_expired:
+            logger.warning(f"❌ Código de referido expirado: {referral_code}")
+            return None
+
+        logger.info(
+            f"✅ TrackingLink encontrado: {tracking_link.name} ({tracking_link.code})")
+        return tracking_link
+
+    except TrackingLink.DoesNotExist:
+        logger.warning(
+            f"❌ Código de referido no encontrado en DB o no activo: {referral_code}")
+        return None
+    except Exception as e:
+        logger.error(f"Error buscando TrackingLink: {e}")
+        return None
+
+
+# Funciones asíncronas para referidos
+extract_referral_code_async = sync_to_async(extract_referral_code)
+find_tracking_link_async = sync_to_async(find_tracking_link)
+
+
 # Zonas horarias principales para América Latina y algunas ciudades importantes
 COMMON_TIMEZONES = [
     ('America/Bogota', 'Colombia, Ecuador, Perú, Panamá (UTC-5)'),
@@ -405,6 +518,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
     chat_id = update.effective_chat.id
 
+    # Detectar código de referido en el comando /start
+    referral_code = None
+    tracking_link = None
+
+    if context.args and len(context.args) > 0:
+        # El código viene como parámetro: /start EMPRESA_ABC_123
+        potential_code = context.args[0]
+        logger.info(f"Parámetro de /start detectado: {potential_code}")
+
+        # Verificar si es un código válido
+        tracking_link = await find_tracking_link_async(potential_code)
+        if tracking_link:
+            referral_code = potential_code
+            logger.info(
+                f"Código de referido válido en /start: {referral_code}")
+
+            # Guardar en el contexto para usar durante el registro
+            context.user_data['referral_code'] = referral_code
+            context.user_data['tracking_link_id'] = tracking_link.id
+
     # Guardar el chat en la base de datos si no existe
     chat, created = await get_or_create_chat_async(chat_id)
 
@@ -438,14 +571,25 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"- \"Pagué la cuenta de luz, 75k\""
             )
         else:
-            welcome_message = (
-                f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
-                f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
-                f"Para comenzar, necesitas registrarte con tu número de teléfono. "
-                f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
-                f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
-                f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
-            )
+            # Personalizar mensaje si viene de un enlace de referido
+            if tracking_link:
+                welcome_message = (
+                    f"¡Hola {user.first_name}! Bienvenido a Tresqu desde {tracking_link.name}. "
+                    f"Soy tu asistente de finanzas personales y puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
+                    f"Para comenzar, necesitas registrarte con tu número de teléfono. "
+                    f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
+                    f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
+                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
+                )
+            else:
+                welcome_message = (
+                    f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
+                    f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
+                    f"Para comenzar, necesitas registrarte con tu número de teléfono. "
+                    f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
+                    f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
+                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
+                )
 
             # Crear botón para solicitar número de teléfono
             contact_keyboard = KeyboardButton(
@@ -505,6 +649,18 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
 
     logger.info(
         f"Iniciando registro para usuario: {user.id} ({user.username or user.first_name})")
+
+    # Detectar código de referido en el mensaje de registro
+    if update.message and update.message.text:
+        referral_code = await extract_referral_code_async(update.message.text)
+        if referral_code:
+            tracking_link = await find_tracking_link_async(referral_code)
+            if tracking_link:
+                logger.info(
+                    f"Código de referido detectado en registro: {referral_code}")
+                # Guardar en el contexto para usar durante el registro
+                context.user_data['referral_code'] = referral_code
+                context.user_data['tracking_link_id'] = tracking_link.id
 
     # Verificar si ya existe un chat
     chat, _ = await get_or_create_chat_async(chat_id)
@@ -853,13 +1009,28 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
         # Si no existe, crear un nuevo usuario
         if not db_user:
             logger.info("Creando nuevo usuario")
+
+            # Obtener tracking link del contexto si existe
+            tracking_link = None
+            if context.user_data.get('tracking_link_id'):
+                try:
+                    tracking_link = await sync_to_async(TrackingLink.objects.get)(
+                        id=context.user_data['tracking_link_id']
+                    )
+                    logger.info(
+                        f"Usando TrackingLink del contexto: {tracking_link.name} ({tracking_link.code})")
+                except TrackingLink.DoesNotExist:
+                    logger.warning(
+                        f"TrackingLink con ID {context.user_data['tracking_link_id']} no encontrado")
+
             db_user = await create_user_async(
                 external_id=str(user.id),
                 platform="telegram",
                 first_name=user.first_name,
                 username=user.username,
                 phone_number=phone_number,
-                default_currency=currency_code
+                default_currency=currency_code,
+                source_tracking_link=tracking_link
             )
             action = "creada"
         else:
@@ -872,17 +1043,30 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
         await update_chat_user_async(chat, db_user)
         logger.info("Usuario asociado al chat")
 
-        await update.message.reply_text(
-            f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
+        # Personalizar mensaje si viene de un enlace de referido
+        success_message = f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
+
+        if tracking_link and action == "creada":
+            success_message += f"¡Gracias por llegar desde {tracking_link.name}! 🎉\n\n"
+
+        success_message += (
             f"Moneda predeterminada: {currency_code} ({get_currency_name(currency_code)})\n\n"
             f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
             f"- \"Gasté 50k en comida\"\n"
             f"- \"Compré café por 35000\"\n"
             f"- \"Pagué la cuenta de luz, 75k\"\n\n"
-            f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda"
+            f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda\n"
             f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos."
         )
+
+        await update.message.reply_text(success_message)
         logger.info("Mensaje de confirmación enviado")
+
+        # Limpiar datos de referido del contexto después del registro exitoso
+        if 'referral_code' in context.user_data:
+            del context.user_data['referral_code']
+        if 'tracking_link_id' in context.user_data:
+            del context.user_data['tracking_link_id']
 
         # Preguntar por la zona horaria si no está configurada
         if not hasattr(db_user, 'timezone') or not db_user.timezone:

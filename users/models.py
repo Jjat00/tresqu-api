@@ -150,6 +150,26 @@ class TrackingLink(models.Model):
         message = f"Hola, vengo de {self.code.upper()}"
         return f"https://wa.me/{clean_phone}?text={message.replace(' ', '%20')}"
 
+    def get_telegram_link(self, bot_username="TresquBot"):
+        """
+        Genera el enlace de Telegram del bot de IA con el código de referido como parámetro
+
+        Args:
+            bot_username: Nombre de usuario del bot de Telegram (sin @)
+
+        Returns:
+            str: URL de Telegram que dirige al bot con el código de referido como parámetro de /start
+        """
+        # Limpiar el nombre de usuario del bot (remover @ si existe)
+        clean_username = bot_username.lstrip('@')
+
+        # Si está vacío, usar nombre por defecto
+        if not clean_username:
+            clean_username = "TresquBot"
+
+        # Generar enlace con deep linking usando el código como parámetro
+        return f"https://t.me/{clean_username}?start={self.code}"
+
 
 class SubscriptionPlan(models.Model):
     PLAN_CHOICES = [

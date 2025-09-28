@@ -748,14 +748,15 @@ class TrackingLinkViewSet(viewsets.ModelViewSet):
         """
         tracking_link = self.get_object()
 
-        # Obtener número del bot de WhatsApp desde configuración o usar uno por defecto
+        # Obtener configuración de bots desde settings
         bot_whatsapp_number = getattr(
             settings, 'WHATSAPP_BOT_NUMBER', '573001234567')
+        bot_telegram_username = getattr(
+            settings, 'TELEGRAM_BOT_USERNAME', 'TresquBot')
 
         links = {
             'whatsapp': tracking_link.get_whatsapp_link(bot_whatsapp_number),
-            # Actualizar con tu bot de Telegram
-            'telegram': f"https://t.me/tu_bot?start={tracking_link.code}",
+            'telegram': tracking_link.get_telegram_link(bot_telegram_username),
             'direct_code': tracking_link.code
         }
 

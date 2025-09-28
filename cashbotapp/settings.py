@@ -28,6 +28,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 WHATSAPP_BOT_NUMBER = os.getenv("WHATSAPP_BOT_NUMBER")
+TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME")
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = 'django-insecure-tu+u#i1h(6eq-m5l638yf-2as0w@wvu)4+m-ug364dno^s(bn3'
