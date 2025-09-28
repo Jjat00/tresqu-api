@@ -277,11 +277,12 @@ curl -X POST http://localhost:8000/api/tracking-links/1/toggle_active/ \
 
 ## 🔄 Próximos Pasos
 
-### Paso 2: Integración con Registro de Usuarios
+### ✅ Paso 2: Integración con Registro de Usuarios (COMPLETADO)
 
-- Modificar el proceso de registro en WhatsApp para capturar códigos automáticamente
-- Asociar usuarios nuevos con sus enlaces de origen
-- Incrementar contadores automáticamente
+- ✅ Modificar el proceso de registro en WhatsApp para capturar códigos automáticamente
+- ✅ Asociar usuarios nuevos con sus enlaces de origen
+- ✅ Incrementar contadores automáticamente
+- ✅ Personalizar mensajes de bienvenida según el origen
 
 ### Mejoras Futuras
 

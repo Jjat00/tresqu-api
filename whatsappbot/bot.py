@@ -7,9 +7,10 @@ from django.db import transaction, connections, connection, InterfaceError
 from django.conf import settings
 from asgiref.sync import sync_to_async
 
-from users.models import User, Chat, Message
+from users.models import User, Chat, Message, TrackingLink
 from .services import process_message
 from .utils import normalize_phone_number
+import re
 
 # Configuración de logging
 logging.basicConfig(
@@ -118,7 +119,7 @@ def get_user_by_phone_number(phone_number):
     return User.objects.filter(phone_number=normalized_phone).first()
 
 
-def create_user(external_id, platform, first_name, username=None, phone_number=None, default_currency='USD'):
+def create_user(external_id, platform, first_name, username=None, phone_number=None, default_currency='USD', source_tracking_link=None):
     """Crea un nuevo usuario"""
     # Normalizar el número de teléfono (eliminar el signo + si existe)
     normalized_phone = normalize_phone_number(phone_number)
@@ -128,7 +129,8 @@ def create_user(external_id, platform, first_name, username=None, phone_number=N
         first_name=first_name or "",
         username=username or "",
         phone_number=normalized_phone,
-        default_currency=default_currency
+        default_currency=default_currency,
+        source_tracking_link=source_tracking_link
     )
 
 
@@ -251,6 +253,127 @@ def update_user_timezone(user, timezone_str):
     user.timezone = timezone_str
     user.save()
     return user
+
+
+def extract_referral_code(message_text):
+    """
+    Extrae el código de referido de un mensaje de WhatsApp
+
+    Busca patrones como:
+    - "Hola, vengo de EMPRESA_ABC_123"
+    - "EMPRESA_ABC_123"
+    - "Vengo de empresa_abc_123"
+
+    Returns:
+        str: Código de referido encontrado o None
+    """
+    if not message_text:
+        logger.info("extract_referral_code: mensaje vacío")
+        return None
+
+    logger.info(f"extract_referral_code: analizando mensaje: '{message_text}'")
+
+    # Patrones para detectar códigos de referido (case-insensitive)
+    patterns = [
+        r'vengo\s+de\s+([A-Za-z0-9_]+)',  # "vengo de EMPRESA_ABC_123"
+        r'desde\s+([A-Za-z0-9_]+)',       # "desde EMPRESA_ABC_123"
+        r'^([A-Za-z0-9_]{5,})$',          # Solo el código "EMPRESA_ABC_123"
+        r'código\s+([A-Za-z0-9_]+)',      # "código EMPRESA_ABC_123"
+        r'referido\s+([A-Za-z0-9_]+)',    # "referido EMPRESA_ABC_123"
+    ]
+
+    # Normalizar el texto (limpiar espacios extra)
+    normalized_text = message_text.strip()
+    logger.info(
+        f"extract_referral_code: texto normalizado: '{normalized_text}'")
+
+    for i, pattern in enumerate(patterns):
+        logger.info(f"extract_referral_code: probando patrón {i+1}: {pattern}")
+        match = re.search(pattern, normalized_text, re.IGNORECASE)
+        if match:
+            code = match.group(1)
+            logger.info(
+                f"✅ Código de referido detectado: {code} (patrón {i+1})")
+            return code
+        else:
+            logger.info(f"extract_referral_code: patrón {i+1} no coincide")
+
+    logger.info("extract_referral_code: ningún patrón coincidió")
+    return None
+
+
+def find_tracking_link(referral_code):
+    """
+    Busca un TrackingLink activo por código
+
+    Args:
+        referral_code (str): Código de referido a buscar
+
+    Returns:
+        TrackingLink: Enlace encontrado o None
+    """
+    if not referral_code:
+        logger.info("find_tracking_link: código vacío")
+        return None
+
+    logger.info(f"find_tracking_link: buscando código: '{referral_code}'")
+
+    try:
+        # Primero verificar si existe algún TrackingLink con ese código (sin filtros)
+        all_links = TrackingLink.objects.filter(code__iexact=referral_code)
+        logger.info(
+            f"find_tracking_link: encontrados {all_links.count()} enlaces con código '{referral_code}'")
+
+        for link in all_links:
+            logger.info(
+                f"find_tracking_link: enlace encontrado - ID: {link.id}, Código: '{link.code}', Activo: {link.is_active}, Expirado: {link.is_expired}")
+
+        tracking_link = TrackingLink.objects.get(
+            code__iexact=referral_code,  # Búsqueda case-insensitive
+            is_active=True
+        )
+
+        # Verificar si no ha expirado
+        if tracking_link.is_expired:
+            logger.warning(f"❌ Código de referido expirado: {referral_code}")
+            return None
+
+        logger.info(
+            f"✅ TrackingLink encontrado: {tracking_link.name} ({tracking_link.code})")
+        return tracking_link
+
+    except TrackingLink.DoesNotExist:
+        logger.warning(
+            f"❌ Código de referido no encontrado en DB o no activo: {referral_code}")
+        return None
+    except Exception as e:
+        logger.error(f"Error buscando TrackingLink: {e}")
+        return None
+
+
+def associate_user_with_tracking_link(user, tracking_link):
+    """
+    Asocia un usuario con un enlace de seguimiento e incrementa el contador
+
+    Args:
+        user (User): Usuario a asociar
+        tracking_link (TrackingLink): Enlace de seguimiento
+    """
+    try:
+        # Asociar el usuario con el enlace
+        user.source_tracking_link = tracking_link
+        user.save()
+
+        # Incrementar el contador de registros
+        tracking_link.increment_registrations()
+
+        logger.info(
+            f"Usuario {user.id} asociado con TrackingLink {tracking_link.name}")
+        logger.info(
+            f"Total registros para {tracking_link.code}: {tracking_link.total_registrations}")
+
+    except Exception as e:
+        logger.error(f"Error asociando usuario con TrackingLink: {e}")
 
 
 async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name=None, server_url=None, api_key=None, sender_name=None, message_type="text", media_url=None):
@@ -453,14 +576,29 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 await sync_to_async(update_chat_user)(chat, user)
                 logger.info(
                     f"Usuario existente encontrado por número y asociado al chat: {user}")
+                # NOTA: Los usuarios existentes siguen el flujo normal
+                # Los códigos de referido SOLO funcionan para usuarios nuevos durante el registro
             # Si no hay usuario y no hay registro en curso, iniciar proceso de registro
             elif not registro_activo:
+                # NUEVO: Detectar código de referido en el primer mensaje
+                referral_code = extract_referral_code(message_text)
+                tracking_link = None
+
+                if referral_code:
+                    tracking_link = await sync_to_async(find_tracking_link)(referral_code)
+                    if tracking_link:
+                        logger.info(
+                            f"Usuario {sender_number} llegó desde: {tracking_link.name}")
+
                 # Iniciar proceso de registro
                 whatsapp_user_states[sender_number] = {
                     "estado": ESPERANDO_MONEDA,
                     "datos": {
                         "phone_number": sender_number,
-                        "name": sender_name  # Guardar el nombre si está disponible
+                        "name": sender_name,  # Guardar el nombre si está disponible
+                        "referral_code": referral_code,  # NUEVO: Guardar código de referido
+                        # NUEVO: Guardar ID del enlace
+                        "tracking_link_id": tracking_link.id if tracking_link else None
                     }
                 }
 
@@ -468,8 +606,13 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 monedas_texto = "\n".join(
                     [f"- {c['flag']} {c['code']} ({c['name']})" for c in COMMON_CURRENCIES])
 
+                # NUEVO: Personalizar mensaje si viene de un enlace de referido
+                welcome_prefix = "¡Hola! Soy Tresqu, tu asistente de finanzas personales."
+                if tracking_link:
+                    welcome_prefix = f"¡Hola! Bienvenido desde {tracking_link.name}. Soy Tresqu, tu asistente de finanzas personales."
+
                 response_text = (
-                    f"¡Hola! Soy Tresqu, tu asistente de finanzas personales. "
+                    f"{welcome_prefix} "
                     f"Para comenzar, necesito un poco de información.\n\n"
                     f"Por favor, indica tu moneda predeterminada respondiendo con el código de 3 letras.\n\n"
                     f"Opciones comunes:\n{monedas_texto}\n\n"
@@ -551,17 +694,36 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     if not name or name.strip() == "":
                         name = f"Usuario WhatsApp {sender_number[-4:]}"
 
-                    # Crear el usuario
+                    # NUEVO: Obtener tracking link si existe
+                    tracking_link = None
+                    tracking_link_id = datos.get("tracking_link_id")
+                    if tracking_link_id:
+                        try:
+                            tracking_link = await sync_to_async(TrackingLink.objects.get)(id=tracking_link_id)
+                        except TrackingLink.DoesNotExist:
+                            logger.warning(
+                                f"TrackingLink con ID {tracking_link_id} no encontrado")
+
+                    # Crear el usuario con tracking link asociado
                     user = await sync_to_async(create_user)(
                         external_id=external_id,
                         platform="WHATSAPP",
                         first_name=name,
                         phone_number=sender_number,
-                        default_currency=currency
+                        default_currency=currency,
+                        source_tracking_link=tracking_link
                     )
 
                     # Actualizar zona horaria
                     user = await sync_to_async(update_user_timezone)(user, timezone_code)
+
+                    # NUEVO: Incrementar contador si hay tracking link
+                    if tracking_link:
+                        await sync_to_async(tracking_link.increment_registrations)()
+                        logger.info(
+                            f"Usuario {user.id} asociado exitosamente con {tracking_link.name}")
+                        logger.info(
+                            f"Total registros para {tracking_link.code}: {tracking_link.total_registrations}")
 
                     # Asociar el usuario con el chat
                     await sync_to_async(update_chat_user)(chat, user)
