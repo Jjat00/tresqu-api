@@ -306,6 +306,9 @@ class User(models.Model):
     subscription_end_date = models.DateTimeField(null=True, blank=True)
     is_yearly_billing = models.BooleanField(default=False)
 
+    # NOTA: Los límites ahora se manejan mensualmente a través del modelo MonthlyUsage
+    # No necesitamos contadores totales, solo mensuales
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -352,6 +355,41 @@ class User(models.Model):
         )
 
         return True
+
+    def get_current_monthly_usage(self):
+        """Obtiene el uso mensual actual del usuario"""
+        return MonthlyUsage.get_current_usage(self)
+
+    def can_add_expense(self):
+        """Verifica si el usuario puede agregar un gasto este mes"""
+        # Asegurar que el usuario tenga un plan básico por defecto
+        self.assign_basic_plan_if_none()
+
+        monthly_usage = self.get_current_monthly_usage()
+        return monthly_usage.can_add_expense()
+
+    def can_add_income(self):
+        """Verifica si el usuario puede agregar un ingreso este mes"""
+        # Asegurar que el usuario tenga un plan básico por defecto
+        self.assign_basic_plan_if_none()
+
+        monthly_usage = self.get_current_monthly_usage()
+        return monthly_usage.can_add_income()
+
+    def get_usage_summary(self):
+        """Obtiene un resumen del uso mensual actual"""
+        monthly_usage = self.get_current_monthly_usage()
+        return monthly_usage.get_usage_summary()
+
+    def assign_basic_plan_if_none(self):
+        """Asigna el plan básico si el usuario no tiene ningún plan"""
+        if not self.subscription_plan:
+            basic_plan = SubscriptionPlan.get_basic_plan()
+            self.subscription_plan = basic_plan
+            self.subscription_active = True
+            self.subscription_start_date = timezone.now()
+            self.subscription_end_date = None  # Plan básico no expira
+            self.save()
 
     def downgrade_to_basic(self):
         """Cambia al usuario al plan básico"""
@@ -632,3 +670,307 @@ class OrganizationInvitation(models.Model):
         self.status = 'REJECTED'
         self.save()
         return True, "Invitación rechazada"
+
+
+# ========================================
+# MODELO PARA USO MENSUAL
+# ========================================
+
+class MonthlyUsage(models.Model):
+    """
+    Modelo para rastrear el uso mensual de cada usuario
+    Se reinicia automáticamente cada mes
+    """
+    user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        related_name='monthly_usage'
+    )
+    year = models.PositiveIntegerField(
+        help_text="Año del período de uso"
+    )
+    month = models.PositiveIntegerField(
+        help_text="Mes del período de uso (1-12)"
+    )
+
+    # Contadores mensuales
+    expenses_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Número de gastos registrados este mes"
+    )
+    incomes_count = models.PositiveIntegerField(
+        default=0,
+        help_text="Número de ingresos registrados este mes"
+    )
+
+    # Metadatos
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('user', 'year', 'month')
+        verbose_name = "Uso Mensual"
+        verbose_name_plural = "Uso Mensual"
+        indexes = [
+            models.Index(fields=['user', 'year', 'month']),
+            models.Index(fields=['year', 'month']),
+        ]
+
+    def __str__(self):
+        return f"{self.user} - {self.year}/{self.month:02d} (G:{self.expenses_count}, I:{self.incomes_count})"
+
+    @classmethod
+    def get_or_create_current(cls, user):
+        """
+        Obtiene o crea el registro de uso para el período actual del usuario
+
+        REGLAS:
+        - Plan BASIC: Siempre mes calendario (1-31)
+        - Plan PREMIUM/BUSINESS: Período de aniversario desde el cambio de plan
+        """
+        period_start, period_end = cls.calculate_user_billing_period(user)
+
+        # Crear clave única basada en el período
+        period_key = f"{period_start.strftime('%Y%m%d')}_{period_end.strftime('%Y%m%d')}"
+
+        # Buscar registro existente para este período
+        existing_usage = cls.objects.filter(
+            user=user,
+            year=period_start.year,
+            month=period_start.month
+        ).first()
+
+        if existing_usage:
+            # Verificar si el período coincide
+            existing_start, existing_end = cls.calculate_period_from_record(
+                existing_usage)
+            if existing_start == period_start and existing_end == period_end:
+                return existing_usage, False
+
+        # Crear nuevo registro para el período actual
+        usage, created = cls.objects.get_or_create(
+            user=user,
+            year=period_start.year,
+            month=period_start.month,
+            defaults={
+                'expenses_count': 0,
+                'incomes_count': 0
+            }
+        )
+        return usage, created
+
+    @classmethod
+    def calculate_user_billing_period(cls, user, reference_date=None):
+        """
+        Calcula el período de facturación para un usuario específico
+        """
+        if reference_date is None:
+            reference_date = timezone.now().date()
+
+        # REGLA 1: Plan BASIC siempre usa mes calendario
+        if not user.subscription_plan or user.subscription_plan.name == 'BASIC':
+            return cls.calculate_calendar_month_period(reference_date)
+
+        # REGLA 2: Plan PREMIUM/BUSINESS usa aniversario mensual
+        if user.subscription_plan.name in ['PREMIUM', 'BUSINESS']:
+            return cls.calculate_anniversary_period(user, reference_date)
+
+        # Fallback: mes calendario
+        return cls.calculate_calendar_month_period(reference_date)
+
+    @classmethod
+    def calculate_calendar_month_period(cls, reference_date):
+        """
+        Calcula período de mes calendario (1 al último día del mes)
+        """
+        from datetime import datetime, timedelta
+
+        year = reference_date.year
+        month = reference_date.month
+
+        period_start = datetime(year, month, 1).date()
+
+        # Calcular último día del mes
+        if month == 12:
+            next_month_first = datetime(year + 1, 1, 1).date()
+        else:
+            next_month_first = datetime(year, month + 1, 1).date()
+
+        period_end = next_month_first - timedelta(days=1)
+
+        return period_start, period_end
+
+    @classmethod
+    def calculate_anniversary_period(cls, user, reference_date):
+        """
+        Calcula período de aniversario mensual desde el cambio de plan
+        """
+        from datetime import datetime, timedelta
+        from dateutil.relativedelta import relativedelta
+
+        subscription_start = user.subscription_start_date
+        if not subscription_start:
+            # Fallback: usar mes calendario si no hay fecha de suscripción
+            return cls.calculate_calendar_month_period(reference_date)
+
+        # Convertir a date si es datetime
+        if hasattr(subscription_start, 'date'):
+            subscription_start = subscription_start.date()
+
+        # Día del mes en que inicia el período de facturación
+        billing_day = subscription_start.day
+
+        # Calcular el período actual
+        current_year = reference_date.year
+        current_month = reference_date.month
+
+        # Intentar crear la fecha de inicio del período actual
+        try:
+            period_start = datetime(
+                current_year, current_month, billing_day).date()
+        except ValueError:
+            # Si el día no existe en el mes actual (ej: 31 en febrero)
+            # Usar el último día del mes
+            if current_month == 12:
+                next_month = datetime(current_year + 1, 1, 1).date()
+            else:
+                next_month = datetime(
+                    current_year, current_month + 1, 1).date()
+            last_day_of_month = (next_month - timedelta(days=1)).day
+            period_start = datetime(current_year, current_month, min(
+                billing_day, last_day_of_month)).date()
+
+        # Si la fecha de referencia es anterior al inicio del período actual,
+        # el período actual es el anterior
+        if reference_date < period_start:
+            period_start = period_start - relativedelta(months=1)
+
+        # Calcular el final del período (un mes después - 1 día)
+        period_end = period_start + relativedelta(months=1) - timedelta(days=1)
+
+        return period_start, period_end
+
+    @classmethod
+    def calculate_period_from_record(cls, usage_record):
+        """
+        Calcula el período basado en un registro existente
+        """
+        # Para registros existentes, asumir mes calendario
+        from datetime import datetime
+        return cls.calculate_calendar_month_period(
+            datetime(usage_record.year, usage_record.month, 15).date()
+        )
+
+    @classmethod
+    def get_current_usage(cls, user):
+        """
+        Obtiene el uso actual del usuario para este mes
+        """
+        usage, _ = cls.get_or_create_current(user)
+        return usage
+
+    def can_add_expense(self):
+        """
+        Verifica si el usuario puede agregar un gasto este mes
+        """
+        if not self.user.subscription_plan:
+            return False, "No tienes un plan asignado"
+
+        # Si el plan tiene registros ilimitados
+        if self.user.subscription_plan.unlimited_records:
+            return True, ""
+
+        # Obtener límites del plan
+        from .plan_limits import get_max_expenses
+        max_expenses = get_max_expenses(self.user.subscription_plan.name)
+
+        if max_expenses is None:  # Ilimitado
+            return True, ""
+
+        if self.expenses_count >= max_expenses:
+            from .plan_limits import get_upgrade_message
+            message = get_upgrade_message(
+                self.user.subscription_plan.name, 'expense')
+            return False, message
+
+        return True, ""
+
+    def can_add_income(self):
+        """
+        Verifica si el usuario puede agregar un ingreso este mes
+        """
+        if not self.user.subscription_plan:
+            return False, "No tienes un plan asignado"
+
+        # Si el plan tiene registros ilimitados
+        if self.user.subscription_plan.unlimited_records:
+            return True, ""
+
+        # Obtener límites del plan
+        from .plan_limits import get_max_incomes
+        max_incomes = get_max_incomes(self.user.subscription_plan.name)
+
+        if max_incomes is None:  # Ilimitado
+            return True, ""
+
+        if self.incomes_count >= max_incomes:
+            from .plan_limits import get_upgrade_message
+            message = get_upgrade_message(
+                self.user.subscription_plan.name, 'income')
+            return False, message
+
+        return True, ""
+
+    def increment_expenses(self):
+        """Incrementa el contador de gastos"""
+        self.expenses_count += 1
+        self.save(update_fields=['expenses_count', 'updated_at'])
+
+    def increment_incomes(self):
+        """Incrementa el contador de ingresos"""
+        self.incomes_count += 1
+        self.save(update_fields=['incomes_count', 'updated_at'])
+
+    def decrement_expenses(self):
+        """Decrementa el contador de gastos"""
+        if self.expenses_count > 0:
+            self.expenses_count -= 1
+            self.save(update_fields=['expenses_count', 'updated_at'])
+
+    def decrement_incomes(self):
+        """Decrementa el contador de ingresos"""
+        if self.incomes_count > 0:
+            self.incomes_count -= 1
+            self.save(update_fields=['incomes_count', 'updated_at'])
+
+    def get_usage_summary(self):
+        """
+        Retorna un resumen del uso del período actual
+        """
+        from .plan_limits import get_plan_limits
+        limits = get_plan_limits(
+            self.user.subscription_plan.name if self.user.subscription_plan else 'BASIC')
+
+        # Calcular el período real del usuario
+        period_start, period_end = self.calculate_user_billing_period(
+            self.user)
+
+        # Determinar tipo de período
+        is_calendar_month = (period_start.day == 1)
+        period_type = "Mes calendario" if is_calendar_month else "Período de aniversario"
+
+        return {
+            'period': f"{period_start.strftime('%Y-%m-%d')} a {period_end.strftime('%Y-%m-%d')}",
+            'period_type': period_type,
+            'days_remaining': max(0, (period_end - timezone.now().date()).days + 1) if period_end >= timezone.now().date() else 0,
+            'expenses': {
+                'used': self.expenses_count,
+                'limit': limits.get('max_expenses'),
+                'remaining': None if limits.get('max_expenses') is None else max(0, limits.get('max_expenses') - self.expenses_count)
+            },
+            'incomes': {
+                'used': self.incomes_count,
+                'limit': limits.get('max_incomes'),
+                'remaining': None if limits.get('max_incomes') is None else max(0, limits.get('max_incomes') - self.incomes_count)
+            }
+        }

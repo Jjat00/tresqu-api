@@ -526,6 +526,11 @@ def create_expense(
     # lookup del usuario sin importar dónde estés llamando
     user = User.objects.get(external_id=user_external_id)
 
+    # Validar límites del plan antes de crear el gasto
+    can_add, message = user.can_add_expense()
+    if not can_add:
+        return f"Error: {message}"
+
     # Verificar si la moneda es válida, de lo contrario usar la moneda por defecto del usuario
     if not currency or not is_valid_currency(currency):
         currency = user.default_currency
@@ -973,6 +978,11 @@ def create_income(
         user = User.objects.filter(external_id=user_external_id).first()
         if not user:
             return f"Error: Usuario no encontrado."
+
+        # Validar límites del plan antes de crear el ingreso
+        can_add, message = user.can_add_income()
+        if not can_add:
+            return f"Error: {message}"
 
         # Por seguridad limitamos los valores aceptados
         if amount <= 0:

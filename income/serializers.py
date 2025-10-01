@@ -47,6 +47,11 @@ class IncomeSerializer(serializers.ModelSerializer):
         if not user:
             raise serializers.ValidationError("Usuario es requerido")
 
+        # Validar límites del plan antes de crear el ingreso
+        can_add, message = user.can_add_income()
+        if not can_add:
+            raise serializers.ValidationError(message)
+
         # Manejar categoría por usuario (nuevo sistema)
         user_category_name = validated_data.pop('user_category_name', None)
         if user_category_name:

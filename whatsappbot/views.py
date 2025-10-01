@@ -364,7 +364,26 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
             settings, 'META_WHATSAPP_PHONE_NUMBER_ID', '')
 
         if not access_token or not phone_number_id:
-            logger.error("Configuración de Meta WhatsApp API incompleta")
+            logger.error(
+                f"Configuración de Meta WhatsApp API incompleta - Access Token: {'✓' if access_token else '✗'}, Phone Number ID: {'✓' if phone_number_id else '✗'}")
+            return False
+
+        logger.info(
+            f"Enviando mensaje Meta - Teléfono: {phone_number}, Usar plantilla: {use_template}")
+        logger.info(
+            f"📱 NUMERO RECIBIDO EN send_meta_whatsapp_message: '{phone_number}' (longitud: {len(phone_number)})")
+
+        # Validaciones básicas
+        if not phone_number:
+            logger.error("Número de teléfono vacío")
+            return False
+
+        if not use_template and not message_text:
+            logger.error("Mensaje de texto vacío y no es plantilla")
+            return False
+
+        if use_template and not template_name:
+            logger.error("Nombre de plantilla vacío")
             return False
 
         # URL de la API de Meta
@@ -421,18 +440,35 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
             logger.info(
                 f"Enviando mensaje Meta a {phone_number}: {message_text}")
 
+        # Log del payload para debug
+        logger.info(f"Payload Meta API: {json.dumps(payload, indent=2)}")
+        logger.info(
+            f"🎯 NUMERO EN PAYLOAD: '{payload.get('to', 'NO_ENCONTRADO')}'")
+
         # Realizar la petición
         response = requests.post(url, headers=headers,
                                  json=payload, timeout=30)
 
+        logger.info(f"Respuesta Meta API - Código: {response.status_code}")
+
         if response.status_code == 200:
-            response_data = response.json()
-            logger.info(
-                f"✅ Mensaje Meta enviado exitosamente: {response_data}")
-            return True
+            try:
+                response_data = response.json()
+                logger.info(
+                    f"✅ Mensaje Meta enviado exitosamente: {response_data}")
+                return True
+            except json.JSONDecodeError:
+                logger.error(
+                    f"Error decodificando respuesta JSON: {response.text}")
+                return False
         else:
-            logger.error(
-                f"❌ Error enviando mensaje Meta: {response.status_code} - {response.text}")
+            try:
+                error_data = response.json()
+                logger.error(
+                    f"❌ Error enviando mensaje Meta: {response.status_code} - {json.dumps(error_data, indent=2)}")
+            except json.JSONDecodeError:
+                logger.error(
+                    f"❌ Error enviando mensaje Meta: {response.status_code} - {response.text}")
             return False
 
     except Exception as e:
@@ -444,7 +480,8 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
 @require_POST
 def webhook_receiver(request, instance_name):
     """
-    Recibe eventos de webhook de WhatsApp y procesa los mensajes entrantes
+    [LEGACY - Evolution API] Recibe eventos de webhook de WhatsApp y procesa los mensajes entrantes
+    NOTA: Esta función maneja webhooks de Evolution API. Para Meta API, usar meta_webhook
     """
     logger.info(
         f"Recibiendo evento de webhook para la instancia: {instance_name}")
@@ -471,10 +508,11 @@ def webhook_receiver(request, instance_name):
         try:
             # Extraer información crítica del webhook
             data = webhook_data.get('data', {})
-            server_url = webhook_data.get('server_url',
-                                          getattr(settings, 'EVOLUTION_API_URL', 'http://localhost:8080'))
-            api_key = webhook_data.get('apikey',
-                                       getattr(settings, 'GLOBAL_API_KEY', ''))
+            # Nota: Los siguientes valores son para Evolution API legacy, no para Meta API
+            server_url = webhook_data.get(
+                'server_url', 'http://localhost:8080')
+            api_key = webhook_data.get(
+                'apikey', getattr(settings, 'GLOBAL_API_KEY', ''))
 
             # Verificar si es un mensaje entrante (no enviado por nosotros)
             from_me = data.get('key', {}).get('fromMe', False)
@@ -670,7 +708,8 @@ def process_connection_update(data, instance_name):
 # Función para enviar respuesta vía WhatsApp API
 def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None, sender=None):
     """
-    Envía una respuesta a un número de WhatsApp utilizando la API
+    [LEGACY - Evolution API] Envía una respuesta a un número de WhatsApp utilizando la API
+    NOTA: Esta función usa Evolution API. Para Meta API, usar send_meta_whatsapp_message
 
     Args:
         instance_name (str): Nombre de la instancia de WhatsApp
@@ -682,6 +721,7 @@ def send_whatsapp_response(instance_name, to_number, message, server_url=None, a
     """
     try:
         # Si no se proporcionan estos valores, usar los predeterminados de configuración
+        # Nota: Esta función es para Evolution API legacy, considera usar Meta API instead
         if not server_url:
             server_url = getattr(
                 settings, 'EVOLUTION_API_URL', 'http://localhost:8080')
@@ -760,9 +800,10 @@ def generate_verification_code():
 
 @csrf_exempt
 @require_POST
-def send_verification_code(request, instance_name):
+def send_verification_code_evolution(request, instance_name):
     """
-    Genera y envía un código de verificación al número de WhatsApp proporcionado
+    [LEGACY - Evolution API] Genera y envía un código de verificación al número de WhatsApp proporcionado
+    NOTA: Esta función usa Evolution API. Para Meta API, usar send_verification_code_meta
     """
     try:
         # Obtener datos de la solicitud
@@ -787,10 +828,8 @@ def send_verification_code(request, instance_name):
         logger.info(
             f"Número original: {phone_number}, Normalizado: {phone_number_normalized}")
 
-        # Obtener la URL del servidor y API key (opcional)
-        server_url = data.get('server_url', getattr(
-            settings, 'EVOLUTION_API_URL', 'http://localhost:8080'))
-        api_key = data.get('apikey', getattr(settings, 'GLOBAL_API_KEY', ''))
+        # Para Meta API no necesitamos estos parámetros de Evolution API
+        # Estos valores ya no se usan con Meta WhatsApp API
 
         # Generar un código de verificación
         verification_code = generate_verification_code()
@@ -802,14 +841,8 @@ def send_verification_code(request, instance_name):
         # Preparar el mensaje con el código
         message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
 
-        # Enviar el código por WhatsApp usando el número original (para el envío)
-        success = send_whatsapp_response(
-            instance_name=instance_name,
-            to_number=phone_number,  # Usar el número original para el envío
-            message=message,
-            server_url=server_url,
-            api_key=api_key
-        )
+        # Enviar el código por WhatsApp usando Meta API
+        success = send_meta_whatsapp_message(phone_number, message)
 
         if success:
             return JsonResponse({
@@ -995,7 +1028,7 @@ def send_verification_code_meta(request):
                 "message": "Se requiere un número de teléfono"
             }, status=400)
 
-        # Normalizar el número de teléfono para consistencia
+        # Normalizar el número de teléfono para consistencia (especial para México)
         phone_number_normalized = normalize_phone_number(phone_number)
         if not phone_number_normalized:
             return JsonResponse({
@@ -1004,7 +1037,27 @@ def send_verification_code_meta(request):
             }, status=400)
 
         logger.info(
-            f"Número original: {phone_number}, Normalizado: {phone_number_normalized}")
+            f"🇲🇽 Número original: {phone_number} (longitud: {len(phone_number)}), Normalizado: {phone_number_normalized} (longitud: {len(phone_number_normalized)})")
+
+        # Verificar si es un número mexicano y está correctamente formateado
+        if phone_number_normalized.startswith('521'):
+            logger.info(
+                f"✅ Número mexicano detectado con formato correcto para WhatsApp: {phone_number_normalized}")
+        elif phone_number_normalized.startswith('52'):
+            logger.warning(
+                f"⚠️ Número mexicano sin el '1' requerido: {phone_number_normalized}")
+        else:
+            logger.info(f"📱 Número internacional: {phone_number_normalized}")
+
+        # Log específico para verificar la transformación de tu número
+        if phone_number == '525559177302':
+            expected = '52155591773024'
+            if phone_number_normalized == expected:
+                logger.info(
+                    f"🎯 ¡PERFECTO! Tu número se normalizó correctamente: {phone_number} → {phone_number_normalized}")
+            else:
+                logger.error(
+                    f"❌ ERROR: Tu número no se normalizó correctamente. Esperado: {expected}, Obtenido: {phone_number_normalized}")
 
         # Generar un código de verificación
         verification_code = generate_verification_code()
@@ -1017,7 +1070,13 @@ def send_verification_code_meta(request):
         message = f"Tu código de verificación para Tresqu es: {verification_code}\n\nEste código expirará en 5 minutos."
 
         # Enviar el código por WhatsApp usando Meta API
-        success = send_meta_whatsapp_message(phone_number, message)
+        logger.info(
+            f"Enviando código de verificación Meta a {phone_number_normalized}: {verification_code}")
+        success = send_meta_whatsapp_message(
+            phone_number=phone_number_normalized,
+            message_text=message,
+            use_template=False
+        )
 
         if success:
             return JsonResponse({

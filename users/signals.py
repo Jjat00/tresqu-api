@@ -1,16 +1,16 @@
-from django.db.models.signals import post_save
+from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from .models import User
 
 
 @receiver(post_save, sender=User)
-def assign_trial_subscription(sender, instance, created, **kwargs):
+def assign_basic_plan_to_new_users(sender, instance, created, **kwargs):
     """
-    Asigna automáticamente el plan premium de prueba a los nuevos usuarios
+    Asigna automáticamente el plan básico a los nuevos usuarios
     """
     if created:
-        # Solo asignar el plan de prueba si es un usuario nuevo
-        instance.assign_premium_trial()
+        # Asignar plan básico por defecto a usuarios nuevos
+        instance.assign_basic_plan_if_none()
 
 
 @receiver(post_save, sender=User)
@@ -64,3 +64,71 @@ def assign_default_categories(sender, instance, created, **kwargs):
             f"   Gastos: {expense_categories_created[:5]}{'...' if len(expense_categories_created) > 5 else ''}")
         print(
             f"   Ingresos: {income_categories_created[:5]}{'...' if len(income_categories_created) > 5 else ''}")
+
+
+# ========================================
+# SIGNALS PARA CONTADORES MENSUALES
+# ========================================
+
+@receiver(post_save, sender='income.Income')
+def increment_monthly_income_count(sender, instance, created, **kwargs):
+    """
+    Incrementa el contador mensual de ingresos cuando se crea un nuevo ingreso
+    """
+    if created and instance.user:
+        from .models import MonthlyUsage
+        monthly_usage = MonthlyUsage.get_current_usage(instance.user)
+        monthly_usage.increment_incomes()
+
+
+@receiver(post_delete, sender='income.Income')
+def decrement_monthly_income_count(sender, instance, **kwargs):
+    """
+    Decrementa el contador mensual de ingresos cuando se elimina un ingreso
+    """
+    if instance.user:
+        from .models import MonthlyUsage
+        # Obtener el uso mensual del mes en que se creó el ingreso
+        created_date = instance.created_at
+        try:
+            monthly_usage = MonthlyUsage.objects.get(
+                user=instance.user,
+                year=created_date.year,
+                month=created_date.month
+            )
+            monthly_usage.decrement_incomes()
+        except MonthlyUsage.DoesNotExist:
+            # Si no existe el registro mensual, no hacer nada
+            pass
+
+
+@receiver(post_save, sender='expenses.Expense')
+def increment_monthly_expense_count(sender, instance, created, **kwargs):
+    """
+    Incrementa el contador mensual de gastos cuando se crea un nuevo gasto
+    """
+    if created and instance.user:
+        from .models import MonthlyUsage
+        monthly_usage = MonthlyUsage.get_current_usage(instance.user)
+        monthly_usage.increment_expenses()
+
+
+@receiver(post_delete, sender='expenses.Expense')
+def decrement_monthly_expense_count(sender, instance, **kwargs):
+    """
+    Decrementa el contador mensual de gastos cuando se elimina un gasto
+    """
+    if instance.user:
+        from .models import MonthlyUsage
+        # Obtener el uso mensual del mes en que se creó el gasto
+        created_date = instance.created_at
+        try:
+            monthly_usage = MonthlyUsage.objects.get(
+                user=instance.user,
+                year=created_date.year,
+                month=created_date.month
+            )
+            monthly_usage.decrement_expenses()
+        except MonthlyUsage.DoesNotExist:
+            # Si no existe el registro mensual, no hacer nada
+            pass
