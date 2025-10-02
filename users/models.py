@@ -147,7 +147,7 @@ class TrackingLink(models.Model):
         # Si ya tiene código de país (11+ dígitos), usar tal como está
 
         # Mensaje predefinido con el código de la empresa
-        message = f"Hola, vengo de {self.code.upper()}"
+        message = f"Hola vengo de {self.code.upper()}, ¡Me gustaría llevar un mejor control de mis finanzas!"
         return f"https://wa.me/{clean_phone}?text={message.replace(' ', '%20')}"
 
     def get_telegram_link(self, bot_username="TresquBot"):
