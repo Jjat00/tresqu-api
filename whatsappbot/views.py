@@ -1,7 +1,7 @@
 from django.shortcuts import render
 from django.http import JsonResponse, HttpResponse
 from django.views.decorators.csrf import csrf_exempt
-from django.views.decorators.http import require_POST, require_GET, require_http_methods
+from django.views.decorators.http import require_POST, require_http_methods
 from django.conf import settings
 import json
 import logging
@@ -18,8 +18,12 @@ from users.serializers import UserSerializer
 from .bot import handle_whatsapp_message
 from .utils import normalize_phone_number
 from .cache_utils import set_cache, get_cache, delete_cache
+from .services_whatsapp.typing_services import WhatsAppService
 
 logger = logging.getLogger(__name__)
+
+# Inicializar servicio de WhatsApp
+whatsapp_service = WhatsAppService()
 
 # Duración de validez del código de verificación (en segundos)
 VERIFICATION_CODE_TIMEOUT = 300  # 5 minutos
@@ -325,14 +329,20 @@ def process_meta_message_status(value, waba_id):
 
 async def handle_meta_whatsapp_message(sender_number, message_text, message_id, waba_id, sender_name="", message_type="text", media_url=None):
     """
-    Maneja mensajes de WhatsApp usando Meta API
-    Adaptación de la función existente para Meta API
+    Maneja mensajes de WhatsApp usando Meta API con indicadores de estado de lectura
+
+    Flujo:
+    1. Marca el mensaje como leído (checks azules)
+    2. Procesa el mensaje
     """
     try:
-        # Por ahora, usar la lógica existente adaptada para Meta
-        # Necesitarás implementar el envío de respuestas usando Meta API
 
-        # Usar la función existente como base
+        # 1. MARCAR COMO LEÍDO (muestra checks azules al usuario)
+        logger.info(f"📨 Marcando mensaje {message_id} como leído...")
+        whatsapp_service.mark_as_read(message_id)
+
+        # 2. PROCESAR EL MENSAJE
+        logger.info(f"🤖 Procesando mensaje de {sender_number}...")
         success, response = await handle_whatsapp_message(
             sender_number=sender_number,
             message_text=message_text,
@@ -387,7 +397,7 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
             return False
 
         # URL de la API de Meta
-        url = f"https://graph.facebook.com/v22.0/{phone_number_id}/messages"
+        url = f"https://graph.facebook.com/v23.0/{phone_number_id}/messages"
 
         # Headers
         headers = {

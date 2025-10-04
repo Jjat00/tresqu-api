@@ -23,7 +23,7 @@ class MetaWhatsAppSetup:
         """
         Paso 2: Agrega el webhook a tu App de Meta
         """
-        url = f"https://graph.facebook.com/v22.0/{self.app_id}/subscriptions"
+        url = f"https://graph.facebook.com/v23.0/{self.app_id}/subscriptions"
 
         payload = {
             "object": "whatsapp_business_account",
@@ -57,7 +57,7 @@ class MetaWhatsAppSetup:
         """
         Paso 3: Conecta la App al WhatsApp Business Account
         """
-        url = f"https://graph.facebook.com/v22.0/{self.waba_id}/subscribed_apps"
+        url = f"https://graph.facebook.com/v23.0/{self.waba_id}/subscribed_apps"
 
         payload = {
             "subscribed_fields": ["messages"],
@@ -88,7 +88,7 @@ class MetaWhatsAppSetup:
         """
         Obtiene los números de teléfono registrados en el WABA
         """
-        url = f"https://graph.facebook.com/v22.0/{self.waba_id}/phone_numbers"
+        url = f"https://graph.facebook.com/v23.0/{self.waba_id}/phone_numbers"
 
         params = {
             'access_token': self.access_token
