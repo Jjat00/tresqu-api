@@ -80,6 +80,136 @@ async def transcribe_audio(audio_file_path: str) -> str:
         return ""
 
 
+async def extract_expenses_from_image(image_url: str) -> str:
+    """
+    Extrae gastos de una imagen (factura, ticket, recibo) usando la API de visión de OpenAI
+
+    Args:
+        image_url: URL de la imagen a procesar (puede ser URL pública o file:// para archivos locales)
+
+    Returns:
+        Texto con los gastos extraídos en formato estructurado
+    """
+    try:
+        # Preparar el prompt para extraer gastos
+        extraction_prompt = """Analiza esta imagen y extrae TODOS los gastos o compras que encuentres.
+
+    Para cada gasto, identifica:
+    - Monto (cantidad numérica)
+    - Moneda (si está visible, de lo contrario asume la moneda local)
+    - Descripción o concepto del gasto
+    - Fecha (si está visible)
+
+    Si es una factura o ticket:
+    - Extrae TODOS los items individuales con sus montos
+    - Incluye el total si está visible
+    - Identifica el establecimiento o tienda
+
+    Si es un recibo:
+    - Extrae la información del pago
+    - Incluye el concepto del gasto
+
+    Formato de respuesta:
+    Para CADA gasto encontrado, escribe en una línea separada:
+    "[Monto] [Moneda] en [Descripción/Concepto]"
+
+    Ejemplo:
+    "50.50 USD en Pizza Dominos"
+    "120 COP en Transporte Uber"
+    "25000 COP en Supermercado Exito"
+
+    Si hay múltiples items, lista cada uno en una línea separada.
+    Si no encuentras gastos claros, di "No se encontraron gastos en la imagen"."""
+
+        # Llamar a la API de visión de OpenAI
+        from openai import OpenAI
+        client = OpenAI(api_key=settings.OPENAI_API_KEY)
+
+        response = client.chat.completions.create(
+            model="gpt-4o",  # Modelo con capacidad de visión
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": extraction_prompt
+                        },
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_url
+                            }
+                        }
+                    ]
+                }
+            ],
+            max_tokens=1000
+        )
+
+        # Extraer el texto de la respuesta
+        extracted_text = response.choices[0].message.content
+        logger.info(f"Gastos extraídos de imagen: {extracted_text}")
+
+        return extracted_text
+
+    except Exception as e:
+        logger.error(f"Error extrayendo gastos de imagen: {e}")
+        return ""
+
+
+async def download_whatsapp_image(media_id: str, access_token: str) -> str:
+    """
+    Descarga una imagen de WhatsApp usando su ID y devuelve la ruta del archivo temporal
+    """
+    import requests
+    import tempfile
+    import os
+
+    try:
+        # Paso 1: Obtener la URL del archivo
+        media_url_endpoint = f"https://graph.facebook.com/v18.0/{media_id}"
+        headers = {
+            'Authorization': f'Bearer {access_token}'
+        }
+
+        response = requests.get(media_url_endpoint, headers=headers)
+        response.raise_for_status()
+
+        media_info = response.json()
+        file_url = media_info.get('url')
+        mime_type = media_info.get('mime_type', '')
+
+        if not file_url:
+            logger.error("No se pudo obtener la URL de la imagen")
+            return ""
+
+        # Paso 2: Descargar el archivo
+        file_response = requests.get(file_url, headers=headers)
+        file_response.raise_for_status()
+
+        # Determinar la extensión del archivo basada en el mime_type
+        extension = '.jpg'  # Por defecto
+        if 'image/jpeg' in mime_type or 'image/jpg' in mime_type:
+            extension = '.jpg'
+        elif 'image/png' in mime_type:
+            extension = '.png'
+        elif 'image/webp' in mime_type:
+            extension = '.webp'
+
+        # Crear archivo temporal
+        with tempfile.NamedTemporaryFile(delete=False, suffix=extension) as temp_file:
+            temp_file.write(file_response.content)
+            temp_path = temp_file.name
+
+        logger.info(f"Imagen descargada exitosamente: {temp_path}")
+        return temp_path
+
+    except Exception as e:
+        logger.error(f"Error descargando imagen de WhatsApp: {e}")
+        return ""
+
+
 async def download_whatsapp_media(media_id: str, access_token: str) -> str:
     """
     Descarga un archivo de media de WhatsApp usando su ID y devuelve la ruta del archivo temporal
@@ -462,22 +592,32 @@ async def process_message(user: User, raw_text: str) -> str:
             10. Si falta fecha ⇒ usa get_current_date_for_user.
             11. Si falta moneda ⇒ create_income asignará la moneda por defecto.
             
+            PARA IMÁGENES (FACTURAS/RECIBOS):
+            12. Si el usuario envía una imagen de factura o recibo:
+                12.1 La imagen ya habrá sido procesada y los gastos extraídos automáticamente
+                12.2 Recibirás un mensaje con el formato: "[Gastos extraídos de imagen]" seguido de los gastos
+                12.3 Procesa cada gasto extraído de la misma forma que procesarías gastos de texto
+                12.4 Si hay múltiples items, usa parse_expenses y crea cada gasto individualmente
+                12.5 Confirma al usuario TODOS los gastos que fueron registrados
+                12.6 Si algún gasto no tiene suficiente información, pide aclaración al usuario
+                12.7 Mantén un tono amigable y agradece al usuario por enviar la factura
+            
             PARA AMBOS:
-            12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
-            13. Clasifica el movimiento en una de las categorías proporcionadas:
-                13.1 PRIMERO: Intenta usar una categoría existente de la lista proporcionada
+            13. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
+            14. Clasifica el movimiento en una de las categorías proporcionadas:
+                14.1 PRIMERO: Intenta usar una categoría existente de la lista proporcionada
                      - Revisa cuidadosamente las categorías disponibles
                      - Busca la categoría más apropiada basada en la descripción y ejemplos
                      - Si hay una categoría similar, úsala en lugar de crear una nueva
-                13.2 SOLO SI ES NECESARIO: Si ninguna categoría existente es adecuada:
+                14.2 SOLO SI ES NECESARIO: Si ninguna categoría existente es adecuada:
                      - Usa get_or_create_user_category_for_expense o get_or_create_user_category_for_income según corresponda
                      - Proporciona nombre, descripción, ejemplos y color
                      - Asegúrate de que la nueva categoría sea realmente necesaria
-                13.3 Si dudas entre dos categorías existentes:
+                14.3 Si dudas entre dos categorías existentes:
                      - Elige la que mejor se adapte según los ejemplos proporcionados
                      - Prefiere categorías más generales sobre específicas
                      - Si hay una categoría "Otros" o similar, úsala como último recurso
-            14. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
+            15. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
             
             EDICIÓN Y ELIMINACIÓN:
             16. Si el usuario quiere editar un gasto:
@@ -564,7 +704,7 @@ async def process_message(user: User, raw_text: str) -> str:
             - Límitate a usar las features actuales, si el usuario te pide algo que no está en las funciones, di que será implementado en el futuro.
             - Features a implementar a futuro:
                 - Mensajes de audio en whatsapp: ✅ IMPLEMENTADO - Funciona igual que en Telegram usando OpenAI Whisper.
-                - Extrae gastos de imagenes.
+                - Extracción de gastos de imágenes/facturas: ✅ IMPLEMENTADO - El usuario puede enviar fotos de facturas o recibos y se extraerán automáticamente los gastos.
                 - Función de gastos compartidos.
                 - Función de registro de deudas.
                 - Función de registro de ahorros.

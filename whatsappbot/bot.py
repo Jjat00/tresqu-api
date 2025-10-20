@@ -492,26 +492,127 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
                 return success, response_text
 
-        elif message_type in ["image", "photo"] and message_text.strip() == "":
-            # Imagen sin texto - función no implementada
-            response_text = "Lo siento, actualmente no puedo procesar imágenes. Esta función estará disponible próximamente. Por favor, envía un mensaje de texto."
+        elif message_type in ["image", "photo"]:
+            # Procesar mensaje con imagen - extraer gastos de factura
+            logger.info(f"Procesando imagen de {sender_number}")
 
             # Crear chat si no existe
             chat, created = await sync_to_async(get_or_create_chat)(sender_number)
 
-            # Guardar respuesta
-            await sync_to_async(create_message)(
-                chat, f"response_{message_id}", "outgoing", response_text
-            )
+            # Verificar si tenemos el media_id para descargar la imagen
+            if not media_url:
+                response_text = "Lo siento, no pude acceder a la imagen. Por favor, intenta de nuevo."
 
-            # Enviar respuesta usando Meta API
-            success = await send_whatsapp_response(
-                instance_name="meta_api",
-                to_number=sender_number,
-                message=response_text
-            )
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
 
-            return success, response_text
+                success = await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=response_text
+                )
+
+                return success, response_text
+
+            try:
+                # Enviar mensaje de "procesando"
+                processing_message = "📸 Procesando tu imagen para extraer los gastos..."
+                await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=processing_message
+                )
+
+                # Descargar el archivo de imagen usando la API de Meta
+                from whatsappbot.services import download_whatsapp_image, extract_expenses_from_image
+                from django.conf import settings
+
+                # Obtener el token de acceso de Meta
+                access_token = getattr(
+                    settings, 'META_WHATSAPP_ACCESS_TOKEN', '')
+
+                if not access_token:
+                    logger.error(
+                        "Token de acceso de Meta WhatsApp no configurado")
+                    response_text = "Lo siento, hay un problema de configuración. Por favor, contacta al soporte."
+                else:
+                    # Descargar la imagen
+                    temp_image_path = await download_whatsapp_image(media_url, access_token)
+
+                    if not temp_image_path:
+                        response_text = "Lo siento, no pude descargar la imagen. Por favor, intenta de nuevo."
+                    else:
+                        # Extraer gastos de la imagen
+                        # Para la API de OpenAI Vision, necesitamos convertir el archivo local a URL o base64
+                        import base64
+
+                        # Leer la imagen y convertirla a base64
+                        with open(temp_image_path, 'rb') as image_file:
+                            image_data = base64.b64encode(
+                                image_file.read()).decode('utf-8')
+
+                        # Determinar el tipo MIME
+                        import mimetypes
+                        mime_type, _ = mimetypes.guess_type(temp_image_path)
+                        if not mime_type:
+                            mime_type = 'image/jpeg'
+
+                        # Crear URL de datos
+                        image_url = f"data:{mime_type};base64,{image_data}"
+
+                        extracted_expenses = await extract_expenses_from_image(image_url)
+
+                        # Limpiar el archivo temporal
+                        import os
+                        try:
+                            os.unlink(temp_image_path)
+                        except:
+                            pass
+
+                        if not extracted_expenses or not extracted_expenses.strip():
+                            response_text = "Lo siento, no pude extraer gastos de la imagen. Por favor, intenta con una imagen más clara o envía los gastos como texto."
+                        elif "No se encontraron gastos" in extracted_expenses:
+                            response_text = "No encontré gastos en la imagen. ¿Puedes verificar que sea una factura o recibo y enviarla de nuevo? O puedes escribir los gastos manualmente."
+                        else:
+                            # Procesar el texto extraído como un mensaje normal
+                            logger.info(
+                                f"Gastos extraídos de imagen: {extracted_expenses}")
+
+                            # Agregar contexto al texto extraído
+                            context_message = f"[Gastos extraídos de imagen]\n{extracted_expenses}"
+
+                            # Guardar el mensaje original (imagen) con los gastos extraídos
+                            await sync_to_async(create_message)(
+                                chat, message_id, "incoming", context_message
+                            )
+
+                            # Si había texto con la imagen, agregarlo al contexto
+                            if message_text and message_text.strip():
+                                extracted_expenses = f"{message_text}\n\n{extracted_expenses}"
+
+                            # Actualizar el message_text con los gastos extraídos y continuar el procesamiento normal
+                            message_text = extracted_expenses
+                            message_type = "text"  # Cambiar el tipo para procesamiento normal
+
+                            # Saltar la verificación de mensaje duplicado ya que acabamos de guardarlo
+                            skip_duplicate_check = True
+
+            except Exception as e:
+                logger.error(f"Error procesando imagen: {e}")
+                response_text = "Lo siento, hubo un error procesando tu imagen. Por favor, intenta de nuevo o envía los gastos como texto."
+
+                await sync_to_async(create_message)(
+                    chat, f"response_{message_id}", "outgoing", response_text
+                )
+
+                success = await send_whatsapp_response(
+                    instance_name="meta_api",
+                    to_number=sender_number,
+                    message=response_text
+                )
+
+                return success, response_text
 
         elif message_type in ["document", "file", "video"]:
             # Documentos, archivos o videos - función no implementada
