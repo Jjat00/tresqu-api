@@ -112,6 +112,7 @@ async def extract_expenses_from_image(image_url: str) -> str:
     Formato de respuesta:
     Para CADA gasto encontrado, escribe en una línea separada:
     "[Monto] [Moneda] en [Descripción/Concepto]"
+    No pongas nada de informacion adicional que no salga en la imagen.
 
     Ejemplo:
     "50.50 USD en Pizza Dominos"
@@ -119,7 +120,8 @@ async def extract_expenses_from_image(image_url: str) -> str:
     "25000 COP en Supermercado Exito"
 
     Si hay múltiples items, lista cada uno en una línea separada.
-    Si no encuentras gastos claros, di "No se encontraron gastos en la imagen"."""
+    Si no encuentras gastos claros, di "No se encontraron gastos en la imagen".
+    """
 
         # Llamar a la API de visión de OpenAI
         from openai import OpenAI
@@ -144,7 +146,7 @@ async def extract_expenses_from_image(image_url: str) -> str:
                     ]
                 }
             ],
-            max_tokens=1000
+            temperature=0
         )
 
         # Extraer el texto de la respuesta
