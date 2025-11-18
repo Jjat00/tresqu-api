@@ -8,6 +8,7 @@ API REST para la gestión de finanzas personales con integración de bots de Tel
 
 - Docker
 - Docker Compose
+- 
 
 ### Configuración y Ejecución
 
@@ -85,7 +86,7 @@ docker-compose -f docker-compose.dev.yml exec web python manage.py shell
 
 ### Tecnologías Principales
 
-- **Backend**: Django 5.2 + Django REST Framework
+- **Backend**: Django 5.2 + Django REST Framework 
 - **Base de Datos**: PostgreSQL con extensión pgvector
 - **Autenticación**: JWT con SimpleJWT
 - **IA**: LangChain + OpenAI
