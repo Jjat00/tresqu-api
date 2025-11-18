@@ -66,8 +66,9 @@ openai_client = OpenAI(api_key=settings.OPENAI_API_KEY)
 async def transcribe_audio(audio_file_path: str) -> str:
     """
     Transcribe un archivo de audio usando la API de OpenAI Whisper
+    Ejecuta la transcripción en un thread separado para no bloquear el event loop
     """
-    try:
+    def do_transcription():
         with open(audio_file_path, 'rb') as audio_file:
             # Usar la API de OpenAI para transcribir
             transcription = openai_client.audio.transcriptions.create(
@@ -75,6 +76,11 @@ async def transcribe_audio(audio_file_path: str) -> str:
                 file=audio_file
             )
             return transcription.text
+    
+    try:
+        # Ejecutar la transcripción en un thread separado para no bloquear el event loop
+        result = await asyncio.to_thread(do_transcription)
+        return result
     except Exception as e:
         logger.error(f"Error transcribiendo audio: {e}")
         return ""

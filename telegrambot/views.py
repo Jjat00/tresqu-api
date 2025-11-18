@@ -2,6 +2,7 @@ from django.shortcuts import render
 import json
 import asyncio
 import os
+import threading
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
@@ -9,6 +10,9 @@ from django.views.decorators.http import require_GET
 from telegram import Update
 from .bot import setup_bot
 from django.utils import timezone
+import logging
+
+logger = logging.getLogger(__name__)
 
 # Variable global para almacenar la aplicación del bot
 application = None
@@ -37,11 +41,43 @@ def initialize_bot():
     return application
 
 
+def process_update_async(app, update):
+    """
+    Procesa un update de Telegram de forma asíncrona en un thread separado.
+    Esto evita bloquear el worker de Gunicorn.
+    """
+    try:
+        # Crear un nuevo event loop para este thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        # Procesar el update
+        try:
+            loop.run_until_complete(app.process_update(update))
+        except RuntimeError as e:
+            if "not initialized" in str(e):
+                # Si la aplicación no está inicializada, inicializar y volver a intentar
+                loop.run_until_complete(app.initialize())
+                loop.run_until_complete(app.process_update(update))
+            else:
+                raise
+        finally:
+            loop.close()
+
+    except Exception as e:
+        import traceback
+        logger.error(f"Error procesando actualización en thread: {str(e)}")
+        logger.error(traceback.format_exc())
+
+
 @csrf_exempt
 def telegram_webhook(request):
     """
     Endpoint para recibir actualizaciones de Telegram.
     Este endpoint debe configurarse en Telegram usando setWebhook.
+
+    IMPORTANTE: Devuelve respuesta inmediatamente y procesa el update en segundo plano
+    para evitar timeouts del worker de Gunicorn.
     """
     if request.method == 'GET':
         # Para diagnóstico, permitimos GET para verificar que el endpoint está funcionando
@@ -52,9 +88,9 @@ def telegram_webhook(request):
 
     if request.method == 'POST':
         try:
-            print("Recibiendo actualización de Telegram")
-            print(f"Headers: {request.headers}")
-            print(f"Body: {request.body.decode('utf-8')}")
+            logger.info("Recibiendo actualización de Telegram")
+            logger.debug(f"Headers: {request.headers}")
+            logger.debug(f"Body: {request.body.decode('utf-8')}")
 
             # Verificar si hay payload
             if not request.body:
@@ -67,34 +103,24 @@ def telegram_webhook(request):
             update_data = json.loads(request.body.decode('utf-8'))
             update = Update.de_json(update_data, app.bot)
 
-            # Usar el event loop global
-            global event_loop
+            # Procesar el update en un thread separado para no bloquear el worker
+            # Esto es crítico para mensajes de audio que pueden tardar más de 30 segundos
+            thread = threading.Thread(
+                target=process_update_async, args=(app, update), daemon=True)
+            thread.start()
 
-            # Asegurarnos de tener un event loop
-            if event_loop is None or event_loop.is_closed():
-                event_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(event_loop)
-                # Reinicializar la aplicación si es necesario
-                event_loop.run_until_complete(app.initialize())
-
-            # Procesar la actualización
-            try:
-                event_loop.run_until_complete(app.process_update(update))
-            except RuntimeError as e:
-                if "not initialized" in str(e):
-                    # Si la aplicación no está inicializada, inicializar y volver a intentar
-                    event_loop.run_until_complete(app.initialize())
-                    event_loop.run_until_complete(app.process_update(update))
-                else:
-                    raise
-
+            # Devolver respuesta inmediatamente
+            logger.info(
+                "Update recibido y enviado a procesamiento en segundo plano")
             return JsonResponse({"status": "ok"})
+
         except json.JSONDecodeError as je:
+            logger.error(f"Error decodificando JSON: {str(je)}")
             return JsonResponse({"status": "error", "message": f"Error decodificando JSON: {str(je)}"}, status=400)
         except Exception as e:
             import traceback
-            print(f"Error procesando actualización: {str(e)}")
-            print(traceback.format_exc())
+            logger.error(f"Error procesando actualización: {str(e)}")
+            logger.error(traceback.format_exc())
             return JsonResponse({"status": "error", "message": str(e)}, status=500)
     else:
         return JsonResponse({"status": "error", "message": "Solo se permiten solicitudes GET y POST"}, status=405)

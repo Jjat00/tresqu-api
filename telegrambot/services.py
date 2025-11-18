@@ -212,6 +212,7 @@ def make_create_income_tool(user_external_id: str):
 async def transcribe_audio(audio_file_path: str) -> str:
     """
     Transcribe un archivo de audio usando la API de OpenAI con reintentos
+    Ejecuta la transcripción en un thread separado para no bloquear el event loop
     """
     def do_transcription():
         with open(audio_file_path, 'rb') as audio_file:
@@ -223,7 +224,28 @@ async def transcribe_audio(audio_file_path: str) -> str:
             return transcription.text
 
     try:
-        return await retry_with_backoff(do_transcription, max_retries=3)
+        # Ejecutar la transcripción en un thread separado para no bloquear el event loop
+        # Hacemos reintentos con backoff exponencial
+        for attempt in range(3):
+            try:
+                result = await asyncio.to_thread(do_transcription)
+                return result
+            except Exception as e:
+                error_str = str(e).lower()
+                is_retryable = any(
+                    pattern in error_str for pattern in RETRYABLE_ERROR_PATTERNS)
+
+                if not is_retryable or attempt == 2:  # último intento
+                    raise
+
+                # Esperar con backoff exponencial antes de reintentar
+                delay = RETRY_BASE_DELAY * (2 ** attempt)
+                delay = min(delay, RETRY_MAX_DELAY)
+                logger.warning(
+                    f"Error en transcripción (intento {attempt + 1}/3): {e}. Reintentando en {delay}s...")
+                await asyncio.sleep(delay)
+
+        return ""
     except Exception as e:
         log_ssl_error_details(e, "Audio transcription")
         logger.error(f"Error transcribiendo audio después de reintentos: {e}")
