@@ -3,6 +3,7 @@ import json
 import asyncio
 import os
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from django.http import JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.conf import settings
@@ -14,59 +15,54 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# Variable global para almacenar la aplicación del bot
-application = None
-# Variable para controlar el event loop
-event_loop = None
+# Thread pool para procesar updates de forma asíncrona
+# Cada thread creará su propia instancia del bot para evitar conflictos de event loops
+executor = ThreadPoolExecutor(
+    max_workers=10, thread_name_prefix="telegram_worker")
 
 
-def initialize_bot():
-    """Inicializa el bot de Telegram si aún no está inicializado."""
-    global application, event_loop
-    if application is None:
-        # Configurar el bot
-        application = setup_bot()
-
-        # Crear un event loop si no existe
-        if event_loop is None:
-            event_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(event_loop)
-
-        # Inicializar explícitamente la aplicación
-        event_loop.run_until_complete(application.initialize())
-
-        # Marcar que está inicializada para evitar reinicialización
-        application._initialized = True
-
-    return application
-
-
-async def _process_update_task(app, update):
+def process_update_sync(update_data):
     """
-    Tarea asíncrona que procesa un update de Telegram
+    Procesa un update de Telegram de forma síncrona pero sin bloquear el worker principal.
+
+    Esta función se ejecuta en un thread del pool, con su propio event loop y su propia instancia del bot.
+    Esto evita conflictos de event loops entre threads.
     """
     try:
-        await app.process_update(update)
-    except RuntimeError as e:
-        if "not initialized" in str(e):
-            # Si la aplicación no está inicializada, inicializar y volver a intentar
-            await app.initialize()
-            await app.process_update(update)
-        else:
-            raise
+        # Crear un nuevo event loop para este thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
+        try:
+            # Crear una nueva instancia del bot para este thread
+            # Esto evita problemas de objetos asyncio vinculados a diferentes event loops
+            thread_app = setup_bot()
 
-def process_update_async(app, update):
-    """
-    Procesa un update de Telegram de forma asíncrona en un thread separado.
-    Esto evita bloquear el worker de Gunicorn.
+            # Inicializar la aplicación en este event loop
+            loop.run_until_complete(thread_app.initialize())
 
-    Usa asyncio.run() para manejar correctamente el ciclo de vida del event loop.
-    """
-    try:
-        # asyncio.run() crea un nuevo event loop, ejecuta la coroutine, y cierra el loop automáticamente
-        # Esto garantiza que todas las tareas pendientes se completen antes de cerrar
-        asyncio.run(_process_update_task(app, update))
+            # Reconstruir el objeto Update desde el JSON
+            update = Update.de_json(update_data, thread_app.bot)
+
+            # Procesar el update
+            loop.run_until_complete(thread_app.process_update(update))
+
+            logger.info(
+                f"Update procesado exitosamente en thread {threading.current_thread().name}")
+
+        finally:
+            # Limpiar tareas pendientes antes de cerrar
+            try:
+                pending = asyncio.all_tasks(loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    loop.run_until_complete(asyncio.gather(
+                        *pending, return_exceptions=True))
+            except Exception as cleanup_error:
+                logger.warning(f"Error limpiando tareas: {cleanup_error}")
+            finally:
+                loop.close()
 
     except Exception as e:
         import traceback
@@ -100,18 +96,13 @@ def telegram_webhook(request):
             if not request.body:
                 return JsonResponse({"status": "error", "message": "No se recibió payload"}, status=400)
 
-            # Inicializar el bot (esto garantiza que la aplicación esté inicializada)
-            app = initialize_bot()
-
             # Procesar el update de Telegram
             update_data = json.loads(request.body.decode('utf-8'))
-            update = Update.de_json(update_data, app.bot)
 
-            # Procesar el update en un thread separado para no bloquear el worker
+            # Enviar el update al thread pool para procesamiento en segundo plano
+            # Pasamos el JSON directamente para evitar problemas de serialización entre threads
             # Esto es crítico para mensajes de audio que pueden tardar más de 30 segundos
-            thread = threading.Thread(
-                target=process_update_async, args=(app, update), daemon=True)
-            thread.start()
+            executor.submit(process_update_sync, update_data)
 
             # Devolver respuesta inmediatamente
             logger.info(
@@ -144,33 +135,39 @@ def set_webhook(request):
         return JsonResponse({"status": "error", "message": "URL de webhook no configurada"}, status=500)
 
     try:
-        # Inicializar el bot
-        app = initialize_bot()
+        # Crear un bot temporal para configurar el webhook
+        temp_app = setup_bot()
 
         # Configurar el webhook
         webhook_url = settings.TELEGRAM_WEBHOOK_URL
 
-        # Usamos el mismo event loop
-        global event_loop
-        if event_loop is None:
-            event_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(event_loop)
+        # Crear un event loop temporal
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
 
-        webhook_info = event_loop.run_until_complete(
-            app.bot.set_webhook(webhook_url))
+        try:
+            # Inicializar la aplicación
+            loop.run_until_complete(temp_app.initialize())
 
-        if webhook_info:
-            return JsonResponse({
-                "status": "ok",
-                "webhook_url": webhook_url,
-                "message": "Webhook configurado exitosamente"
-            })
-        else:
-            return JsonResponse({"status": "error", "message": "Falló al configurar el webhook"}, status=500)
+            # Configurar el webhook
+            webhook_info = loop.run_until_complete(
+                temp_app.bot.set_webhook(webhook_url))
+
+            if webhook_info:
+                return JsonResponse({
+                    "status": "ok",
+                    "webhook_url": webhook_url,
+                    "message": "Webhook configurado exitosamente"
+                })
+            else:
+                return JsonResponse({"status": "error", "message": "Falló al configurar el webhook"}, status=500)
+        finally:
+            loop.close()
+
     except Exception as e:
         import traceback
-        print(f"Error configurando webhook: {str(e)}")
-        print(traceback.format_exc())
+        logger.error(f"Error configurando webhook: {str(e)}")
+        logger.error(traceback.format_exc())
         return JsonResponse({"status": "error", "message": str(e)}, status=500)
 
 
@@ -189,8 +186,8 @@ def env_debug(request):
         "webhook_url": settings.TELEGRAM_WEBHOOK_URL,
         "openai_key": bool(settings.OPENAI_API_KEY) and f"{settings.OPENAI_API_KEY[:5]}...{settings.OPENAI_API_KEY[-5:]}" if settings.OPENAI_API_KEY else None,
         "debug_mode": settings.DEBUG,
-        "application_initialized": application is not None and hasattr(application, '_initialized'),
-        "event_loop_initialized": event_loop is not None and not event_loop.is_closed(),
+        "architecture": "thread_pool_per_request",
+        "thread_pool_workers": executor._max_workers,
     }
 
     return JsonResponse({"status": "ok", "env_info": env_info})
@@ -215,9 +212,9 @@ def healthcheck(request):
         health_status["checks"]["webhook_url"] = bool(
             settings.TELEGRAM_WEBHOOK_URL)
 
-        # Verificar bot application
-        health_status["checks"]["bot_initialized"] = application is not None
-        health_status["checks"]["event_loop_active"] = event_loop is not None and not event_loop.is_closed()
+        # Verificar thread pool
+        health_status["checks"]["thread_pool_active"] = not executor._shutdown
+        health_status["checks"]["thread_pool_workers"] = executor._max_workers
 
         # Simple check de OpenAI (solo verificar que el cliente se puede crear)
         try:
@@ -228,7 +225,8 @@ def healthcheck(request):
             health_status["checks"]["openai_error"] = str(e)
 
         # Determinar estado general
-        critical_checks = ["telegram_token", "openai_key", "bot_initialized"]
+        critical_checks = ["telegram_token",
+                           "openai_key", "thread_pool_active"]
         if all(health_status["checks"].get(check, False) for check in critical_checks):
             health_status["status"] = "healthy"
         else:
