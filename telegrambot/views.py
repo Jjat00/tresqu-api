@@ -41,28 +41,32 @@ def initialize_bot():
     return application
 
 
+async def _process_update_task(app, update):
+    """
+    Tarea asíncrona que procesa un update de Telegram
+    """
+    try:
+        await app.process_update(update)
+    except RuntimeError as e:
+        if "not initialized" in str(e):
+            # Si la aplicación no está inicializada, inicializar y volver a intentar
+            await app.initialize()
+            await app.process_update(update)
+        else:
+            raise
+
+
 def process_update_async(app, update):
     """
     Procesa un update de Telegram de forma asíncrona en un thread separado.
     Esto evita bloquear el worker de Gunicorn.
+
+    Usa asyncio.run() para manejar correctamente el ciclo de vida del event loop.
     """
     try:
-        # Crear un nuevo event loop para este thread
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
-        # Procesar el update
-        try:
-            loop.run_until_complete(app.process_update(update))
-        except RuntimeError as e:
-            if "not initialized" in str(e):
-                # Si la aplicación no está inicializada, inicializar y volver a intentar
-                loop.run_until_complete(app.initialize())
-                loop.run_until_complete(app.process_update(update))
-            else:
-                raise
-        finally:
-            loop.close()
+        # asyncio.run() crea un nuevo event loop, ejecuta la coroutine, y cierra el loop automáticamente
+        # Esto garantiza que todas las tareas pendientes se completen antes de cerrar
+        asyncio.run(_process_update_task(app, update))
 
     except Exception as e:
         import traceback
