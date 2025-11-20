@@ -102,10 +102,10 @@ def get_upgrade_message(plan_name, record_type='expense'):
         limits = get_plan_limits(plan_name)
 
         if record_type == 'expense':
-            max_expenses = limits.get('max_expenses', 20)
+            max_expenses = limits.get('max_expenses', 50)
             return f"Has alcanzado el límite de {max_expenses} gastos mensuales del plan básico. Actualiza a Premium para registros ilimitados y más funciones. El límite se reinicia el próximo mes."
         else:
-            max_incomes = limits.get('max_incomes', 20)
+            max_incomes = limits.get('max_incomes', 50)
             return f"Has alcanzado el límite de {max_incomes} ingresos mensuales del plan básico. Actualiza a Premium para registros ilimitados y más funciones. El límite se reinicia el próximo mes."
 
     return "Límite mensual alcanzado. Contacta soporte para más información."
