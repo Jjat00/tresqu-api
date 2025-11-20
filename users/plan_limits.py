@@ -5,11 +5,18 @@ IMPORTANTE: Todos los límites son POR MES y se reinician automáticamente
 cada mes calendario.
 """
 
+from django.conf import settings
+
+# Leer límites del plan BASIC desde settings
+BASIC_MAX_EXPENSES = settings.BASIC_PLAN_MAX_EXPENSES
+BASIC_MAX_INCOMES = settings.BASIC_PLAN_MAX_INCOMES
+
 # Límites de registros MENSUALES por plan
 PLAN_LIMITS = {
     'BASIC': {
-        'max_expenses': 20,    # 20 gastos por mes
-        'max_incomes': 20,     # 20 ingresos por mes
+        # Configurable via BASIC_PLAN_MAX_EXPENSES
+        'max_expenses': BASIC_MAX_EXPENSES,
+        'max_incomes': BASIC_MAX_INCOMES,      # Configurable via BASIC_PLAN_MAX_INCOMES
         'description': 'Plan básico con límites mensuales para nuevos usuarios'
     },
     'PREMIUM': {

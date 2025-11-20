@@ -215,6 +215,10 @@ TELEGRAM_WEBHOOK_URL = os.getenv('TELEGRAM_WEBHOOK_URL', '')
 # Configuración de OpenAI
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY', '')
 
+# Configuración de límites del plan BASIC
+BASIC_PLAN_MAX_EXPENSES = int(os.getenv('BASIC_PLAN_MAX_EXPENSES', '50'))
+BASIC_PLAN_MAX_INCOMES = int(os.getenv('BASIC_PLAN_MAX_INCOMES', '50'))
+
 # Configuración de Meta WhatsApp API
 META_WHATSAPP_ACCESS_TOKEN = os.getenv('META_WHATSAPP_ACCESS_TOKEN', '')
 META_WHATSAPP_VERIFY_TOKEN = os.getenv(
