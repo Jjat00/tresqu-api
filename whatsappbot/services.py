@@ -76,7 +76,7 @@ async def transcribe_audio(audio_file_path: str) -> str:
                 file=audio_file
             )
             return transcription.text
-    
+
     try:
         # Ejecutar la transcripción en un thread separado para no bloquear el event loop
         result = await asyncio.to_thread(do_transcription)
@@ -98,32 +98,43 @@ async def extract_expenses_from_image(image_url: str) -> str:
     """
     try:
         # Preparar el prompt para extraer gastos
-        extraction_prompt = """Analiza esta imagen y extrae TODOS los gastos o compras que encuentres.
+        extraction_prompt = """Analiza esta imagen y extrae ÚNICAMENTE los gastos o compras REALES que encuentres.
 
-    Para cada gasto, identifica:
-    - Monto (cantidad numérica)
+    REGLAS IMPORTANTES:
+    1. NUNCA incluyas el TOTAL de la factura si ya extrajiste los items individuales
+    2. NUNCA incluyas subtotales, impuestos separados, propinas, o valores informativos
+    3. SOLO extrae los productos/servicios que el usuario realmente compró
+    4. Si la factura tiene items desglosados, extrae SOLO esos items individuales (NO el total)
+    5. SOLO usa el total cuando es un recibo simple SIN desglose de items (ej: un recibo de transferencia o pago único)
+
+    Para cada gasto REAL, identifica:
+    - Monto (cantidad numérica del producto/servicio)
     - Moneda (si está visible, de lo contrario asume la moneda local)
     - Descripción o concepto del gasto
     - Fecha (si está visible)
 
-    Si es una factura o ticket:
-    - Extrae TODOS los items individuales con sus montos
-    - Incluye el total si está visible
+    Si es una factura o ticket CON items desglosados:
+    - Extrae SOLO los items/productos individuales con sus montos
+    - NO extraigas el total, subtotal, IVA separado, ni ningún valor resumen
     - Identifica el establecimiento o tienda
 
-    Si es un recibo:
-    - Extrae la información del pago
-    - Incluye el concepto del gasto
+    Si es un recibo simple SIN desglose (solo muestra un monto total):
+    - Extrae ese único monto como el gasto
+    - Incluye el concepto del pago
 
     Formato de respuesta:
-    Para CADA gasto encontrado, escribe en una línea separada:
+    Para CADA gasto REAL encontrado, escribe en una línea separada:
     "[Monto] [Moneda] en [Descripción/Concepto]"
     No pongas nada de informacion adicional que no salga en la imagen.
 
-    Ejemplo:
-    "50.50 USD en Pizza Dominos"
-    "120 COP en Transporte Uber"
-    "25000 COP en Supermercado Exito"
+    Ejemplo CORRECTO (factura con items):
+    "15.50 USD en Pizza Hawaiana"
+    "8.00 USD en Refresco grande"
+    "5.00 USD en Papas fritas"
+    (NO incluir "28.50 USD en Total" porque ya se extrajeron los items)
+
+    Ejemplo CORRECTO (recibo simple sin desglose):
+    "50000 COP en Transferencia a Juan Pérez"
 
     Si hay múltiples items, lista cada uno en una línea separada.
     Si no encuentras gastos claros, di "No se encontraron gastos en la imagen".
