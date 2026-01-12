@@ -253,27 +253,80 @@ class ExpenseViewSet(viewsets.ModelViewSet):
         """
         Obtiene un resumen completo para el dashboard usando categorías por usuario
         GET /api/expenses/summary/?months=1
+        GET /api/expenses/summary/?month=12&year=2024
         """
-        months = int(request.query_params.get('months', 1))
-
         # Obtener zona horaria del usuario
         user_timezone = self._get_user_timezone(request)
         local_now = self._get_local_datetime(request)
         today = local_now.date()
 
-        # Calcular fecha de inicio (hace X meses)
-        start_date = today.replace(day=1)
-        if months > 0:
-            for _ in range(months - 1):
-                # Retroceder al primer día del mes anterior
-                start_date = (start_date - timedelta(days=1)).replace(day=1)
+        # Verificar si se proporcionan month y year específicos
+        month_param = request.query_params.get('month')
+        year_param = request.query_params.get('year')
+
+        if month_param and year_param:
+            # Usar mes y año específicos
+            try:
+                month = int(month_param)
+                year = int(year_param)
+
+                # Validar mes
+                if month < 1 or month > 12:
+                    return Response(
+                        {"error": "El mes debe estar entre 1 y 12"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+
+                # Calcular primer y último día del mes
+                first_day = datetime(year, month, 1).date()
+                if month == 12:
+                    next_month = 1
+                    next_month_year = year + 1
+                else:
+                    next_month = month + 1
+                    next_month_year = year
+                last_day = datetime(next_month_year, next_month,
+                                    1).date() - timedelta(days=1)
+
+                start_date = first_day
+                end_date = last_day
+            except ValueError:
+                return Response(
+                    {"error": "Mes y año deben ser números enteros"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            # Usar el comportamiento original con months
+            months = int(request.query_params.get('months', 1))
+
+            # Calcular fecha de inicio (hace X meses)
+            start_date = today.replace(day=1)
+            if months > 0:
+                for _ in range(months - 1):
+                    # Retroceder al primer día del mes anterior
+                    start_date = (start_date - timedelta(days=1)
+                                  ).replace(day=1)
+
+            # Para el comportamiento original, no limitamos la fecha de fin
+            end_date = None
 
         # Filtrar usando spent_at (fecha real del gasto) en lugar de timestamp (fecha de registro)
-        queryset = self.get_queryset().filter(
-            Q(spent_at__gte=start_date) |
-            (Q(spent_at__isnull=True) & Q(
-                timestamp__gte=self._convert_to_utc(start_date, False, user_timezone)))
-        )
+        if end_date:
+            # Si hay fecha de fin, filtrar por rango
+            queryset = self.get_queryset().filter(
+                Q(spent_at__gte=start_date, spent_at__lte=end_date) |
+                (Q(spent_at__isnull=True) & Q(
+                    timestamp__gte=self._convert_to_utc(
+                        start_date, False, user_timezone),
+                    timestamp__lte=self._convert_to_utc(end_date, True, user_timezone)))
+            )
+        else:
+            # Comportamiento original: solo fecha de inicio
+            queryset = self.get_queryset().filter(
+                Q(spent_at__gte=start_date) |
+                (Q(spent_at__isnull=True) & Q(
+                    timestamp__gte=self._convert_to_utc(start_date, False, user_timezone)))
+            )
 
         # Gastos por categoría priorizando categorías por usuario
         by_category = queryset.values('user_expense_category__name', 'category__name').annotate(
