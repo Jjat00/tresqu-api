@@ -166,7 +166,9 @@ def process_meta_messages(value, waba_id):
                         f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {from_number}. Ignorando.")
                     continue
 
-                # Marcar el mensaje como en proceso (con timeout de seguridad)
+                # Marcar el mensaje como en proceso (expirará automáticamente en 5 minutos)
+                # IMPORTANTE: NO limpiar manualmente el caché después del procesamiento
+                # para prevenir duplicados cuando WhatsApp envía el mismo webhook múltiples veces
                 set_cache(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
                 logger.info(
                     f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {from_number}")
@@ -231,13 +233,10 @@ def process_meta_messages(value, waba_id):
                 except Exception as processing_error:
                     logger.exception(
                         f"Error procesando mensaje Meta ID {message_id}: {str(processing_error)}")
-
-                finally:
-                    # IMPORTANTE: Limpiar el cache después del procesamiento
-                    # para permitir futuros mensajes del mismo usuario
+                    # En caso de error, limpiar el caché para permitir reintento
                     delete_cache(cache_key)
                     logger.info(
-                        f"🔓 Cache limpiado para mensaje ID: {message_id}")
+                        f"🔓 Cache limpiado por error para mensaje ID: {message_id}")
 
             except Exception as e:
                 logger.exception(
@@ -638,7 +637,9 @@ def webhook_receiver(request, instance_name):
                     f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {sender_number}. Ignorando.")
                 return JsonResponse({"status": "success", "message": "Mensaje duplicado ignorado"})
 
-            # Marcar el mensaje como en proceso (con timeout de seguridad)
+            # Marcar el mensaje como en proceso (expirará automáticamente en 5 minutos)
+            # IMPORTANTE: NO limpiar manualmente el caché después del procesamiento
+            # para prevenir duplicados cuando WhatsApp envía el mismo webhook múltiples veces
             set_cache(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
             logger.info(
                 f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {sender_number}")
@@ -667,11 +668,9 @@ def webhook_receiver(request, instance_name):
             except Exception as processing_error:
                 logger.exception(
                     f"Error procesando mensaje Evolution ID {message_id}: {str(processing_error)}")
-
-            finally:
-                # IMPORTANTE: Limpiar el cache después del procesamiento
+                # En caso de error, limpiar el caché para permitir reintento
                 delete_cache(cache_key)
-                logger.info(f"🔓 Cache limpiado para mensaje ID: {message_id}")
+                logger.info(f"🔓 Cache limpiado por error para mensaje ID: {message_id}")
 
         except Exception as e:
             logger.exception(f"Error al procesar mensaje: {str(e)}")
