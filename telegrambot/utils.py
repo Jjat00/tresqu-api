@@ -1,6 +1,6 @@
 from asgiref.sync import sync_to_async
 from users.models import Message
-from langchain.schema import HumanMessage, AIMessage
+from langchain_core.messages import HumanMessage, AIMessage
 from categories.models import Category
 from income.models import IncomeCategory
 # NUEVO: Importar utilidades para categorías por usuario
