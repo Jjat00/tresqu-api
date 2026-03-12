@@ -65,3 +65,7 @@ typing_extensions==4.13.2
 uritemplate==4.1.1
 urllib3==2.4.0
 zstandard==0.23.0
+google-auth==2.38.0
+google-auth-oauthlib==1.2.1
+google-api-python-client==2.163.0
+cryptography==44.0.0

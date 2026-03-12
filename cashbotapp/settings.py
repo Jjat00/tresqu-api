@@ -59,6 +59,7 @@ INSTALLED_APPS = [
     'income',
     'whatsappbot',
     'savings',
+    'gmailbot',
 ]
 
 REST_FRAMEWORK = {
@@ -232,6 +233,15 @@ META_APP_SECRET = os.getenv('META_APP_SECRET', '')
 # API Key para funciones administrativas (mensajes masivos)
 ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', 'admin_secret_key')
 
+# Google Gmail Integration
+GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
+GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
+GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/api/gmail/oauth/callback/')
+GOOGLE_PUBSUB_TOPIC = os.getenv('GOOGLE_PUBSUB_TOPIC', '')
+GOOGLE_CLOUD_PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT_ID', '')
+GMAIL_TOKEN_ENCRYPTION_KEY = os.getenv('GMAIL_TOKEN_ENCRYPTION_KEY', '')
+FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Cashbot API',
     'DESCRIPTION': 'API para la gestión de Cashbot',
@@ -311,6 +321,11 @@ LOGGING = {
             'propagate': True,
         },
         'whatsappbot': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+        'gmailbot': {
             'handlers': ['console', 'file'],
             'level': 'DEBUG',
             'propagate': True,

@@ -1,147 +1,144 @@
-# CashBot API - Backend Inteligente
+# Tresqu API
 
-API REST para la gestión de finanzas personales potenciada por Inteligencia Artificial, con integración de bots de Telegram y WhatsApp, desarrollada con Django y PostgreSQL con soporte para vectores.
+**Backend de gestion financiera personal con IA**
 
-## Features de IA del Backend
+Django REST API para Tresqu. Incluye gestion de gastos/ingresos, chatbots inteligentes (Telegram + WhatsApp), deteccion automatica de compras via Gmail, y analisis financiero con IA.
 
-### Procesamiento de Lenguaje Natural (NLP)
-- Comprensión automática de mensajes de usuarios en lenguaje natural
-- Extracción inteligente de información de gastos e ingresos
-- Análisis de contexto para categorización automática
-- Manejo de múltiples formatos de entrada de datos
+## Tech Stack
 
-### Integración con OpenAI y LangChain
-- Procesamiento avanzado con modelos de IA generativa
-- Cadenas de procesamiento inteligentes (LangChain)
-- Análisis semántico de transacciones
-- Generación de reportes automáticos
+- **Python 3.13** + **Django 5.2** + **Django REST Framework**
+- **PostgreSQL + pgvector** — base de datos relacional con soporte de embeddings vectoriales
+- **LangChain + OpenAI GPT-4.1** — pipeline de IA para NLP y analisis
+- **python-telegram-bot** — integracion con Telegram
+- **Meta WhatsApp API** — integracion con WhatsApp Business
+- **Google Gmail API** — deteccion automatica de compras en correos
+- **Gunicorn** — servidor WSGI para produccion
 
-### Bot de Telegram Inteligente
-- Conversación natural con asistente financiero
-- Registro automático de gastos mediante mensaje
-- Categorización inteligente de transacciones
-- Análisis de patrones de gasto en tiempo real
-- Alertas personalizadas sobre límites de gasto
-- Generación de reportes financieros automáticos
+## Requisitos previos
 
-### Vector Database (pgvector)
-- Almacenamiento de embeddings para búsqueda semántica
-- Recuperación de información relevante basada en similitud
-- Mejora de recomendaciones personalizadas
-- Análisis de patrones históricos
+- Docker y Docker Compose
+- Python 3.13+ (solo si se ejecuta sin Docker)
 
-### Categorización Automática
-- Clasificación inteligente de transacciones
-- Aprendizaje de patrones de usuario
-- Categorías personalizadas y predefinidas
-- Actualización automática de categorías basada en historial
-
-### Análisis Financiero Avanzado
-- Cálculo automático de estadísticas
-- Detección de patrones de gasto
-- Proyecciones de ahorro
-- Análisis comparativo de períodos
-
-## Ejecución Local con Docker
-
-### Prerrequisitos
-
-- Docker
-- Docker Compose
-- 
-
-### Configuración y Ejecución
-
-1. **Clonar el repositorio**
-
-   ```bash
-   git clone <url-del-repositorio>
-   cd cashbot-api
-   ```
-
-2. **Construir y ejecutar los contenedores**
-
-   ```bash
-   docker-compose -f docker-compose.dev.yml up --build
-   ```
-
-   Este comando:
-
-   - Construye la imagen de la aplicación usando `Dockerfile.dev`
-   - Levanta una base de datos PostgreSQL con extensión pgvector
-   - Ejecuta las migraciones automáticamente
-   - Inicia el servidor de desarrollo en el puerto 8000
-
-3. **Acceder a la aplicación**
-   - API: http://localhost:8000
-   - Base de datos PostgreSQL: localhost:5433
-
-### Servicios Incluidos
-
-#### Base de Datos (PostgreSQL + pgvector)
-
-- **Imagen**: `ankane/pgvector`
-- **Puerto**: 5433
-- **Credenciales**:
-  - Usuario: `cashbot`
-  - Contraseña: `cashbot`
-  - Base de datos: `cashbot`
-
-#### Aplicación Web (Django)
-
-- **Puerto**: 8000
-- **Modo**: Desarrollo con DEBUG=True
-- **Recarga automática**: Habilitada mediante volumen montado
-
-### Comandos Útiles
+## Instalacion rapida
 
 ```bash
-# Ejecutar en segundo plano
+# Clonar el repositorio
+git clone <repo-url>
+cd cashbot-api
+
+# Copiar variables de entorno
+cp .env.example .env
+# Editar .env con tus credenciales
+
+# Levantar con Docker
+docker-compose -f docker-compose.dev.yml up --build
+
+# Correr migraciones
+docker-compose -f docker-compose.dev.yml exec web python manage.py migrate
+
+# Crear superusuario (opcional)
+docker-compose -f docker-compose.dev.yml exec web python manage.py createsuperuser
+```
+
+La API estara disponible en `http://localhost:8000`.
+
+## Variables de entorno
+
+Consulta el archivo [`.env.example`](.env.example) para ver todas las variables requeridas, agrupadas por seccion. Copia el archivo como `.env` y completa los valores antes de levantar los servicios.
+
+## Estructura del proyecto
+
+| App | Responsabilidad |
+|-----|----------------|
+| `cashbotapp/` | Settings del proyecto, URLs raiz, autenticacion JWT, middleware |
+| `users/` | Auth, JWT, perfiles de usuario, planes de suscripcion, referidos |
+| `expenses/` | CRUD de gastos + analytics, embeddings con pgvector para busqueda semantica |
+| `income/` | CRUD de ingresos + analytics |
+| `categories/` | Categorias predefinidas y personalizadas por usuario |
+| `savings/` | Metas de ahorro y proyecciones financieras |
+| `telegrambot/` | Bot de Telegram — NLP, IA, extraccion automatica de transacciones |
+| `whatsappbot/` | Bot de WhatsApp — Meta API, soporte de voz, imagenes y registro de usuarios |
+| `gmailbot/` | Integracion Gmail — OAuth2, deteccion de compras, categorizacion via WhatsApp |
+
+## Endpoints principales
+
+| Endpoint | Descripcion |
+|----------|-------------|
+| `/api/expenses/` | CRUD de gastos |
+| `/api/incomes/` | CRUD de ingresos |
+| `/api/categories/` | Categorias de transacciones |
+| `/api/savings/` | Metas de ahorro |
+| `/api/users/` | Usuarios y autenticacion |
+| `/api/token/` | Obtener tokens JWT |
+| `/api/token/refresh/` | Refrescar token JWT |
+| `/api/gmail/` | Integracion Gmail (OAuth, sync, estado) |
+| `/telegram/` | Webhook de Telegram |
+| `/whatsapp/` | Webhook de WhatsApp |
+| `/gmail/webhook/` | Webhook de Gmail Pub/Sub |
+| `/schema/swagger-ui/` | Documentacion interactiva Swagger UI |
+| `/schema/redoc/` | Documentacion ReDoc |
+
+## Integracion Gmail
+
+Deteccion automatica de compras en correos electronicos:
+
+1. El usuario conecta su cuenta de Gmail via OAuth2
+2. Gmail Watch + Pub/Sub detecta correos nuevos en tiempo real
+3. La IA analiza si el correo corresponde a una compra
+4. Si es una compra, se crea el gasto automaticamente y se pregunta la categoria por WhatsApp
+5. El usuario responde con la categoria y el gasto queda categorizado
+
+### Management commands
+
+```bash
+# Renovar watches de Gmail que estan por expirar
+python manage.py renew_gmail_watches
+
+# Sincronizacion manual para todos los usuarios
+python manage.py gmail_manual_sync --all
+
+# Sincronizacion manual para un usuario especifico
+python manage.py gmail_manual_sync --user_id 31
+```
+
+Para mas detalles:
+- Arquitectura y modulos: [`gmailbot/README.md`](gmailbot/README.md)
+- **Guia de configuracion paso a paso**: [`docs/GMAIL_SETUP_GUIDE.md`](docs/GMAIL_SETUP_GUIDE.md)
+
+## Documentacion API
+
+La documentacion de la API se genera automaticamente con `drf-spectacular`:
+
+- **Swagger UI**: `http://localhost:8000/schema/swagger-ui/`
+- **ReDoc**: `http://localhost:8000/schema/redoc/`
+
+## Servicios Docker
+
+| Servicio | Puerto | Descripcion |
+|----------|--------|-------------|
+| `web` | 8000 | Django API (Gunicorn en produccion) |
+| `db` | 5433 | PostgreSQL + pgvector |
+
+### Comandos utiles de Docker
+
+```bash
+# Levantar en segundo plano
 docker-compose -f docker-compose.dev.yml up -d
 
 # Ver logs
 docker-compose -f docker-compose.dev.yml logs -f
 
-# Parar los servicios
+# Detener servicios
 docker-compose -f docker-compose.dev.yml down
 
-# Parar y eliminar volúmenes (resetear BD)
+# Resetear base de datos (elimina volumenes)
 docker-compose -f docker-compose.dev.yml down -v
 
-# Ejecutar comandos Django dentro del contenedor
-docker-compose -f docker-compose.dev.yml exec web python manage.py <comando>
-
-# Crear superusuario
-docker-compose -f docker-compose.dev.yml exec web python manage.py createsuperuser
-
-# Ejecutar shell de Django
+# Ejecutar comandos de Django dentro del contenedor
+docker-compose -f docker-compose.dev.yml exec web python manage.py migrate
 docker-compose -f docker-compose.dev.yml exec web python manage.py shell
 ```
 
-### Estructura del Proyecto
+## Licencia
 
-- `Dockerfile.dev`: Imagen de desarrollo con Python 3.13
-- `docker-compose.dev.yml`: Orquestación de servicios para desarrollo
-- `requirements.txt`: Dependencias de Python incluyendo Django, DRF, pgvector, etc.
-- `telegrambot/`: Integración del bot de Telegram con IA
-  - `bot.py`: Lógica principal del bot conversacional
-  - `services.py`: Procesamiento inteligente de mensajes
-  - `tools.py`: Herramientas de IA y utilidades
-  - `utils.py`: Funciones auxiliares de NLP
-- `expenses/`: Gestión inteligente de gastos
-- `income/`: Análisis de ingresos
-- `categories/`: Categorización automática de transacciones
-- `savings/`: Análisis y metas de ahorro
-- `whatsappbot/`: Integración del bot de WhatsApp
-
-### Tecnologías Principales
-
-- **Backend**: Django 5.2 + Django REST Framework
-- **Base de Datos**: PostgreSQL con extensión pgvector
-- **Autenticación**: JWT con SimpleJWT
-- **Inteligencia Artificial**:
-  - LangChain: Cadenas de procesamiento inteligente
-  - OpenAI: Modelos de IA generativa
-  - pgvector: Vector embeddings para búsqueda semántica
-- **Bots**: python-telegram-bot para integración conversacional
-- **Documentación**: drf-spectacular (OpenAPI/Swagger)
+Proyecto privado — Tresqu

@@ -29,6 +29,8 @@ urlpatterns = [
     path('api/savings/', include('savings.urls'), name='savings'),
     path('telegram/', include('telegrambot.urls'), name='telegram'),
     path('whatsapp/', include('whatsappbot.urls'), name='whatsapp'),
+    path('api/gmail/', include('gmailbot.urls'), name='gmail'),
+    path('gmail/', include('gmailbot.webhook_urls'), name='gmail-webhook'),
     # JWT auth
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

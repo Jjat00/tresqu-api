@@ -23,6 +23,13 @@ services:
     environment:
       - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
       - DEBUG=True
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/gmail/oauth/callback/}
+      - GOOGLE_PUBSUB_TOPIC=${GOOGLE_PUBSUB_TOPIC:-}
+      - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID:-}
+      - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:-}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
     ports:
       - "8000:8000"
     volumes:

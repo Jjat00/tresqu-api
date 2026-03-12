@@ -864,16 +864,31 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
 
                 return success, response_text
 
-        # 7. Si llegamos aquí, el usuario existe o se ha registrado correctamente
+        # 7. Verificar si hay categorización pendiente de Gmail
+        try:
+            from gmailbot.whatsapp_handler import check_pending_categorization, categorize_gmail_expense
+            pending = await sync_to_async(check_pending_categorization)(user)
+            if pending:
+                response_text = await sync_to_async(categorize_gmail_expense)(user, pending, message_text)
+                # Guardar y enviar respuesta
+                await sync_to_async(create_message)(chat, f"response_{message_id}", "outgoing", response_text)
+                success = await send_whatsapp_response(instance_name="meta_api", to_number=sender_number, message=response_text)
+                return success, response_text
+        except ImportError:
+            pass  # gmailbot no instalado
+        except Exception as e:
+            logger.error(f"Error checking Gmail categorization: {e}")
+
+        # 8. Si llegamos aquí, el usuario existe o se ha registrado correctamente
         # Procesar el mensaje y obtener respuesta
         response_text = await process_message(user, message_text)
 
-        # 8. Guardar la respuesta en la base de datos
+        # 9. Guardar la respuesta en la base de datos
         await sync_to_async(create_message)(
             chat, f"response_{message_id}", "outgoing", response_text
         )
 
-        # 9. Enviar la respuesta usando Meta API
+        # 10. Enviar la respuesta usando Meta API
         success = await send_whatsapp_response(
             instance_name="meta_api",
             to_number=sender_number,
