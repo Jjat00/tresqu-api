@@ -4,15 +4,14 @@ from openai import OpenAI
 from typing import List, Dict, Any
 import asyncio
 from datetime import datetime
-from langchain.memory import ConversationBufferWindowMemory
 from whatsappbot.utils import fetch_last_messages
 
 from django.conf import settings
 from users.models import User
 
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
 
 # Importamos las herramientas de telegrambot ya que son genéricas
@@ -281,29 +280,12 @@ async def download_whatsapp_media(media_id: str, access_token: str) -> str:
         return ""
 
 
-async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
-    """Construye la memoria de conversación para el usuario"""
-    mem = ConversationBufferWindowMemory(
-        k=10,
-        memory_key="history",
-        return_messages=True,
-        output_key="output"
-    )
+async def build_history(user_id: int) -> list:
+    """Carga los últimos mensajes del usuario desde la BD como lista de mensajes."""
+    messages = []
     async for msg in fetch_last_messages(user_id):
-        mem.chat_memory.add_message(msg)
-    return mem
-
-
-def build_agent(tools, prompt, memory) -> AgentExecutor:
-    """Crea un agente con las herramientas, prompt y memoria dadas"""
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        memory=memory,
-        return_intermediate_steps=True,
-        verbose=True,
-    )
+        messages.append(msg)
+    return messages
 
 
 def make_create_expense_tool(user_external_id: str):
@@ -576,10 +558,7 @@ async def process_message(user: User, raw_text: str) -> str:
         income_categories_str = 'Ingresos: ' + \
             ', '.join(existing_income_categories)
 
-        # Usar el mismo prompt detallado que en el bot de Telegram
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""
-            Eres un asistente financiero experto en clasificar gastos e ingresos, te llamas Tresqu.
+        system_prompt = f"""Eres un asistente financiero experto en clasificar gastos e ingresos, te llamas Tresqu.
             
             Categorías disponibles para gastos: {expense_categories_str}
             Categorías disponibles para ingresos: {income_categories_str}
@@ -761,34 +740,31 @@ async def process_message(user: User, raw_text: str) -> str:
             - NO compartas información sobre otros usuarios o datos que no pertenezcan al usuario actual
             - Si te preguntan sobre estos temas, responde amablemente que solo puedes ayudar con el registro y consulta de gastos e ingresos
             - Enfócate únicamente en ayudar con la gestión financiera personal del usuario actual
-            """),
-            MessagesPlaceholder(variable_name="history"),
-            ("human", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])
+            """
 
-        # 3. memoria
-        memory = await build_memory(user.id)
+        # 3. Cargar historial de mensajes desde la BD
+        history = await build_history(user.id)
 
-        # 4. construir agente configurado para ejecución asíncrona
-        agent = create_openai_tools_agent(llm, async_tools, prompt)
-        agent_executor = AgentExecutor(
-            agent=agent,
+        # 4. Crear agente con la nueva API create_agent
+        agent = create_agent(
+            model=llm,
             tools=async_tools,
-            memory=memory,
-            return_intermediate_steps=True,
-            verbose=True,
+            system_prompt=system_prompt,
         )
 
-        # 5. ejecutar agente de forma asíncrona directamente con timeout
+        # 5. Construir mensajes: historial + mensaje actual
+        messages = history + [HumanMessage(content=raw_text)]
+
+        # 6. Ejecutar agente con timeout
         try:
             result = await asyncio.wait_for(
-                agent_executor.ainvoke(
-                    {"input": raw_text, "history": memory.chat_memory.messages}
+                agent.ainvoke(
+                    {"messages": messages},
+                    config={"recursion_limit": 25},
                 ),
-                timeout=120.0  # 120 segundos de timeout
+                timeout=120.0
             )
-            return result["output"]
+            return result["messages"][-1].content
         except asyncio.TimeoutError:
             logger.error("Timeout al procesar mensaje")
             return "Lo siento, la operación tomó demasiado tiempo. Por favor, intenta de nuevo con un mensaje más corto o específico."

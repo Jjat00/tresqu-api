@@ -1,5 +1,4 @@
 # services.py
-from langchain.memory import ConversationBufferWindowMemory
 from telegrambot.utils import fetch_last_messages
 import logging
 from openai import OpenAI
@@ -12,9 +11,9 @@ import random
 from django.conf import settings
 from users.models import User
 
+from langchain.agents import create_agent
 from langchain_openai import ChatOpenAI
-from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain.agents import AgentExecutor, create_openai_tools_agent
+from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
 
 from telegrambot.tools import (
@@ -112,31 +111,12 @@ async def retry_with_backoff(func, max_retries=None, base_delay=None, max_delay=
                 time.sleep(delay)
 
 
-async def build_memory(user_id: int) -> ConversationBufferWindowMemory:
-    mem = ConversationBufferWindowMemory(
-        k=10,
-        memory_key="history",
-        return_messages=True,
-        output_key="output"
-    )
+async def build_history(user_id: int) -> list:
+    """Carga los últimos mensajes del usuario desde la BD como lista de mensajes."""
+    messages = []
     async for msg in fetch_last_messages(user_id):
-        mem.chat_memory.add_message(msg)
-    return mem
-
-
-def build_agent(tools, prompt, memory) -> AgentExecutor:
-    agent = create_openai_tools_agent(llm, tools, prompt)
-    return AgentExecutor(
-        agent=agent,
-        tools=tools,
-        memory=memory,
-        return_intermediate_steps=True,
-        verbose=True,
-        handle_parsing_errors=True,  # Manejar errores de parsing automáticamente
-        max_execution_time=AGENT_EXECUTION_TIMEOUT,  # Timeout configurable
-        # Límite de iteraciones para evitar loops infinitos
-        max_iterations=AGENT_MAX_ITERATIONS,
-    )
+        messages.append(msg)
+    return messages
 
 
 def make_create_expense_tool(user_external_id: str):
@@ -446,16 +426,14 @@ async def process_message(user: User, raw_text: str) -> str:
         income_categories_str = 'Ingresos: ' + \
             ', '.join(existing_income_categories)
 
-        prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""
-            Eres un asistente financiero experto en clasificar gastos e ingresos, te llamas Tresqu.
-            
+        system_prompt = f"""Eres un asistente financiero experto en clasificar gastos e ingresos, te llamas Tresqu.
+
             Categorías disponibles para gastos: {expense_categories_str}
             Categorías disponibles para ingresos: {income_categories_str}
 
             INSTRUCCIONES:
             1. Si detectas un saludo corto ⇒ usa is_greeting y responde con un saludo.
-            
+
             PARA GASTOS:
             2. Si hay UN solo gasto ⇒ usa parse_expense y luego create_expense.
             3. Si el mensaje contiene MÁS de un gasto (separado por "y", "," o ";"…) ⇒
@@ -468,7 +446,7 @@ async def process_message(user: User, raw_text: str) -> str:
                asume que se refiere al día más reciente en el pasado, no al próximo.
             5. Si falta fecha ⇒ usa get_current_date_for_user.
             6. Si falta moneda ⇒ create_expense asignará la moneda por defecto.
-            
+
             PARA INGRESOS:
             7. Si hay un solo ingreso ⇒ usa parse_income y luego create_income.
             8. Si el mensaje contiene MÁS de un ingreso (separado por "y", "," o ";"…) ⇒
@@ -479,7 +457,7 @@ async def process_message(user: User, raw_text: str) -> str:
                para convertirlas en fechas específicas antes de crear el ingreso.
             10. Si falta fecha ⇒ usa get_current_date_for_user.
             11. Si falta moneda ⇒ create_income asignará la moneda por defecto.
-            
+
             PARA AMBOS:
             12. Si el mensaje pregunta algo responde de acuerdo al historial de mensajes.
             13. Clasifica el movimiento en una de las categorías proporcionadas:
@@ -496,7 +474,7 @@ async def process_message(user: User, raw_text: str) -> str:
                      - Prefiere categorías más generales sobre específicas
                      - Si hay una categoría "Otros" o similar, úsala como último recurso
             14. Si no se especifica fecha, usa get_current_date_for_user para la fecha actual
-            
+
             EDICIÓN Y ELIMINACIÓN:
             16. Si el usuario quiere editar un gasto:
                 16.1 Si menciona un ID específico ⇒ usa get_expense_by_id para verificar que existe
@@ -518,7 +496,7 @@ async def process_message(user: User, raw_text: str) -> str:
                 19.2 Si no menciona ID pero describe el ingreso ⇒ usa search_incomes_by_text
                 19.3 Si encuentra el ingreso, usa delete_income para eliminarlo
                 19.4 Si no encuentra el ingreso, pide más detalles
-            
+
             CONSULTAS:
             20. Si el usuario hace consultas sobre sus gastos o ingresos:
                 20.1 Para consultar por ID específico:
@@ -592,11 +570,11 @@ async def process_message(user: User, raw_text: str) -> str:
             COLORES PARA CATEGORÍAS DE GASTOS:
             - Si necesitas crear una categoría nueva, elige un color hexadecimal (#RRGGBB) que sea visualmente agradable
             - Usa colores que tengan buen contraste y sean coherentes con la temática de la categoría
-            - Ejemplos: azul (#1E3A8A) para categorías relacionadas con servicios, verde (#10B981) para alimentación, 
+            - Ejemplos: azul (#1E3A8A) para categorías relacionadas con servicios, verde (#10B981) para alimentación,
               naranja (#F97316) para transporte, rojo (#DC2626) para préstamos, etc.
             - Asegúrate de que los colores sean atractivos visualmente
 
-            Responde de manera cool, eres joven. 
+            Responde de manera cool, eres joven.
             Puedes usar emojis y gifs.
             Puedes hacer chistes y bromas SOLO si están relacionados con finanzas personales.
             Puedes dar consejos financieros y de ahorro.
@@ -618,26 +596,32 @@ async def process_message(user: User, raw_text: str) -> str:
             - NO compartas información sobre otros usuarios o datos que no pertenezcan al usuario actual
             - Si te preguntan sobre estos temas, responde amablemente que solo puedes ayudar con el registro y consulta de gastos e ingresos
             - Enfócate únicamente en ayudar con la gestión financiera personal del usuario actual
-            """),
-            MessagesPlaceholder("history"),
-            ("human", "{input}"),
-            MessagesPlaceholder("agent_scratchpad"),
-        ])
+            """
 
-        # 3. memoria con los últimos 10 mensajes desde la BD
-        memory = await build_memory(user.id)
+        # 3. Cargar historial de mensajes desde la BD
+        history = await build_history(user.id)
 
-        # 4. ejecutor con timeout
-        executor = build_agent(tools, prompt, memory)
+        # 4. Crear agente con la nueva API create_agent
+        agent = create_agent(
+            model=llm,
+            tools=tools,
+            system_prompt=system_prompt,
+        )
 
-        # 5. invocación con manejo de timeout y reintentos para errores SSL
+        # 5. Construir mensajes: historial + mensaje actual
+        messages = history + [HumanMessage(content=raw_text)]
+
+        # 6. Invocación con manejo de timeout y reintentos para errores SSL
         async def execute_with_retries():
             try:
                 result = await asyncio.wait_for(
-                    executor.ainvoke({"input": raw_text}),
-                    timeout=120.0  # 120 segundos de timeout
+                    agent.ainvoke(
+                        {"messages": messages},
+                        config={"recursion_limit": AGENT_MAX_ITERATIONS},
+                    ),
+                    timeout=120.0
                 )
-                return result["output"]
+                return result["messages"][-1].content
             except asyncio.TimeoutError:
                 logger.error("Timeout al procesar mensaje")
                 raise Exception("Timeout: La operación tomó demasiado tiempo")
