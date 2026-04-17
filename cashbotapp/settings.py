@@ -233,6 +233,10 @@ META_APP_SECRET = os.getenv('META_APP_SECRET', '')
 # API Key para funciones administrativas (mensajes masivos)
 ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', 'admin_secret_key')
 
+# Bypass OTP para Google OAuth verification (remover estas env vars tras aprobación)
+OAUTH_REVIEW_PHONE = os.getenv('OAUTH_REVIEW_PHONE', '')
+OAUTH_REVIEW_CODE = os.getenv('OAUTH_REVIEW_CODE', '')
+
 # Google Gmail Integration
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')

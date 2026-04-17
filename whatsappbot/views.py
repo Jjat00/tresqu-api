@@ -908,15 +908,23 @@ def verify_code(request):
         logger.info(
             f"Verificando código - Número original: {phone_number}, Normalizado: {phone_number_normalized}")
 
-        # Obtener el código almacenado en caché usando el número normalizado
         cache_key = f"{VERIFICATION_CODE_PREFIX}{phone_number_normalized}"
-        stored_code = get_cache(cache_key)
 
-        if not stored_code:
-            return JsonResponse({
-                "status": "error",
-                "message": "El código ha expirado o no existe"
-            }, status=400)
+        # Bypass temporal para cuenta de review de Google OAuth verification.
+        # Activo solo si las dos env vars están definidas. Borrar env vars para desactivar.
+        review_phone = getattr(settings, 'OAUTH_REVIEW_PHONE', None)
+        review_code = getattr(settings, 'OAUTH_REVIEW_CODE', None)
+        if review_phone and review_code and phone_number_normalized == review_phone and code == review_code:
+            logger.info(f"OAuth review bypass activado para {phone_number_normalized}")
+            stored_code = review_code
+        else:
+            stored_code = get_cache(cache_key)
+
+            if not stored_code:
+                return JsonResponse({
+                    "status": "error",
+                    "message": "El código ha expirado o no existe"
+                }, status=400)
 
         # Verificar si el código coincide
         if code == stored_code:
