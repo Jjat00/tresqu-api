@@ -9,11 +9,18 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 
 from expenses.models import Expense
-from categories.utils import get_or_create_user_expense_category
+from categories.utils import (
+    get_or_create_user_expense_category,
+    get_user_categories_with_details,
+)
 from telegrambot.tools import embeddings
 
 from .models import GoogleAccount, GmailWatch, ProcessedEmail
 from .gmail_service import get_gmail_service, get_message, extract_email_text, get_history
+
+# Umbral de confianza: por encima de esto auto-asignamos la categoría
+# sugerida por el LLM sin pedirle al usuario que clasifique.
+AUTO_CATEGORIZATION_CONFIDENCE_THRESHOLD = 0.8
 
 logger = logging.getLogger(__name__)
 
@@ -25,30 +32,53 @@ llm = ChatOpenAI(
 )
 
 
-def parse_purchase_email(email_text: str, subject: str, sender: str) -> dict | None:
+def parse_purchase_email(
+    email_text: str,
+    subject: str,
+    sender: str,
+    user_categories: list[dict] | None = None,
+) -> dict | None:
     """
-    Usa LangChain + GPT-4.1 para analizar si un email es una compra.
+    Usa LangChain + GPT-4.1 para analizar si un email es una compra
+    y sugerir una categoría dentro de las del usuario cuando sea posible.
 
     Returns:
-        dict con: is_purchase, amount, currency, merchant, date, confidence
+        dict con: is_purchase, amount, currency, merchant, date, confidence,
+        suggested_category, category_confidence
         None si hay un error en el procesamiento
     """
     try:
+        if user_categories:
+            categories_block = "\n".join([
+                f"- {c['name']}"
+                + (f" — {c['description']}" if c.get('description') else '')
+                + (f" (ej: {c['examples']})" if c.get('examples') else '')
+                for c in user_categories
+            ])
+        else:
+            categories_block = "(sin categorías propias)"
+
         prompt = ChatPromptTemplate.from_messages([
             ("system", """Eres un experto en análisis de emails financieros. Tu tarea es determinar si un email
-corresponde a una compra, pago o transacción financiera, y extraer los detalles relevantes.
+corresponde a una compra, pago o transacción financiera, extraer los detalles relevantes
+y sugerir la categoría de gasto más adecuada dentro de las categorías del usuario.
+
+CATEGORÍAS DEL USUARIO:
+{categories_block}
 
 Analiza el contenido del email y responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks),
 con la siguiente estructura:
 
-{{
+{{{{
     "is_purchase": true/false,
     "amount": 0.0,
     "currency": "USD",
     "merchant": "Nombre del comercio",
     "date": "YYYY-MM-DD",
-    "confidence": 0.0
-}}
+    "confidence": 0.0,
+    "suggested_category": "Nombre exacto de una categoría existente o null",
+    "category_confidence": 0.0
+}}}}
 
 REGLAS:
 - is_purchase: true si el email es una confirmación de compra, recibo, factura o notificación de pago
@@ -58,6 +88,12 @@ REGLAS:
 - merchant: nombre del comercio o empresa que envió el recibo
 - date: fecha de la transacción en formato YYYY-MM-DD. Si no se encuentra, usar null
 - confidence: nivel de confianza de 0.0 a 1.0 sobre si es una compra real
+- suggested_category: DEBE ser EXACTAMENTE uno de los nombres de la lista anterior.
+  Si ninguna encaja bien, usar null.
+- category_confidence: 0.0 a 1.0 indicando qué tan seguro estás de la categoría.
+  Usa >=0.8 solo si el comercio y el contexto hacen la categoría obvia
+  (ej: Uber → Transporte, Netflix → Suscripciones, Rappi → Alimentación).
+  Usa <0.6 si estás adivinando.
 
 IMPORTANTE:
 - Solo marca is_purchase=true si estás seguro de que es una transacción real, no publicidad
@@ -65,7 +101,8 @@ IMPORTANTE:
 - Si es un email de confirmación de pedido con monto, es una compra
 - Los emails de suscripción (Netflix, Spotify, etc.) son compras
 - Los emails de envío sin monto NO son compras
-- Los newsletters y promociones NO son compras"""),
+- Los newsletters y promociones NO son compras
+- NO inventes categorías nuevas: solo elige una existente o devuelve null"""),
             ("human", """Analiza este email:
 
 ASUNTO: {subject}
@@ -79,6 +116,7 @@ CONTENIDO:
             'subject': subject,
             'sender': sender,
             'body': email_text,
+            'categories_block': categories_block,
         })
 
         # Parsear la respuesta JSON
@@ -92,7 +130,12 @@ CONTENIDO:
             response_text = response_text.strip()
 
         result = json.loads(response_text)
-        logger.info(f"Análisis de email completado: is_purchase={result.get('is_purchase')}, confidence={result.get('confidence')}")
+        logger.info(
+            f"Análisis de email completado: is_purchase={result.get('is_purchase')}, "
+            f"confidence={result.get('confidence')}, "
+            f"suggested_category={result.get('suggested_category')}, "
+            f"category_confidence={result.get('category_confidence')}"
+        )
         return result
 
     except json.JSONDecodeError as e:
@@ -141,8 +184,17 @@ def process_email_for_user(google_account, gmail_message_id):
             processing_status='pending',
         )
 
-        # 4. Analizar con IA si es un email de compra
-        ai_result = parse_purchase_email(body, subject, sender)
+        # 4. Analizar con IA si es un email de compra, pasándole las categorías
+        # del usuario para que intente sugerir una.
+        user = google_account.user
+        user_categories = []
+        try:
+            categories_detail = get_user_categories_with_details(user)
+            user_categories = categories_detail.get('expense_categories', [])
+        except Exception as e:
+            logger.error(f"Error obteniendo categorías para sugerencia: {e}")
+
+        ai_result = parse_purchase_email(body, subject, sender, user_categories=user_categories)
 
         if ai_result is None:
             processed_email.processing_status = 'error'
@@ -163,7 +215,6 @@ def process_email_for_user(google_account, gmail_message_id):
             return
 
         # 6. Verificar límites del plan del usuario
-        user = google_account.user
         can_add, limit_message = user.can_add_expense()
         if not can_add:
             processed_email.processing_status = 'skipped'
@@ -194,13 +245,35 @@ def process_email_for_user(google_account, gmail_message_id):
         else:
             spent_at = timezone.now().date()
 
-        # Categoría por defecto: "Sin Categorizar"
-        category, _ = get_or_create_user_expense_category(
-            user,
-            'Sin Categorizar',
-            description='Gastos detectados por Gmail pendientes de categorización',
-            examples='Compras por email, pagos detectados automáticamente',
+        # Decidir categoría: auto-asignar si el LLM sugirió una existente
+        # con alta confianza; si no, dejar "Sin Categorizar" y pedir al usuario.
+        suggested_category_name = ai_result.get('suggested_category')
+        category_confidence = float(ai_result.get('category_confidence') or 0.0)
+        existing_category_names_lower = {
+            c['name'].lower() for c in user_categories
+        }
+        auto_categorized = (
+            bool(suggested_category_name)
+            and suggested_category_name.lower() in existing_category_names_lower
+            and category_confidence >= AUTO_CATEGORIZATION_CONFIDENCE_THRESHOLD
         )
+
+        if auto_categorized:
+            # Usar la categoría existente tal cual el LLM la nombró
+            category, _ = get_or_create_user_expense_category(
+                user, suggested_category_name
+            )
+            logger.info(
+                f"Auto-categorizando gasto como '{suggested_category_name}' "
+                f"(confianza={category_confidence}) para usuario {user.id}"
+            )
+        else:
+            category, _ = get_or_create_user_expense_category(
+                user,
+                'Sin Categorizar',
+                description='Gastos detectados por Gmail pendientes de categorización',
+                examples='Compras por email, pagos detectados automáticamente',
+            )
 
         # Generar embedding para el gasto
         embedding_text = f"{merchant} {subject}"
@@ -235,7 +308,8 @@ def process_email_for_user(google_account, gmail_message_id):
         processed_email.is_purchase = True
         processed_email.expense = expense
         processed_email.processing_status = 'processed'
-        processed_email.awaiting_categorization = True
+        # Solo marcar como pendiente de categorización si NO se auto-categorizó
+        processed_email.awaiting_categorization = not auto_categorized
         processed_email.save(update_fields=[
             'is_purchase', 'expense', 'processing_status',
             'awaiting_categorization', 'ai_response', 'updated_at'
@@ -246,9 +320,23 @@ def process_email_for_user(google_account, gmail_message_id):
             f"{amount} {currency} - {merchant}"
         )
 
-        # 9. Enviar notificación por WhatsApp
+        # 9. Enviar notificación por WhatsApp y guardar el wamid para resolver
+        # respuestas del usuario con "quote" (swipe to reply).
         try:
-            send_purchase_confirmation_whatsapp(user, expense, merchant, amount, currency)
+            sent_message_id = send_purchase_confirmation_whatsapp(
+                user,
+                expense,
+                merchant,
+                amount,
+                currency,
+                auto_categorized=auto_categorized,
+                category_name=category.name,
+            )
+            if sent_message_id:
+                processed_email.notification_message_id = sent_message_id
+                processed_email.save(update_fields=[
+                    'notification_message_id', 'updated_at'
+                ])
         except Exception as e:
             logger.error(f"Error enviando notificación WhatsApp: {e}")
 
@@ -306,36 +394,68 @@ def process_history_update(google_account, new_history_id):
         logger.error(f"Error procesando actualización de historial para {google_account.google_email}: {e}")
 
 
-def send_purchase_confirmation_whatsapp(user, expense, merchant, amount, currency):
+def send_purchase_confirmation_whatsapp(
+    user,
+    expense,
+    merchant,
+    amount,
+    currency,
+    auto_categorized: bool = False,
+    category_name: str = 'Sin Categorizar',
+) -> str | None:
     """
-    Envía un mensaje de WhatsApp al usuario informando sobre una compra detectada
-    y solicitando la categorización.
+    Envía un mensaje de WhatsApp al usuario informando sobre una compra detectada.
+    Si auto_categorized=True, solo informa (categoría ya asignada).
+    Si no, solicita la categorización al usuario.
+
+    Returns:
+        El wamid del mensaje enviado (para tracking de respuestas) o None si falla.
     """
     try:
         phone_number = user.phone_number
         if not phone_number:
             logger.info(f"Usuario {user.id} no tiene número de teléfono registrado")
-            return
+            return None
 
         from whatsappbot.views import send_meta_whatsapp_message
 
-        message = (
-            f"📧 *Compra detectada desde tu Gmail:*\n\n"
-            f"🏪 *Comercio:* {merchant}\n"
-            f"💰 *Monto:* {amount} {currency}\n"
-            f"📅 *Fecha:* {expense.spent_at}\n\n"
-            f"He registrado este gasto en la categoría *Sin Categorizar*.\n"
-            f"Responde con el nombre de la categoría para clasificarlo "
-            f"(ej: Alimentación, Transporte, Entretenimiento, etc.)"
-        )
+        if auto_categorized:
+            message = (
+                f"📧 *Compra detectada desde tu Gmail:*\n\n"
+                f"🏪 *Comercio:* {merchant}\n"
+                f"💰 *Monto:* {amount} {currency}\n"
+                f"📅 *Fecha:* {expense.spent_at}\n"
+                f"📁 *Categoría:* {category_name}\n\n"
+                f"Registrado automáticamente. Si la categoría no es correcta, "
+                f"responde a este mensaje con la categoría correcta."
+            )
+        else:
+            message = (
+                f"📧 *Compra detectada desde tu Gmail:*\n\n"
+                f"🏪 *Comercio:* {merchant}\n"
+                f"💰 *Monto:* {amount} {currency}\n"
+                f"📅 *Fecha:* {expense.spent_at}\n\n"
+                f"He registrado este gasto en la categoría *Sin Categorizar*.\n"
+                f"Responde con el nombre de la categoría para clasificarlo "
+                f"(ej: Alimentación, Transporte, Entretenimiento, etc.)"
+            )
 
-        success = send_meta_whatsapp_message(phone_number, message)
+        success, sent_message_id = send_meta_whatsapp_message(
+            phone_number, message, return_message_id=True
+        )
         if success:
-            logger.info(f"Notificación de compra enviada a {phone_number}")
+            logger.info(
+                f"Notificación de compra enviada a {phone_number} "
+                f"(wamid={sent_message_id})"
+            )
+            return sent_message_id
         else:
             logger.error(f"Error enviando notificación de compra a {phone_number}")
+            return None
 
     except ImportError:
         logger.warning("whatsappbot no disponible para enviar notificaciones")
+        return None
     except Exception as e:
         logger.error(f"Error enviando confirmación de compra por WhatsApp: {e}")
+        return None

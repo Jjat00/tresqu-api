@@ -37,6 +37,32 @@ def check_pending_categorization(user) -> ProcessedEmail | None:
         return None
 
 
+def find_processed_email_by_notification(
+    user, notification_message_id: str
+) -> ProcessedEmail | None:
+    """
+    Busca un ProcessedEmail por el wamid de la notificación de WhatsApp que se
+    envió al usuario. Se usa cuando el usuario responde (swipe to reply) a un
+    mensaje específico de notificación de compra.
+
+    Incluye tanto los pendientes como los ya categorizados, porque el usuario
+    puede querer corregir una auto-categorización.
+    """
+    if not notification_message_id:
+        return None
+    try:
+        return ProcessedEmail.objects.filter(
+            google_account__user=user,
+            notification_message_id=notification_message_id,
+        ).first()
+    except Exception as e:
+        logger.error(
+            f"Error buscando ProcessedEmail por notification_message_id "
+            f"'{notification_message_id}' para usuario {user.id}: {e}"
+        )
+        return None
+
+
 def categorize_gmail_expense(user, processed_email: ProcessedEmail, category_text: str) -> str:
     """
     Usa IA para interpretar el texto de categoría proporcionado por el usuario
@@ -47,6 +73,7 @@ def categorize_gmail_expense(user, processed_email: ProcessedEmail, category_tex
     """
     try:
         expense = processed_email.expense
+        was_already_categorized = not processed_email.awaiting_categorization
         if not expense:
             processed_email.awaiting_categorization = False
             processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
@@ -123,8 +150,12 @@ El usuario quiere categorizarlo como: {category_text}"""),
         processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
 
         action = "creada" if was_created else "asignada"
+        header = (
+            "✅ *Gasto recategorizado*" if was_already_categorized
+            else "✅ *Gasto categorizado exitosamente*"
+        )
         confirmation = (
-            f"✅ *Gasto categorizado exitosamente*\n\n"
+            f"{header}\n\n"
             f"🏪 *{expense.description}* - {expense.amount} {expense.currency}\n"
             f"📁 *Categoría {action}:* {category_name}\n\n"
             f"¡Listo! El gasto ha sido actualizado."

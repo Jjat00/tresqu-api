@@ -157,6 +157,12 @@ def process_meta_messages(value, waba_id):
                 timestamp = message.get('timestamp')
                 message_type = message.get('type', 'text')
 
+                # Contexto de "reply/quote": Meta incluye este bloque cuando el
+                # usuario deslizó hacia la izquierda para responder otro mensaje.
+                # Nos interesa context.id (el wamid del mensaje referenciado).
+                context_block = message.get('context') or {}
+                replied_to_message_id = context_block.get('id')
+
                 # PREVENCIÓN DE DUPLICADOS - Verificar si el mensaje ya está siendo procesado
                 cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
 
@@ -220,7 +226,8 @@ def process_meta_messages(value, waba_id):
                         waba_id=waba_id,
                         sender_name=sender_name,
                         message_type=message_type,
-                        media_url=media_url
+                        media_url=media_url,
+                        replied_to_message_id=replied_to_message_id,
                     ))
 
                     if success:
@@ -326,7 +333,7 @@ def process_meta_message_status(value, waba_id):
             f"Error procesando estados de mensajes de Meta: {str(e)}")
 
 
-async def handle_meta_whatsapp_message(sender_number, message_text, message_id, waba_id, sender_name="", message_type="text", media_url=None):
+async def handle_meta_whatsapp_message(sender_number, message_text, message_id, waba_id, sender_name="", message_type="text", media_url=None, replied_to_message_id=None):
     """
     Maneja mensajes de WhatsApp usando Meta API con indicadores de estado de lectura
 
@@ -351,7 +358,8 @@ async def handle_meta_whatsapp_message(sender_number, message_text, message_id, 
             api_key=getattr(settings, 'META_WHATSAPP_ACCESS_TOKEN', ''),
             sender_name=sender_name,
             message_type=message_type,
-            media_url=media_url
+            media_url=media_url,
+            replied_to_message_id=replied_to_message_id,
         )
 
         return success, response
@@ -361,10 +369,12 @@ async def handle_meta_whatsapp_message(sender_number, message_text, message_id, 
         return False, str(e)
 
 
-def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_template=False, template_name=None, template_language="es", template_params=None):
+def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_template=False, template_name=None, template_language="es", template_params=None, return_message_id=False):
     """
     Envía un mensaje usando Meta WhatsApp API
-    Soporta tanto mensajes de texto como plantillas
+    Soporta tanto mensajes de texto como plantillas.
+
+    Si return_message_id=True, devuelve (success, message_id) en lugar de solo success.
     """
     try:
         # Configuración de Meta API
@@ -372,10 +382,13 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
         phone_number_id = getattr(
             settings, 'META_WHATSAPP_PHONE_NUMBER_ID', '')
 
+        def _fail():
+            return (False, None) if return_message_id else False
+
         if not access_token or not phone_number_id:
             logger.error(
                 f"Configuración de Meta WhatsApp API incompleta - Access Token: {'✓' if access_token else '✗'}, Phone Number ID: {'✓' if phone_number_id else '✗'}")
-            return False
+            return _fail()
 
         logger.info(
             f"Enviando mensaje Meta - Teléfono: {phone_number}, Usar plantilla: {use_template}")
@@ -385,15 +398,15 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
         # Validaciones básicas
         if not phone_number:
             logger.error("Número de teléfono vacío")
-            return False
+            return _fail()
 
         if not use_template and not message_text:
             logger.error("Mensaje de texto vacío y no es plantilla")
-            return False
+            return _fail()
 
         if use_template and not template_name:
             logger.error("Nombre de plantilla vacío")
-            return False
+            return _fail()
 
         # URL de la API de Meta
         url = f"https://graph.facebook.com/v23.0/{phone_number_id}/messages"
@@ -465,11 +478,16 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
                 response_data = response.json()
                 logger.info(
                     f"✅ Mensaje Meta enviado exitosamente: {response_data}")
-                return True
+                sent_message_id = None
+                try:
+                    sent_message_id = response_data.get('messages', [{}])[0].get('id')
+                except (IndexError, AttributeError, TypeError):
+                    sent_message_id = None
+                return (True, sent_message_id) if return_message_id else True
             except json.JSONDecodeError:
                 logger.error(
                     f"Error decodificando respuesta JSON: {response.text}")
-                return False
+                return _fail()
         else:
             try:
                 error_data = response.json()
@@ -478,11 +496,11 @@ def send_meta_whatsapp_message(phone_number, message_text, waba_id=None, use_tem
             except json.JSONDecodeError:
                 logger.error(
                     f"❌ Error enviando mensaje Meta: {response.status_code} - {response.text}")
-            return False
+            return _fail()
 
     except Exception as e:
         logger.exception(f"Error enviando mensaje Meta WhatsApp: {str(e)}")
-        return False
+        return (False, None) if return_message_id else False
 
 
 @csrf_exempt

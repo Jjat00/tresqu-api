@@ -351,6 +351,99 @@ def find_tracking_link(referral_code):
         return None
 
 
+def _looks_like_categorization(message_text: str) -> bool:
+    """
+    Heurística + LLM para decidir si un mensaje del usuario debe interpretarse
+    como la categoría de un gasto pendiente, o como un mensaje nuevo
+    (registrar otro gasto/ingreso, pregunta, saludo, etc.).
+
+    Se usa cuando hay un gasto de Gmail pendiente de categorizar pero el
+    usuario NO respondió con "swipe to reply" al mensaje de notificación.
+    """
+    if not message_text:
+        return False
+
+    text = message_text.strip()
+
+    # Heurística barata: mensajes con dígitos casi nunca son una categoría,
+    # pero sí son típicos de un registro de gasto/ingreso ("gaste 20k en pan",
+    # "me pagaron 500", "compré café 5000").
+    if any(ch.isdigit() for ch in text):
+        return False
+
+    # Mensajes muy cortos (1-4 palabras) y sin dígitos los consideramos
+    # candidatos a categoría y delegamos al LLM solo si hay duda.
+    word_count = len(text.split())
+    if word_count <= 4:
+        return _llm_intent_is_categorization(text)
+
+    # Mensajes largos sin dígitos rara vez son una sola categoría — delegar al LLM.
+    return _llm_intent_is_categorization(text)
+
+
+def _get_quoted_message_text(chat, platform_message_id: str) -> str | None:
+    """
+    Busca en la BD el texto de un mensaje anterior del mismo chat por su
+    platform_message_id (wamid). Se usa para que el agente sepa sobre qué
+    mensaje está respondiendo el usuario cuando hace swipe to reply.
+    Trunca para no inflar el prompt.
+    """
+    if not platform_message_id:
+        return None
+    try:
+        msg = Message.objects.filter(
+            chat=chat, platform_message_id=platform_message_id
+        ).first()
+        if not msg or not msg.text:
+            return None
+        text = msg.text.strip()
+        return text[:500] + ("…" if len(text) > 500 else "")
+    except Exception as e:
+        logger.error(f"Error obteniendo mensaje citado {platform_message_id}: {e}")
+        return None
+
+
+def _llm_intent_is_categorization(text: str) -> bool:
+    """
+    Llama a un LLM ligero (gpt-4o-mini) para decidir si el texto es una
+    respuesta de categorización o un mensaje nuevo. Falla abierto a False
+    (tratarlo como mensaje nuevo) para no secuestrar al usuario si el
+    clasificador está caído.
+    """
+    try:
+        from django.conf import settings
+        from langchain_openai import ChatOpenAI
+        from langchain_core.prompts import ChatPromptTemplate
+
+        intent_llm = ChatOpenAI(
+            model="gpt-4o-mini",
+            temperature=0,
+            api_key=settings.OPENAI_API_KEY,
+            timeout=10,
+        )
+
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", """Decide si el mensaje del usuario es la CATEGORÍA de un gasto pendiente
+o es un MENSAJE NUEVO (registrar otro gasto/ingreso, pregunta, saludo, etc.).
+
+Contexto: el usuario recibió antes una notificación pidiéndole clasificar un gasto.
+
+Responde ÚNICAMENTE con una sola palabra en minúscula:
+- "categoria" si el mensaje es el nombre de una categoría (ej: "alimentación", "transporte", "ocio", "comida", "streaming", "salud", "mercado").
+- "otro" en cualquier otro caso: si menciona montos, verbos de registrar ("gasté", "pagué", "compré", "gané"), preguntas, saludos, agradecimientos, o texto no relacionado."""),
+            ("human", "{text}"),
+        ])
+
+        chain = prompt | intent_llm
+        response = chain.invoke({"text": text})
+        answer = (response.content or "").strip().lower()
+        logger.info(f"Intent clasificador: '{text[:40]}' → '{answer}'")
+        return answer.startswith("categoria")
+    except Exception as e:
+        logger.error(f"Error en clasificador de intención: {e}")
+        return False
+
+
 def associate_user_with_tracking_link(user, tracking_link):
     """
     Asocia un usuario con un enlace de seguimiento e incrementa el contador
@@ -376,7 +469,7 @@ def associate_user_with_tracking_link(user, tracking_link):
         logger.error(f"Error asociando usuario con TrackingLink: {e}")
 
 
-async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name=None, server_url=None, api_key=None, sender_name=None, message_type="text", media_url=None):
+async def handle_whatsapp_message(sender_number, message_text, message_id, instance_name=None, server_url=None, api_key=None, sender_name=None, message_type="text", media_url=None, replied_to_message_id=None):
     """
     Procesa un mensaje entrante de WhatsApp y envía una respuesta usando Meta WhatsApp API
 
@@ -390,6 +483,8 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         sender_name: Nombre del remitente (opcional)
         message_type: Tipo de mensaje (text, audio, image, etc.)
         media_url: URL del contenido multimedia (si aplica)
+        replied_to_message_id: wamid del mensaje anterior al que el usuario responde
+            (cuando usa la función "swipe to reply" de WhatsApp). None si no aplica.
     """
     try:
         # Variable para controlar si saltamos la verificación de mensajes duplicados
@@ -865,11 +960,39 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 return success, response_text
 
         # 7. Verificar si hay categorización pendiente de Gmail
+        # Prioridad:
+        #   a) Si el usuario respondió (swipe) a una notificación de compra
+        #      específica, categorizar ESE gasto (aunque ya estuviera categorizado
+        #      automáticamente — el usuario está corrigiendo).
+        #   b) Si no, y hay un pendiente sin categoría, usar el flujo normal
+        #      solo cuando el mensaje parece una categoría y no un nuevo gasto
+        #      (intent classifier — Task 3).
         try:
-            from gmailbot.whatsapp_handler import check_pending_categorization, categorize_gmail_expense
-            pending = await sync_to_async(check_pending_categorization)(user)
-            if pending:
-                response_text = await sync_to_async(categorize_gmail_expense)(user, pending, message_text)
+            from gmailbot.whatsapp_handler import (
+                check_pending_categorization,
+                categorize_gmail_expense,
+                find_processed_email_by_notification,
+            )
+
+            target_processed_email = None
+            if replied_to_message_id:
+                target_processed_email = await sync_to_async(
+                    find_processed_email_by_notification
+                )(user, replied_to_message_id)
+
+            if target_processed_email is None:
+                pending = await sync_to_async(check_pending_categorization)(user)
+                if pending:
+                    looks_like_category = await sync_to_async(
+                        _looks_like_categorization
+                    )(message_text)
+                    if looks_like_category:
+                        target_processed_email = pending
+
+            if target_processed_email is not None:
+                response_text = await sync_to_async(categorize_gmail_expense)(
+                    user, target_processed_email, message_text
+                )
                 # Guardar y enviar respuesta
                 await sync_to_async(create_message)(chat, f"response_{message_id}", "outgoing", response_text)
                 success = await send_whatsapp_response(instance_name="meta_api", to_number=sender_number, message=response_text)
@@ -880,8 +1003,22 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
             logger.error(f"Error checking Gmail categorization: {e}")
 
         # 8. Si llegamos aquí, el usuario existe o se ha registrado correctamente
-        # Procesar el mensaje y obtener respuesta
-        response_text = await process_message(user, message_text)
+        # Procesar el mensaje y obtener respuesta.
+        # Si el usuario respondió (swipe) a un mensaje anterior, darle al agente
+        # el texto del mensaje citado como contexto para que pueda responder
+        # sobre él (ej: "¿qué gasto era este?" respondiendo a una notificación).
+        effective_message_text = message_text
+        if replied_to_message_id:
+            quoted = await sync_to_async(_get_quoted_message_text)(
+                chat, replied_to_message_id
+            )
+            if quoted:
+                effective_message_text = (
+                    f"[Respondiendo al mensaje anterior: \"{quoted}\"]\n"
+                    f"{message_text}"
+                )
+
+        response_text = await process_message(user, effective_message_text)
 
         # 9. Guardar la respuesta en la base de datos
         await sync_to_async(create_message)(

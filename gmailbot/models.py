@@ -90,6 +90,12 @@ class ProcessedEmail(models.Model):
     )
     ai_response = models.TextField(blank=True, default='')
     awaiting_categorization = models.BooleanField(default=False)
+    # ID del mensaje de WhatsApp (Meta wamid) con la notificación de la compra.
+    # Se usa para resolver respuestas del usuario con "quote" (swipe to reply)
+    # y saber a qué gasto corresponde la respuesta.
+    notification_message_id = models.CharField(
+        max_length=255, blank=True, default='', db_index=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
