@@ -20,15 +20,16 @@ llm = ChatOpenAI(
 
 def check_pending_categorization(user) -> ProcessedEmail | None:
     """
-    Verifica si el usuario tiene emails pendientes de categorización.
-    Retorna el más antiguo pendiente o None.
+    Verifica si el usuario tiene emails aún en ventana de categorización/
+    corrección. Retorna el MÁS RECIENTE (la respuesta sin swipe-reply
+    aplica casi siempre a la última notificación que vio el usuario).
     """
     try:
         pending = ProcessedEmail.objects.filter(
             google_account__user=user,
             awaiting_categorization=True,
             processing_status='processed',
-        ).order_by('created_at').first()
+        ).order_by('-created_at').first()
 
         return pending
 

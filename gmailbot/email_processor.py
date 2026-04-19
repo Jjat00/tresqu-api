@@ -71,6 +71,7 @@ con la siguiente estructura:
 
 {{{{
     "is_purchase": true/false,
+    "payment_status": "success" | "failed" | "unknown",
     "amount": 0.0,
     "currency": "USD",
     "merchant": "Nombre del comercio",
@@ -81,13 +82,25 @@ con la siguiente estructura:
 }}}}
 
 REGLAS:
-- is_purchase: true si el email es una confirmación de compra, recibo, factura o notificación de pago
-- is_purchase: false si es publicidad, promoción, newsletter, notificación sin transacción real, o cualquier otro tipo de email
-- amount: monto numérico de la transacción (sin símbolos de moneda). Si hay múltiples montos, usar el total
+- is_purchase: true SOLO si el email describe una transacción EXITOSA y completada
+  (compra confirmada, recibo, factura, cargo procesado, pago aprobado).
+- is_purchase: false si es:
+    * publicidad, promoción, newsletter, notificación sin transacción real
+    * un INTENTO de pago RECHAZADO, DECLINADO, FALLIDO o NO AUTORIZADO
+      (p. ej. "pago rechazado", "transacción declinada", "no se pudo procesar",
+      "fondos insuficientes", "operación fallida", "intento de pago rechazado",
+      "declined", "failed", "rejected", "unsuccessful", "tarjeta rechazada")
+    * una alerta de seguridad sin cobro real
+    * un email de envío/entrega sin monto
+- payment_status:
+    * "success" si el pago / compra se procesó exitosamente
+    * "failed" si fue rechazado, declinado, sin fondos, no autorizado, fallido
+    * "unknown" si el email no deja claro el resultado
+- amount: monto numérico de la transacción (sin símbolos de moneda). Si hay múltiples montos, usar el total.
 - currency: código ISO 4217 de la moneda (USD, EUR, COP, MXN, etc.)
 - merchant: nombre del comercio o empresa que envió el recibo
 - date: fecha de la transacción en formato YYYY-MM-DD. Si no se encuentra, usar null
-- confidence: nivel de confianza de 0.0 a 1.0 sobre si es una compra real
+- confidence: nivel de confianza de 0.0 a 1.0 sobre si es una compra real Y exitosa
 - suggested_category: DEBE ser EXACTAMENTE uno de los nombres de la lista anterior.
   Si ninguna encaja bien, usar null.
 - category_confidence: 0.0 a 1.0 indicando qué tan seguro estás de la categoría.
@@ -96,13 +109,11 @@ REGLAS:
   Usa <0.6 si estás adivinando.
 
 IMPORTANTE:
-- Solo marca is_purchase=true si estás seguro de que es una transacción real, no publicidad
-- Si el email es una alerta de cargo bancario o notificación de pago, es una compra
-- Si es un email de confirmación de pedido con monto, es una compra
-- Los emails de suscripción (Netflix, Spotify, etc.) son compras
-- Los emails de envío sin monto NO son compras
-- Los newsletters y promociones NO son compras
-- NO inventes categorías nuevas: solo elige una existente o devuelve null"""),
+- Si payment_status="failed", OBLIGATORIO is_purchase=false (aunque haya monto y comercio).
+- Los emails de suscripción renovada exitosamente (Netflix, Spotify, etc.) son compras.
+- Los emails de envío sin monto NO son compras.
+- Los newsletters y promociones NO son compras.
+- NO inventes categorías nuevas: solo elige una existente o devuelve null."""),
             ("human", """Analiza este email:
 
 ASUNTO: {subject}
@@ -204,14 +215,24 @@ def process_email_for_user(google_account, gmail_message_id):
 
         processed_email.ai_response = json.dumps(ai_result, ensure_ascii=False)
 
-        # 5. Si no es compra, marcar como omitido
-        if not ai_result.get('is_purchase', False) or ai_result.get('confidence', 0) < 0.6:
+        # 5. Si no es compra exitosa, marcar como omitido. Cubre:
+        #    - is_purchase=false
+        #    - confidence baja
+        #    - payment_status="failed" (pagos rechazados / declinados / fallidos)
+        payment_status = (ai_result.get('payment_status') or 'unknown').lower()
+        is_purchase = ai_result.get('is_purchase', False)
+        confidence = ai_result.get('confidence', 0)
+        if payment_status == 'failed' or not is_purchase or confidence < 0.6:
             processed_email.processing_status = 'skipped'
             processed_email.is_purchase = False
             processed_email.save(update_fields=[
                 'processing_status', 'is_purchase', 'ai_response', 'updated_at'
             ])
-            logger.info(f"Email {gmail_message_id} no es una compra (confidence={ai_result.get('confidence', 0)})")
+            logger.info(
+                f"Email {gmail_message_id} omitido "
+                f"(is_purchase={is_purchase}, confidence={confidence}, "
+                f"payment_status={payment_status})"
+            )
             return
 
         # 6. Verificar límites del plan del usuario
@@ -305,11 +326,14 @@ def process_email_for_user(google_account, gmail_message_id):
             logger.error(f"Error incrementando uso mensual: {e}")
 
         # 8. Actualizar el email procesado
+        # Dejamos awaiting_categorization=True incluso cuando se auto-categorizó,
+        # para que el usuario pueda corregir la categoría respondiendo con texto
+        # plano (no solo con swipe-reply). El intent-classifier en el bot filtra
+        # falsos positivos (un "gasté 20k en pan" no se toma como categoría).
         processed_email.is_purchase = True
         processed_email.expense = expense
         processed_email.processing_status = 'processed'
-        # Solo marcar como pendiente de categorización si NO se auto-categorizó
-        processed_email.awaiting_categorization = not auto_categorized
+        processed_email.awaiting_categorization = True
         processed_email.save(update_fields=[
             'is_purchase', 'expense', 'processing_status',
             'awaiting_categorization', 'ai_response', 'updated_at'
@@ -427,7 +451,8 @@ def send_purchase_confirmation_whatsapp(
                 f"📅 *Fecha:* {expense.spent_at}\n"
                 f"📁 *Categoría:* {category_name}\n\n"
                 f"Registrado automáticamente. Si la categoría no es correcta, "
-                f"responde a este mensaje con la categoría correcta."
+                f"respóndeme con la categoría correcta (ej: Ocio, Transporte) "
+                f"o desliza este mensaje para responderlo directamente."
             )
         else:
             message = (
