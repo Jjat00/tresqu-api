@@ -76,8 +76,21 @@ class ProcessedEmail(models.Model):
     sender = models.CharField(max_length=255, default='')
     received_at = models.DateTimeField(null=True, blank=True)
     is_purchase = models.BooleanField(default=False)
+    # Tipo detectado por el LLM: "expense" | "income" | "none".
+    # Se mantiene is_purchase para no romper callers existentes; este campo
+    # agrega la distinción gasto vs ingreso.
+    transaction_type = models.CharField(
+        max_length=16, blank=True, default=''
+    )
     expense = models.ForeignKey(
         'expenses.Expense',
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='processed_emails'
+    )
+    income = models.ForeignKey(
+        'income.Income',
         null=True,
         blank=True,
         on_delete=models.SET_NULL,
