@@ -17,7 +17,10 @@ class SubscriptionSerializer(serializers.ModelSerializer):
     class Meta:
         model = Subscription
         fields = '__all__'
-        read_only_fields = ('created_at', 'updated_at')
+        read_only_fields = (
+            'created_at', 'updated_at', 'mp_preapproval_id', 'mp_status',
+            'next_payment_date', 'card_last_four',
+        )
 
 
 class UserSerializer(serializers.ModelSerializer):
