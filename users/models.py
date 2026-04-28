@@ -468,6 +468,14 @@ class Message(models.Model):
 
 
 class Subscription(models.Model):
+    MP_STATUS_CHOICES = [
+        ('pending', 'Pending'),
+        ('authorized', 'Authorized'),
+        ('paused', 'Paused'),
+        ('cancelled', 'Cancelled'),
+        ('finished', 'Finished'),
+    ]
+
     user = models.ForeignKey(
         User, on_delete=models.CASCADE, related_name='subscription_history')
     plan = models.ForeignKey(SubscriptionPlan, on_delete=models.PROTECT)
@@ -477,11 +485,44 @@ class Subscription(models.Model):
     payment_reference = models.CharField(max_length=255, blank=True, null=True)
     amount_paid = models.DecimalField(max_digits=10, decimal_places=2)
     is_yearly_billing = models.BooleanField(default=False)
+
+    # Mercado Pago fields (populated when subscription is paid via MP)
+    mp_preapproval_id = models.CharField(
+        max_length=100, blank=True, null=True, unique=True,
+        help_text="Mercado Pago preapproval (subscription) id")
+    mp_status = models.CharField(
+        max_length=20, choices=MP_STATUS_CHOICES, blank=True, null=True)
+    next_payment_date = models.DateTimeField(null=True, blank=True)
+    card_last_four = models.CharField(max_length=4, blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     def __str__(self):
         return f"{self.user} - {self.plan.get_name_display()} ({self.start_date.strftime('%Y-%m-%d')})"
+
+
+class MercadoPagoPlan(models.Model):
+    """
+    Mirrors our SubscriptionPlan x billing-cycle as a Mercado Pago preapproval_plan.
+    One row per (subscription_plan, is_yearly) — lazily created on first checkout.
+    BASIC (free) never has a row.
+    """
+    subscription_plan = models.ForeignKey(
+        SubscriptionPlan, on_delete=models.CASCADE, related_name='mp_plans')
+    is_yearly = models.BooleanField(default=False)
+    preapproval_plan_id = models.CharField(max_length=100, unique=True)
+    currency_id = models.CharField(max_length=3, default='COP')
+    transaction_amount = models.DecimalField(max_digits=12, decimal_places=2)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        unique_together = ('subscription_plan', 'is_yearly', 'currency_id')
+
+    def __str__(self):
+        cycle = 'yearly' if self.is_yearly else 'monthly'
+        return f"MP {self.subscription_plan.name} ({cycle}) - {self.preapproval_plan_id}"
 
 
 class Organization(models.Model):
