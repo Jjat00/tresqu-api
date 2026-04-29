@@ -2,6 +2,7 @@ import logging
 import json
 
 from django.conf import settings
+from django.core import signing
 from django.utils import timezone
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 # Scopes requeridos para leer correos de Gmail
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+OAUTH_STATE_SALT = 'gmailbot.oauth.state'
+OAUTH_STATE_MAX_AGE_SECONDS = 15 * 60
 
 
 def _get_client_config():
@@ -31,7 +34,7 @@ def _get_client_config():
 def generate_auth_url(user) -> str:
     """
     Genera la URL de autorización de Google OAuth2.
-    Incluye el user.id cifrado en el parámetro state para identificar
+    Incluye el user.id firmado en el parámetro state para identificar
     al usuario en el callback.
     """
     try:
@@ -41,8 +44,7 @@ def generate_auth_url(user) -> str:
             redirect_uri=settings.GOOGLE_REDIRECT_URI,
         )
 
-        # Usar el user.id como state para identificar al usuario en el callback
-        state = str(user.id)
+        state = generate_oauth_state(user)
 
         auth_url, _ = flow.authorization_url(
             access_type='offline',
@@ -57,6 +59,20 @@ def generate_auth_url(user) -> str:
     except Exception as e:
         logger.error(f"Error generando URL de autorización: {e}")
         raise
+
+
+def generate_oauth_state(user) -> str:
+    """Firma el ID de usuario para evitar manipulación/CSRF en el callback."""
+    return signing.dumps(user.id, salt=OAUTH_STATE_SALT)
+
+
+def parse_oauth_state(state: str) -> int:
+    """Valida el state de OAuth y retorna el user.id embebido."""
+    return int(signing.loads(
+        state,
+        salt=OAUTH_STATE_SALT,
+        max_age=OAUTH_STATE_MAX_AGE_SECONDS,
+    ))
 
 
 def exchange_code(code: str) -> dict:
