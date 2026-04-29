@@ -17,7 +17,7 @@ from users.models import User
 from .encryption import encrypt_token
 from .gmail_service import setup_watch, stop_watch
 from .models import GoogleAccount, GmailWatch, ProcessedEmail
-from .oauth import exchange_code, generate_auth_url, revoke_token
+from .oauth import exchange_code, generate_auth_url, parse_oauth_state, revoke_token
 from .serializers import GoogleAccountStatusSerializer, ProcessedEmailSerializer
 
 logger = logging.getLogger(__name__)
@@ -68,8 +68,8 @@ class GmailOAuthCallbackView(APIView):
             return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=missing_params")
 
         try:
-            # Recuperar el usuario desde el state
-            user_id = int(state)
+            # Recuperar el usuario desde el state firmado generado al iniciar OAuth.
+            user_id = parse_oauth_state(state)
             user = User.objects.get(id=user_id)
 
             # Intercambiar el código por tokens
