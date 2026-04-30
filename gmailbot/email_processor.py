@@ -18,7 +18,13 @@ from categories.utils import (
 from telegrambot.tools import embeddings
 
 from .models import GoogleAccount, GmailWatch, ProcessedEmail
-from .gmail_service import get_gmail_service, get_message, extract_email_text, get_history
+from .gmail_service import (
+    StaleGmailHistoryError,
+    extract_email_text,
+    get_gmail_service,
+    get_history,
+    get_message,
+)
 
 # Umbral de confianza: por encima de esto auto-asignamos la categoría
 # sugerida por el LLM sin pedirle al usuario que clasifique.
@@ -474,7 +480,16 @@ def process_history_update(google_account, new_history_id):
         start_history_id = watch.history_id
 
         # Obtener los IDs de mensajes nuevos
-        message_ids = get_history(google_account, start_history_id)
+        try:
+            message_ids = get_history(google_account, start_history_id)
+        except StaleGmailHistoryError:
+            logger.error(
+                "No se pudo leer el historial de Gmail para %s desde history_id=%s; "
+                "se conserva el puntero actual para evitar perder mensajes.",
+                google_account.google_email,
+                start_history_id,
+            )
+            return
 
         if not message_ids:
             logger.info(f"No hay mensajes nuevos para {google_account.google_email}")
