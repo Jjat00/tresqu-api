@@ -1,32 +1,25 @@
 from unittest.mock import patch
 
-from django.test import TestCase
-
-from users.models import User
+from django.test import SimpleTestCase
 
 from .email_processor import process_history_update
 from .gmail_service import StaleGmailHistoryError
-from .models import GmailWatch, GoogleAccount
 
 
-class GmailHistoryProcessingTests(TestCase):
+class GmailHistoryProcessingTests(SimpleTestCase):
     def test_stale_history_does_not_advance_saved_history_id(self):
-        user = User.objects.create(
-            external_id='gmail-user',
-            platform='WHATSAPP',
-            username='gmail-user',
-        )
-        google_account = GoogleAccount.objects.create(
-            user=user,
-            google_email='gmail-user@gmail.com',
-            access_token_encrypted=b'access-token',
-            refresh_token_encrypted=b'refresh-token',
-        )
-        watch = GmailWatch.objects.create(
-            google_account=google_account,
-            history_id='old-history-id',
-            is_active=True,
-        )
+        class Watch:
+            history_id = 'old-history-id'
+            save_called = False
+
+            def save(self, *args, **kwargs):
+                self.save_called = True
+
+        class GoogleAccount:
+            google_email = 'gmail-user@gmail.com'
+            watch = Watch()
+
+        google_account = GoogleAccount()
 
         with patch(
             'gmailbot.email_processor.get_history',
@@ -34,5 +27,5 @@ class GmailHistoryProcessingTests(TestCase):
         ):
             process_history_update(google_account, 'new-history-id')
 
-        watch.refresh_from_db()
-        self.assertEqual(watch.history_id, 'old-history-id')
+        self.assertEqual(google_account.watch.history_id, 'old-history-id')
+        self.assertFalse(google_account.watch.save_called)
