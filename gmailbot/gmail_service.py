@@ -15,6 +15,10 @@ from .models import GmailWatch
 logger = logging.getLogger(__name__)
 
 
+class StaleGmailHistoryError(Exception):
+    """Raised when Gmail can no longer serve changes from a saved history id."""
+
+
 def get_gmail_service(google_account):
     """
     Construye y devuelve un servicio autenticado de Gmail API.
@@ -156,13 +160,17 @@ def get_history(google_account, start_history_id):
 
     except Exception as e:
         error_str = str(e)
-        # Si el history_id es inválido, retornar lista vacía
-        if '404' in error_str or 'notFound' in error_str:
+        status = getattr(getattr(e, 'resp', None), 'status', None)
+        # Si el history_id es inválido, no debe tratarse como una sincronización vacía:
+        # avanzar el puntero haría irrecuperables los mensajes del intervalo.
+        if status == 404 or '404' in error_str or 'notFound' in error_str:
             logger.warning(
                 f"History ID {start_history_id} no encontrado para "
                 f"{google_account.google_email}. Es posible que sea muy antiguo."
             )
-            return []
+            raise StaleGmailHistoryError(
+                f"History ID {start_history_id} no encontrado para {google_account.google_email}"
+            ) from e
         logger.error(f"Error obteniendo historial para {google_account.google_email}: {e}")
         raise
 

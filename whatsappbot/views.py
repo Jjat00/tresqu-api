@@ -22,6 +22,15 @@ from .services_whatsapp.typing_services import WhatsAppService
 
 logger = logging.getLogger(__name__)
 
+
+def _is_valid_admin_api_key(api_key):
+    configured_key = getattr(settings, 'ADMIN_API_KEY', '')
+    if not configured_key:
+        logger.error("ADMIN_API_KEY no está configurada; rechazando petición administrativa")
+        return False
+    return bool(api_key) and api_key == configured_key
+
+
 # Inicializar servicio de WhatsApp
 whatsapp_service = WhatsAppService()
 
@@ -1138,7 +1147,7 @@ def send_mass_message_api(request):
         # Por ahora, verificamos que tenga una API key válida
         api_key = request.headers.get(
             'Authorization', '').replace('Bearer ', '')
-        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+        if not _is_valid_admin_api_key(api_key):
             return JsonResponse({
                 "status": "error",
                 "message": "No autorizado"
@@ -1364,7 +1373,7 @@ def send_template_message_api(request):
         # Verificar autenticación
         api_key = request.headers.get(
             'Authorization', '').replace('Bearer ', '')
-        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+        if not _is_valid_admin_api_key(api_key):
             return JsonResponse({
                 "status": "error",
                 "message": "No autorizado"
@@ -1504,7 +1513,7 @@ def schedule_reminder_messages(request):
         # Verificar autenticación
         api_key = request.headers.get(
             'Authorization', '').replace('Bearer ', '')
-        if not api_key or api_key != getattr(settings, 'ADMIN_API_KEY', 'admin_secret_key'):
+        if not _is_valid_admin_api_key(api_key):
             return JsonResponse({
                 "status": "error",
                 "message": "No autorizado"
