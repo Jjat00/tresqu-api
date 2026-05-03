@@ -2,6 +2,7 @@ import logging
 import json
 
 from django.conf import settings
+from django.core import signing
 from django.utils import timezone
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
@@ -13,6 +14,8 @@ logger = logging.getLogger(__name__)
 
 # Scopes requeridos para leer correos de Gmail
 GMAIL_SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+GMAIL_OAUTH_STATE_SALT = 'gmailbot.oauth.state'
+GMAIL_OAUTH_STATE_MAX_AGE_SECONDS = 10 * 60
 
 
 def _get_client_config():
@@ -31,8 +34,7 @@ def _get_client_config():
 def generate_auth_url(user) -> str:
     """
     Genera la URL de autorización de Google OAuth2.
-    Incluye el user.id cifrado en el parámetro state para identificar
-    al usuario en el callback.
+    Incluye un state firmado para identificar al usuario en el callback.
     """
     try:
         flow = Flow.from_client_config(
@@ -41,8 +43,7 @@ def generate_auth_url(user) -> str:
             redirect_uri=settings.GOOGLE_REDIRECT_URI,
         )
 
-        # Usar el user.id como state para identificar al usuario en el callback
-        state = str(user.id)
+        state = generate_oauth_state(user)
 
         auth_url, _ = flow.authorization_url(
             access_type='offline',
@@ -57,6 +58,30 @@ def generate_auth_url(user) -> str:
     except Exception as e:
         logger.error(f"Error generando URL de autorización: {e}")
         raise
+
+
+def generate_oauth_state(user) -> str:
+    """
+    Genera un parámetro OAuth state no manipulable para enlazar el callback
+    con el usuario que inició la conexión.
+    """
+    return signing.dumps({'user_id': user.id}, salt=GMAIL_OAUTH_STATE_SALT)
+
+
+def parse_oauth_state(state: str) -> int:
+    """
+    Valida el parámetro OAuth state y retorna el ID del usuario iniciador.
+    Lanza BadSignature o SignatureExpired si el state no es confiable.
+    """
+    data = signing.loads(
+        state,
+        salt=GMAIL_OAUTH_STATE_SALT,
+        max_age=GMAIL_OAUTH_STATE_MAX_AGE_SECONDS,
+    )
+    user_id = data.get('user_id')
+    if user_id is None:
+        raise signing.BadSignature('OAuth state sin user_id')
+    return int(user_id)
 
 
 def exchange_code(code: str) -> dict:

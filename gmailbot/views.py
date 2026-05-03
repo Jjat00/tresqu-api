@@ -3,6 +3,7 @@ import json
 import logging
 
 from django.conf import settings
+from django.core import signing
 from django.http import HttpResponseRedirect
 from django.utils.decorators import method_decorator
 from django.views.decorators.csrf import csrf_exempt
@@ -17,7 +18,7 @@ from users.models import User
 from .encryption import encrypt_token
 from .gmail_service import setup_watch, stop_watch
 from .models import GoogleAccount, GmailWatch, ProcessedEmail
-from .oauth import exchange_code, generate_auth_url, revoke_token
+from .oauth import exchange_code, generate_auth_url, parse_oauth_state, revoke_token
 from .serializers import GoogleAccountStatusSerializer, ProcessedEmailSerializer
 
 logger = logging.getLogger(__name__)
@@ -68,8 +69,8 @@ class GmailOAuthCallbackView(APIView):
             return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=missing_params")
 
         try:
-            # Recuperar el usuario desde el state
-            user_id = int(state)
+            # Recuperar el usuario desde el state firmado generado al iniciar OAuth.
+            user_id = parse_oauth_state(state)
             user = User.objects.get(id=user_id)
 
             # Intercambiar el código por tokens
@@ -114,6 +115,12 @@ class GmailOAuthCallbackView(APIView):
         except User.DoesNotExist:
             logger.error(f"Usuario no encontrado con state={state}")
             return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=user_not_found")
+        except (ValueError, TypeError):
+            logger.error("State de OAuth inválido")
+            return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=invalid_state")
+        except (signing.BadSignature, signing.SignatureExpired):
+            logger.error("State de OAuth inválido o expirado")
+            return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=invalid_state")
         except Exception as e:
             logger.error(f"Error en callback de OAuth: {e}")
             return HttpResponseRedirect(f"{profile_path}?tab=connections&gmail=error&reason=exchange_failed")
