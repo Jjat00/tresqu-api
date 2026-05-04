@@ -403,6 +403,37 @@ def _get_quoted_message_text(chat, platform_message_id: str) -> str | None:
         return None
 
 
+def _resolve_gmail_categorization_target(
+    user,
+    replied_to_message_id: str | None,
+    message_text: str,
+    find_by_notification,
+    check_pending,
+    looks_like_categorization,
+):
+    """
+    Determina qué ProcessedEmail debe categorizarse desde una respuesta de WhatsApp.
+
+    Si el usuario hizo swipe-to-reply, el texto debe aplicarse únicamente al
+    mensaje citado. Caer al último pendiente cuando no se puede resolver el
+    wamid cambiaría silenciosamente otra transacción.
+    """
+    if replied_to_message_id:
+        target = find_by_notification(user, replied_to_message_id)
+        if target is None:
+            logger.warning(
+                "No se encontró ProcessedEmail para la respuesta citada "
+                f"{replied_to_message_id}; no se usará fallback al último pendiente"
+            )
+        return target
+
+    pending = check_pending(user)
+    if pending and looks_like_categorization(message_text):
+        return pending
+
+    return None
+
+
 def _llm_intent_is_categorization(text: str) -> bool:
     """
     Llama a un LLM ligero (gpt-4o-mini) para decidir si el texto es una
@@ -974,20 +1005,16 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                 find_processed_email_by_notification,
             )
 
-            target_processed_email = None
-            if replied_to_message_id:
-                target_processed_email = await sync_to_async(
-                    find_processed_email_by_notification
-                )(user, replied_to_message_id)
-
-            if target_processed_email is None:
-                pending = await sync_to_async(check_pending_categorization)(user)
-                if pending:
-                    looks_like_category = await sync_to_async(
-                        _looks_like_categorization
-                    )(message_text)
-                    if looks_like_category:
-                        target_processed_email = pending
+            target_processed_email = await sync_to_async(
+                _resolve_gmail_categorization_target
+            )(
+                user,
+                replied_to_message_id,
+                message_text,
+                find_processed_email_by_notification,
+                check_pending_categorization,
+                _looks_like_categorization,
+            )
 
             if target_processed_email is not None:
                 response_text = await sync_to_async(categorize_gmail_expense)(
