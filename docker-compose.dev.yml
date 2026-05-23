@@ -12,6 +12,15 @@ services:
     volumes:
       - db-data:/var/lib/postgresql/data
 
+  redis:
+    image: redis:7-alpine
+    container_name: redis-local-cashbot
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+
   web:
     build:
       context: .
@@ -20,6 +29,7 @@ services:
     restart: unless-stopped
     depends_on:
       - db
+      - redis
     environment:
       - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
       - DEBUG=True
@@ -30,6 +40,10 @@ services:
       - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID:-}
       - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      - WALLBIT_API_BASE_URL=${WALLBIT_API_BASE_URL:-https://api.wallbit.io}
+      - WALLBIT_ENCRYPTION_KEY=${WALLBIT_ENCRYPTION_KEY:-}
     ports:
       - "8000:8000"
     volumes:
@@ -38,5 +52,33 @@ services:
       sh -c "python manage.py migrate &&
              python manage.py runserver 0.0.0.0:8000"
 
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: cashbot-worker
+    restart: unless-stopped
+    depends_on:
+      - db
+      - redis
+    environment:
+      - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
+      - DEBUG=True
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
+      - GOOGLE_REDIRECT_URI=${GOOGLE_REDIRECT_URI:-http://localhost:8000/api/gmail/oauth/callback/}
+      - GOOGLE_PUBSUB_TOPIC=${GOOGLE_PUBSUB_TOPIC:-}
+      - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID:-}
+      - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:-}
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      - WALLBIT_API_BASE_URL=${WALLBIT_API_BASE_URL:-https://api.wallbit.io}
+      - WALLBIT_ENCRYPTION_KEY=${WALLBIT_ENCRYPTION_KEY:-}
+    volumes:
+      - .:/app
+    command: celery -A cashbotapp worker -l info
+
 volumes:
   db-data:
+  redis-data:
