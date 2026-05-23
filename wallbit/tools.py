@@ -192,16 +192,18 @@ WALLBIT_TOOLS = [
 def make_wallbit_tools(
     user_external_id: str,
     *,
+    user=None,
     channel: str = "whatsapp",
     user_message: str = "",
 ) -> list:
     """Bind ``user_external_id`` so the LLM doesn't have to provide it.
 
-    The bot wrappers already inject the resolved Tresqu user id into other
-    tools the same way (see whatsappbot/services.py and telegrambot/services.py).
+    Pass ``user`` (an already-resolved ``users.models.User`` instance) when
+    calling from an async context — the factory will skip the synchronous
+    DB lookup it would otherwise perform.
 
-    When ``channel`` and ``user_message`` are provided, the write tools and
-    the RAG history tool are also returned. Read-only callers can omit them.
+    When ``channel`` and ``user_message`` are provided, the write tools are
+    appended. Read-only callers can omit them.
     """
 
     @tool
@@ -284,10 +286,12 @@ def make_wallbit_tools(
     ]
 
     if channel and user_message is not None:
-        try:
-            user_obj = User.objects.get(external_id=user_external_id)
-        except User.DoesNotExist:
-            return bound
+        user_obj = user
+        if user_obj is None:
+            try:
+                user_obj = User.objects.get(external_id=user_external_id)
+            except User.DoesNotExist:
+                return bound
         from .write_tools import make_wallbit_write_tools
         bound.extend(make_wallbit_write_tools(user_obj, channel, user_message))
 

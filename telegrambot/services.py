@@ -394,6 +394,7 @@ async def process_message(user: User, raw_text: str) -> str:
         tools.extend(
             make_wallbit_tools(
                 user.external_id,
+                user=user,
                 channel="telegram",
                 user_message=raw_text,
             )

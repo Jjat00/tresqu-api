@@ -199,8 +199,9 @@ def process_meta_messages(value, waba_id):
                             try:
                                 from users.models import User
                                 from .wallbit_handlers import handle_button_press
+                                wa_external_id = f"wa_{from_number}"
                                 user = User.objects.filter(
-                                    external_id=from_number
+                                    external_id__contains=wa_external_id
                                 ).first()
                                 if user is None:
                                     reply_text = "No encontré tu cuenta."

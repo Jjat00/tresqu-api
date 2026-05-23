@@ -72,9 +72,7 @@ def _summary_text(preview: dict[str, Any], two_step: bool) -> str:
 def send_confirmation_buttons(
     phone: str, decision_id: int, preview: dict[str, Any], two_step: bool = False
 ) -> bool:
-    phone_number_id = getattr(settings, "META_PHONE_NUMBER_ID", "") or getattr(
-        settings, "META_WHATSAPP_PHONE_ID", ""
-    )
+    phone_number_id = getattr(settings, "META_WHATSAPP_PHONE_NUMBER_ID", "")
     access_token = getattr(settings, "META_WHATSAPP_ACCESS_TOKEN", "")
     if not phone_number_id or not access_token:
         logger.error("Meta credentials missing; cannot send confirmation buttons")

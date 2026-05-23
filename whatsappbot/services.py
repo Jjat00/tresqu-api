@@ -527,6 +527,7 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
             + additional_tools
             + make_wallbit_tools(
                 user.external_id,
+                user=user,
                 channel="whatsapp",
                 user_message=raw_text,
             )
