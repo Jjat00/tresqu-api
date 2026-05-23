@@ -60,6 +60,7 @@ INSTALLED_APPS = [
     'whatsappbot',
     'savings',
     'gmailbot',
+    'wallbit',
 ]
 
 REST_FRAMEWORK = {
