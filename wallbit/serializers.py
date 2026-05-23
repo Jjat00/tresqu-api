@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import WallbitAccount
+from .models import AgentDecision, AgentLimits, WallbitAccount
 
 
 class WallbitConnectSerializer(serializers.Serializer):
@@ -26,3 +26,34 @@ class WallbitStatusSerializer(serializers.ModelSerializer):
 
     def get_connected(self, obj: WallbitAccount) -> bool:
         return obj.status == WallbitAccount.CONNECTED
+
+
+class AgentDecisionSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentDecision
+        fields = (
+            "id",
+            "channel",
+            "user_message",
+            "agent_reasoning",
+            "tools_called",
+            "requires_confirmation",
+            "confirmed_at",
+            "executed",
+            "wallbit_tx_uuid",
+            "error",
+            "created_at",
+        )
+        read_only_fields = fields
+
+
+class AgentLimitsSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = AgentLimits
+        fields = (
+            "max_trade_usd",
+            "max_daily_move_usd",
+            "allowed_symbols",
+            "blocked_symbols",
+            "require_2step_above_usd",
+        )

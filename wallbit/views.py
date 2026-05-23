@@ -2,9 +2,11 @@ import logging
 
 from django.utils import timezone
 from rest_framework import permissions, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .agent_safety import get_account_or_raise, get_pending_decision
 from .client import (
     WallbitAuthError,
     WallbitClient,
@@ -12,8 +14,14 @@ from .client import (
     WallbitPermissionError,
 )
 from .crypto import encrypt_api_key
-from .models import WallbitAccount
-from .serializers import WallbitConnectSerializer, WallbitStatusSerializer
+from .executors import UnknownTool, execute_decision
+from .models import AgentDecision, AgentLimits, WallbitAccount
+from .serializers import (
+    AgentDecisionSerializer,
+    AgentLimitsSerializer,
+    WallbitConnectSerializer,
+    WallbitStatusSerializer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,3 +99,105 @@ class WallbitDisconnectView(APIView):
         account.kill_switch_until = timezone.now() + timezone.timedelta(days=365)
         account.save(update_fields=["status", "kill_switch_until"])
         return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
+
+
+class AgentDecisionPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class AgentDecisionListView(APIView):
+    """GET /api/wallbit/agent/decisions — paginated audit log for the user."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        qs = AgentDecision.objects.filter(user=request.user).order_by("-created_at")
+        paginator = AgentDecisionPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = AgentDecisionSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class AgentConfirmView(APIView):
+    """POST /api/wallbit/agent/confirm/{decision_id} — execute a pending decision."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, decision_id: int):
+        try:
+            decision = get_pending_decision(request.user, decision_id)
+        except AgentDecision.DoesNotExist:
+            return Response(
+                {"detail": "Decision not found or already resolved."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            account = get_account_or_raise(request.user)
+        except Exception as exc:
+            return Response(
+                {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if account.kill_switch_until and account.kill_switch_until > timezone.now():
+            return Response(
+                {"detail": "Kill switch active — cannot execute."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        try:
+            result = execute_decision(decision, account)
+        except UnknownTool as exc:
+            return Response(
+                {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        decision.refresh_from_db()
+        return Response(
+            {
+                "result": result,
+                "decision": AgentDecisionSerializer(decision).data,
+            },
+            status=status.HTTP_200_OK if result.get("ok") else status.HTTP_502_BAD_GATEWAY,
+        )
+
+
+class AgentLimitsView(APIView):
+    """GET/POST /api/wallbit/limits — read or update the user's AgentLimits."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        limits, _ = AgentLimits.objects.get_or_create(user=request.user)
+        return Response(AgentLimitsSerializer(limits).data)
+
+    def post(self, request):
+        limits, _ = AgentLimits.objects.get_or_create(user=request.user)
+        serializer = AgentLimitsSerializer(limits, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+
+
+class WallbitSyncView(APIView):
+    """POST /api/wallbit/sync — manually trigger a transaction sync."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        try:
+            account = get_account_or_raise(request.user)
+        except Exception as exc:
+            return Response(
+                {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        from .tasks import sync_wallbit_transactions
+
+        async_result = sync_wallbit_transactions.delay(account.id)
+        return Response(
+            {"task_id": async_result.id, "queued": True},
+            status=status.HTTP_202_ACCEPTED,
+        )

@@ -77,7 +77,7 @@ services:
       - WALLBIT_ENCRYPTION_KEY=${WALLBIT_ENCRYPTION_KEY:-}
     volumes:
       - .:/app
-    command: celery -A cashbotapp worker -l info
+    command: celery -A cashbotapp worker -B --scheduler celery.beat:PersistentScheduler -l info
 
 volumes:
   db-data:

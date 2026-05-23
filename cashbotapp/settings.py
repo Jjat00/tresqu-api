@@ -373,6 +373,12 @@ CELERY_TIMEZONE = "UTC"
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 5 * 60
 CELERY_TASK_SOFT_TIME_LIMIT = 4 * 60
+CELERY_BEAT_SCHEDULE = {
+    "wallbit-sync-all-connected": {
+        "task": "wallbit.tasks.sync_all_connected_accounts",
+        "schedule": 15 * 60,  # every 15 minutes
+    },
+}
 
 # Wallbit
 WALLBIT_API_BASE_URL = os.getenv("WALLBIT_API_BASE_URL", "https://api.wallbit.io")
