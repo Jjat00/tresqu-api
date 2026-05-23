@@ -16,6 +16,8 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
 
+from wallbit.tools import WALLBIT_TOOLS
+
 from telegrambot.tools import (
     get_current_date,
     parse_expense,
@@ -389,6 +391,7 @@ async def process_message(user: User, raw_text: str) -> str:
             get_category_expenses, get_category_incomes,
             get_top_expense_categories, get_top_income_categories_for_user
         ])
+        tools.extend(WALLBIT_TOOLS)
 
         # Obtener las categorías con sus detalles específicas del usuario
         categories_with_details = await get_categories_with_details(user)
