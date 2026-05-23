@@ -31,7 +31,7 @@ services:
       - db
       - redis
     environment:
-      - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
+      - DATABASE_URL=postgresql://cashbot:cashbot@db:5432/cashbot
       - DEBUG=True
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
@@ -62,7 +62,7 @@ services:
       - db
       - redis
     environment:
-      - DATABASE_URL=postgresql://cashbot:cashbot@db:5433/cashbot
+      - DATABASE_URL=postgresql://cashbot:cashbot@db:5432/cashbot
       - DEBUG=True
       - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID:-}
       - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET:-}
