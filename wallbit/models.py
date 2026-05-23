@@ -1,6 +1,7 @@
-from django.conf import settings
 from django.db import models
 from pgvector.django import VectorField
+
+from users.models import User
 
 
 class WallbitAccount(models.Model):
@@ -14,7 +15,7 @@ class WallbitAccount(models.Model):
     ]
 
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name="wallbit_account",
     )
@@ -97,7 +98,7 @@ class Investment(models.Model):
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name="investments",
     )
@@ -142,7 +143,7 @@ class AgentDecision(models.Model):
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name="agent_decisions",
     )
@@ -169,7 +170,7 @@ class AgentDecision(models.Model):
 
 class AgentLimits(models.Model):
     user = models.OneToOneField(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name="agent_limits",
     )
@@ -204,7 +205,7 @@ class ParsedStatement(models.Model):
     ]
 
     user = models.ForeignKey(
-        settings.AUTH_USER_MODEL,
+        User,
         on_delete=models.CASCADE,
         related_name="parsed_statements",
     )
