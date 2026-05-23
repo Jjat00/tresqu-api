@@ -14,7 +14,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.tools import tool
 
-from wallbit.tools import WALLBIT_TOOLS
+from wallbit.tools import make_wallbit_tools
 
 # Importamos las herramientas de telegrambot ya que son genéricas
 # para nuestro caso de uso
@@ -522,7 +522,11 @@ async def process_message(user: User, raw_text: str) -> str:
         ]
 
         # Combinar todas las herramientas (incluyendo Wallbit read tools)
-        async_tools = basic_tools + additional_tools + WALLBIT_TOOLS
+        async_tools = (
+            basic_tools
+            + additional_tools
+            + make_wallbit_tools(user.external_id)
+        )
 
         # 2. Obtener las categorías con sus detalles específicas del usuario
         categories_with_details = await get_categories_with_details(user)

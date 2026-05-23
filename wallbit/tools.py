@@ -187,3 +187,69 @@ WALLBIT_TOOLS = [
     wallbit_search_assets,
     wallbit_get_asset,
 ]
+
+
+def make_wallbit_tools(user_external_id: str) -> list:
+    """Bind ``user_external_id`` so the LLM doesn't have to provide it.
+
+    The bot wrappers already inject the resolved Tresqu user id into other
+    tools the same way (see whatsappbot/services.py and telegrambot/services.py).
+    """
+
+    @tool
+    def wallbit_get_balance_for_user() -> dict[str, Any]:
+        """Devuelve el saldo Wallbit del usuario actual: efectivo por moneda y acciones por símbolo."""
+        return wallbit_get_balance.invoke({"user_external_id": user_external_id})
+
+    @tool
+    def wallbit_list_transactions_for_user(
+        limit: int = 10,
+        tx_type: str = "",
+        from_date: str = "",
+        to_date: str = "",
+    ) -> dict[str, Any]:
+        """Lista transacciones Wallbit del usuario actual (más recientes primero).
+
+        Args:
+            limit: 10 | 20 | 50.
+            tx_type: TRADE, INTERNAL, DEPOSIT, WITHDRAW, ROBOADVISOR_DEPOSIT,
+                ROBOADVISOR_WITHDRAW, CARD_PAYMENT. Vacío = todas.
+            from_date: YYYY-MM-DD opcional.
+            to_date: YYYY-MM-DD opcional.
+        """
+        return wallbit_list_transactions.invoke({
+            "user_external_id": user_external_id,
+            "limit": limit,
+            "tx_type": tx_type,
+            "from_date": from_date,
+            "to_date": to_date,
+        })
+
+    @tool
+    def wallbit_search_assets_for_user(
+        query: str = "",
+        category: str = "",
+        limit: int = 10,
+    ) -> dict[str, Any]:
+        """Busca activos en el catálogo Wallbit (acciones, ETFs, bonos)."""
+        return wallbit_search_assets.invoke({
+            "user_external_id": user_external_id,
+            "query": query,
+            "category": category,
+            "limit": limit,
+        })
+
+    @tool
+    def wallbit_get_asset_for_user(symbol: str) -> dict[str, Any]:
+        """Devuelve la ficha completa de un activo Wallbit por su símbolo."""
+        return wallbit_get_asset.invoke({
+            "user_external_id": user_external_id,
+            "symbol": symbol,
+        })
+
+    return [
+        wallbit_get_balance_for_user,
+        wallbit_list_transactions_for_user,
+        wallbit_search_assets_for_user,
+        wallbit_get_asset_for_user,
+    ]
