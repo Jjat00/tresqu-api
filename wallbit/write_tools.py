@@ -106,18 +106,25 @@ def _preview_place_trade(
     return _pending_payload(decision.id, preview, check.two_step_required)
 
 
+_ACCOUNT_BUCKETS = {"DEFAULT", "INVESTMENT"}
+
+
 def _preview_move_funds(
     *, user: User, channel: str, user_message: str,
-    source_currency: str, dest_currency: str, amount: float,
+    currency: str, from_account: str, to_account: str, amount: float,
 ) -> dict[str, Any]:
-    source = (source_currency or "").upper().strip()
-    dest = (dest_currency or "").upper().strip()
-    if not source or not dest:
+    currency_norm = (currency or "").upper().strip()
+    src = (from_account or "").upper().strip()
+    dst = (to_account or "").upper().strip()
+    if not currency_norm:
         return {"ok": False, "error": "currency_required",
-                "message": "source_currency y dest_currency son obligatorios."}
-    if source == dest:
-        return {"ok": False, "error": "same_currency",
-                "message": "Las monedas de origen y destino son iguales."}
+                "message": "currency es obligatorio."}
+    if src not in _ACCOUNT_BUCKETS or dst not in _ACCOUNT_BUCKETS:
+        return {"ok": False, "error": "invalid_account",
+                "message": "from_account y to_account deben ser DEFAULT o INVESTMENT."}
+    if src == dst:
+        return {"ok": False, "error": "same_account",
+                "message": "Las cuentas de origen y destino son iguales."}
 
     amount_dec = Decimal(str(amount))
     if amount_dec <= 0:
@@ -130,25 +137,28 @@ def _preview_move_funds(
     except (AccountNotConnected, KillSwitchActive) as exc:
         return _safety_error_payload(exc)
 
-    # Approximate USD value for limit eval — assume 1:1 if non-USD source.
-    # TODO: convert source -> USD using a Wallbit rate endpoint.
     check = evaluate_move_limits(user, amount_dec)
     if not check.ok:
         return _limits_error_payload(check)
 
     preview = {
-        "source_currency": source,
-        "dest_currency": dest,
+        "currency": currency_norm,
+        "from_account": src,
+        "to_account": dst,
         "amount": str(amount_dec),
-        "summary": f"Mover {amount_dec} {source} → {dest}",
+        "summary": f"Mover {amount_dec} {currency_norm} de {src} → {dst}",
     }
     decision = create_pending_decision(
         user=user,
         channel=channel,
         user_message=user_message,
         tool_name="wallbit_move_funds",
-        tool_args={"source_currency": source, "dest_currency": dest,
-                   "amount": str(amount_dec)},
+        tool_args={
+            "currency": currency_norm,
+            "from_account": src,
+            "to_account": dst,
+            "amount": str(amount_dec),
+        },
         preview=preview,
     )
     return _pending_payload(decision.id, preview, check.two_step_required)
@@ -156,7 +166,8 @@ def _preview_move_funds(
 
 def _preview_chest(
     *, user: User, channel: str, user_message: str,
-    action: str, chest_id: int, amount_usd: float,
+    action: str, robo_advisor_id: int, amount_usd: float,
+    counter_account: str = "DEFAULT",
     chest_category: str = "",
 ) -> dict[str, Any]:
     action_norm = action.upper()  # DEPOSIT | WITHDRAW
@@ -164,6 +175,13 @@ def _preview_chest(
     if amount <= 0:
         return {"ok": False, "error": "amount_invalid",
                 "message": "amount_usd debe ser mayor a 0."}
+    if action_norm == "DEPOSIT" and amount < 10:
+        return {"ok": False, "error": "amount_too_low",
+                "message": "El depósito mínimo en el Robo Advisor es USD 10."}
+    counter = (counter_account or "DEFAULT").upper()
+    if counter not in _ACCOUNT_BUCKETS:
+        return {"ok": False, "error": "invalid_account",
+                "message": "La cuenta contraparte debe ser DEFAULT o INVESTMENT."}
 
     try:
         account = get_account_or_raise(user)
@@ -176,20 +194,34 @@ def _preview_chest(
         return _limits_error_payload(check)
 
     tool_name = "wallbit_deposit_chest" if action_norm == "DEPOSIT" else "wallbit_withdraw_chest"
+    tool_args: dict[str, Any] = {
+        "robo_advisor_id": int(robo_advisor_id),
+        "amount_usd": str(amount),
+        "chest_category": chest_category,
+    }
+    if action_norm == "DEPOSIT":
+        tool_args["from_account"] = counter
+    else:
+        tool_args["to_account"] = counter
+
     preview = {
         "action": action_norm,
-        "chest_id": chest_id,
+        "robo_advisor_id": int(robo_advisor_id),
         "chest_category": chest_category,
         "amount_usd": str(amount),
-        "summary": f"{action_norm} USD {amount} {'a' if action_norm == 'DEPOSIT' else 'de'} cofre #{chest_id}",
+        "counter_account": counter,
+        "summary": (
+            f"{action_norm} USD {amount} "
+            f"{'a' if action_norm == 'DEPOSIT' else 'de'} robo #{robo_advisor_id} "
+            f"({'from ' if action_norm == 'DEPOSIT' else 'to '}{counter})"
+        ),
     }
     decision = create_pending_decision(
         user=user,
         channel=channel,
         user_message=user_message,
         tool_name=tool_name,
-        tool_args={"chest_id": chest_id, "amount_usd": str(amount),
-                   "chest_category": chest_category},
+        tool_args=tool_args,
         preview=preview,
     )
     return _pending_payload(decision.id, preview, check.two_step_required)
@@ -197,12 +229,16 @@ def _preview_chest(
 
 def _preview_set_card_status(
     *, user: User, channel: str, user_message: str,
-    card_id: int, new_status: str,
+    card_uuid: str, new_status: str,
 ) -> dict[str, Any]:
+    card_uuid_norm = (card_uuid or "").strip()
+    if not card_uuid_norm:
+        return {"ok": False, "error": "card_uuid_required",
+                "message": "Falta el card_uuid."}
     status_norm = (new_status or "").upper()
-    if status_norm not in {"ACTIVE", "FROZEN"}:
+    if status_norm not in {"ACTIVE", "SUSPENDED"}:
         return {"ok": False, "error": "invalid_status",
-                "message": "new_status debe ser ACTIVE o FROZEN."}
+                "message": "new_status debe ser ACTIVE o SUSPENDED."}
 
     try:
         account = get_account_or_raise(user)
@@ -211,16 +247,16 @@ def _preview_set_card_status(
         return _safety_error_payload(exc)
 
     preview = {
-        "card_id": card_id,
+        "card_uuid": card_uuid_norm,
         "new_status": status_norm,
-        "summary": f"Tarjeta #{card_id} → {status_norm}",
+        "summary": f"Tarjeta {card_uuid_norm} → {status_norm}",
     }
     decision = create_pending_decision(
         user=user,
         channel=channel,
         user_message=user_message,
         tool_name="wallbit_set_card_status",
-        tool_args={"card_id": card_id, "new_status": status_norm},
+        tool_args={"card_uuid": card_uuid_norm, "new_status": status_norm},
         preview=preview,
     )
     # Card freeze is high-leverage but doesn't move money; treat as single step.
@@ -251,60 +287,76 @@ def make_wallbit_write_tools(
 
     @tool
     def wallbit_move_funds(
-        source_currency: str, dest_currency: str, amount: float
+        currency: str, from_account: str, to_account: str, amount: float
     ) -> dict[str, Any]:
-        """Propone mover fondos entre dos cuentas/monedas internas del user en Wallbit (NO ejecuta).
+        """Propone mover fondos entre las cuentas internas DEFAULT e INVESTMENT del user en Wallbit (NO ejecuta).
+
+        Wallbit no convierte monedas en este endpoint: solo mueve saldo de una
+        misma moneda entre las dos cuentas internas (DEFAULT vs INVESTMENT).
 
         Args:
-            source_currency: Moneda de origen, ej "USD".
-            dest_currency: Moneda de destino, ej "ARS".
-            amount: Monto en la moneda de origen.
+            currency: Moneda a mover, ej "USD".
+            from_account: DEFAULT o INVESTMENT.
+            to_account: DEFAULT o INVESTMENT (distinto al de origen).
+            amount: Monto a mover.
         """
         return _preview_move_funds(
             user=user, channel=channel, user_message=user_message,
-            source_currency=source_currency, dest_currency=dest_currency,
-            amount=amount,
+            currency=currency, from_account=from_account,
+            to_account=to_account, amount=amount,
         )
 
     @tool
     def wallbit_deposit_chest(
-        chest_id: int, amount_usd: float, chest_category: str = ""
+        robo_advisor_id: int, amount_usd: float,
+        from_account: str = "DEFAULT", chest_category: str = "",
     ) -> dict[str, Any]:
-        """Propone depositar USD en un Chest (cofre de roboadvisor) del user (NO ejecuta).
+        """Propone depositar USD en un Robo Advisor del user (NO ejecuta).
 
         Args:
-            chest_id: ID del chest en Wallbit.
-            amount_usd: Monto en USD a depositar.
-            chest_category: Etiqueta opcional (EMERGENCIES, VACATIONS...).
+            robo_advisor_id: ID del robo advisor en Wallbit.
+            amount_usd: Monto en USD a depositar (mínimo 10).
+            from_account: Cuenta origen — DEFAULT o INVESTMENT (default DEFAULT).
+            chest_category: Etiqueta opcional para tu historial (EMERGENCIES, VACATIONS...).
         """
         return _preview_chest(
             user=user, channel=channel, user_message=user_message,
-            action="DEPOSIT", chest_id=chest_id, amount_usd=amount_usd,
+            action="DEPOSIT", robo_advisor_id=robo_advisor_id,
+            amount_usd=amount_usd, counter_account=from_account,
             chest_category=chest_category,
         )
 
     @tool
     def wallbit_withdraw_chest(
-        chest_id: int, amount_usd: float, chest_category: str = ""
+        robo_advisor_id: int, amount_usd: float,
+        to_account: str = "DEFAULT", chest_category: str = "",
     ) -> dict[str, Any]:
-        """Propone retirar USD de un Chest (cofre) del user (NO ejecuta)."""
+        """Propone retirar USD de un Robo Advisor del user (NO ejecuta).
+
+        Args:
+            robo_advisor_id: ID del robo advisor en Wallbit.
+            amount_usd: Monto en USD a retirar.
+            to_account: Cuenta destino — DEFAULT o INVESTMENT (default DEFAULT).
+            chest_category: Etiqueta opcional para tu historial.
+        """
         return _preview_chest(
             user=user, channel=channel, user_message=user_message,
-            action="WITHDRAW", chest_id=chest_id, amount_usd=amount_usd,
+            action="WITHDRAW", robo_advisor_id=robo_advisor_id,
+            amount_usd=amount_usd, counter_account=to_account,
             chest_category=chest_category,
         )
 
     @tool
-    def wallbit_set_card_status(card_id: int, new_status: str) -> dict[str, Any]:
-        """Propone congelar (FROZEN) o reactivar (ACTIVE) una tarjeta Wallbit (NO ejecuta).
+    def wallbit_set_card_status(card_uuid: str, new_status: str) -> dict[str, Any]:
+        """Propone activar (ACTIVE) o suspender (SUSPENDED) una tarjeta Wallbit (NO ejecuta).
 
         Args:
-            card_id: ID de la tarjeta.
-            new_status: ACTIVE o FROZEN.
+            card_uuid: UUID de la tarjeta (string).
+            new_status: ACTIVE o SUSPENDED.
         """
         return _preview_set_card_status(
             user=user, channel=channel, user_message=user_message,
-            card_id=card_id, new_status=new_status,
+            card_uuid=card_uuid, new_status=new_status,
         )
 
     return [

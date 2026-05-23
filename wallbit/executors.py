@@ -66,21 +66,28 @@ def _record_investment(
 def execute_place_trade(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
-    action = args["action"].upper()
+    direction = args["action"].upper()  # BUY | SELL
     symbol = args["symbol"].upper()
     amount_usd = Decimal(str(args["amount_usd"]))
+    currency = (args.get("currency") or "USD").upper()
+    order_type = (args.get("order_type") or "MARKET").upper()
 
-    # TODO: confirm exact Wallbit endpoint shape for trade orders.
-    body = {"action": action, "amount_usd": str(amount_usd)}
+    body: dict[str, Any] = {
+        "symbol": symbol,
+        "direction": direction,
+        "currency": currency,
+        "order_type": order_type,
+        "amount": float(amount_usd),
+    }
     with _client(account) as client:
-        response = client.post(f"/assets/{symbol}/order", json=body)
+        response = client.post("/trades", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
     _record_investment(
         user_id=decision.user_id,
         kind=Investment.STOCK,
-        action=Investment.BUY if action == "BUY" else Investment.SELL,
+        action=Investment.BUY if direction == "BUY" else Investment.SELL,
         symbol=symbol,
         amount_usd=amount_usd,
         wallbit_tx_uuid=tx_uuid,
@@ -91,19 +98,19 @@ def execute_place_trade(
 def execute_move_funds(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
-    source = args["source_currency"].upper()
-    dest = args["dest_currency"].upper()
+    currency = args["currency"].upper()
+    from_account = args["from_account"].upper()  # DEFAULT | INVESTMENT
+    to_account = args["to_account"].upper()  # DEFAULT | INVESTMENT
     amount = Decimal(str(args["amount"]))
 
-    # TODO: confirm internal-transfer endpoint shape.
     body = {
-        "type": "INTERNAL",
-        "source_currency": source,
-        "dest_currency": dest,
-        "source_amount": str(amount),
+        "currency": currency,
+        "from": from_account,
+        "to": to_account,
+        "amount": float(amount),
     }
     with _client(account) as client:
-        response = client.post("/transactions", json=body)
+        response = client.post("/operations/internal", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
@@ -113,14 +120,17 @@ def execute_move_funds(
 def execute_deposit_chest(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
-    chest_id = int(args["chest_id"])
+    robo_advisor_id = int(args["robo_advisor_id"])
     amount_usd = Decimal(str(args["amount_usd"]))
+    from_account = (args.get("from_account") or "DEFAULT").upper()
 
-    # TODO: confirm chest deposit endpoint shape.
+    body = {
+        "robo_advisor_id": robo_advisor_id,
+        "amount": float(amount_usd),
+        "from": from_account,
+    }
     with _client(account) as client:
-        response = client.post(
-            f"/chests/{chest_id}/deposit", json={"amount_usd": str(amount_usd)}
-        )
+        response = client.post("/roboadvisor/deposit", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
@@ -138,13 +148,17 @@ def execute_deposit_chest(
 def execute_withdraw_chest(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
-    chest_id = int(args["chest_id"])
+    robo_advisor_id = int(args["robo_advisor_id"])
     amount_usd = Decimal(str(args["amount_usd"]))
+    to_account = (args.get("to_account") or "DEFAULT").upper()
 
+    body = {
+        "robo_advisor_id": robo_advisor_id,
+        "amount": float(amount_usd),
+        "to": to_account,
+    }
     with _client(account) as client:
-        response = client.post(
-            f"/chests/{chest_id}/withdraw", json={"amount_usd": str(amount_usd)}
-        )
+        response = client.post("/roboadvisor/withdraw", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
@@ -162,17 +176,21 @@ def execute_withdraw_chest(
 def execute_set_card_status(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
-    card_id = int(args["card_id"])
-    new_status = args["new_status"].upper()  # FROZEN | ACTIVE
+    card_uuid = str(args["card_uuid"])
+    new_status = args["new_status"].upper()  # ACTIVE | SUSPENDED
 
-    # TODO: confirm card status endpoint shape.
     with _client(account) as client:
         response = client.patch(
-            f"/cards/{card_id}/status", json={"status": new_status}
+            f"/cards/{card_uuid}/status", json={"status": new_status}
         )
 
     mark_executed(decision)
-    return {"ok": True, "card_id": card_id, "new_status": new_status, "data": response.data}
+    return {
+        "ok": True,
+        "card_uuid": card_uuid,
+        "new_status": new_status,
+        "data": response.data,
+    }
 
 
 EXECUTORS: dict[str, Callable[..., dict[str, Any]]] = {
