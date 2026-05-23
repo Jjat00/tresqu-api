@@ -189,11 +189,19 @@ WALLBIT_TOOLS = [
 ]
 
 
-def make_wallbit_tools(user_external_id: str) -> list:
+def make_wallbit_tools(
+    user_external_id: str,
+    *,
+    channel: str = "whatsapp",
+    user_message: str = "",
+) -> list:
     """Bind ``user_external_id`` so the LLM doesn't have to provide it.
 
     The bot wrappers already inject the resolved Tresqu user id into other
     tools the same way (see whatsappbot/services.py and telegrambot/services.py).
+
+    When ``channel`` and ``user_message`` are provided, the write tools and
+    the RAG history tool are also returned. Read-only callers can omit them.
     """
 
     @tool
@@ -247,9 +255,40 @@ def make_wallbit_tools(user_external_id: str) -> list:
             "symbol": symbol,
         })
 
-    return [
+    @tool
+    def tresqu_query_history(query: str, limit: int = 10) -> dict[str, Any]:
+        """Busca en el historial financiero del usuario (gastos, ingresos y transacciones Wallbit) por similitud semántica.
+
+        Útil para "¿cuánto gasté en restaurantes?", "¿he comprado AAPL antes?",
+        "ingresos por freelance del último año". Devuelve los registros más
+        relevantes ordenados por similitud.
+
+        Args:
+            query: Texto libre describiendo qué buscas.
+            limit: Máximo de resultados (default 10).
+        """
+        try:
+            user = User.objects.get(external_id=user_external_id)
+        except User.DoesNotExist:
+            return {"ok": False, "error": "user_not_found"}
+
+        from .rag import query_history
+        return query_history(user, query, limit=limit)
+
+    bound = [
         wallbit_get_balance_for_user,
         wallbit_list_transactions_for_user,
         wallbit_search_assets_for_user,
         wallbit_get_asset_for_user,
+        tresqu_query_history,
     ]
+
+    if channel and user_message is not None:
+        try:
+            user_obj = User.objects.get(external_id=user_external_id)
+        except User.DoesNotExist:
+            return bound
+        from .write_tools import make_wallbit_write_tools
+        bound.extend(make_wallbit_write_tools(user_obj, channel, user_message))
+
+    return bound

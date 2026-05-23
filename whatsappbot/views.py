@@ -190,6 +190,34 @@ def process_meta_messages(value, waba_id):
                 message_text = ""
                 media_url = None
 
+                if message_type == 'interactive':
+                    interactive = message.get('interactive', {}) or {}
+                    if interactive.get('type') == 'button_reply':
+                        button_reply = interactive.get('button_reply', {}) or {}
+                        button_id = button_reply.get('id', '') or ''
+                        if button_id.startswith('wallbit_'):
+                            try:
+                                from users.models import User
+                                from .wallbit_handlers import handle_button_press
+                                user = User.objects.filter(
+                                    external_id=from_number
+                                ).first()
+                                if user is None:
+                                    reply_text = "No encontré tu cuenta."
+                                else:
+                                    reply_text = handle_button_press(button_id, user)
+                                if reply_text:
+                                    send_meta_whatsapp_message(
+                                        from_number, reply_text
+                                    )
+                            except Exception as cb_err:
+                                logger.exception(
+                                    f"Error procesando botón Wallbit: {cb_err}"
+                                )
+                            cache.delete(cache_key)
+                            continue
+                    cache.delete(cache_key)
+                    continue
                 if message_type == 'text':
                     message_text = message.get('text', {}).get('body', '')
                 elif message_type == 'image':

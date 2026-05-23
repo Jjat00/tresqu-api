@@ -391,7 +391,13 @@ async def process_message(user: User, raw_text: str) -> str:
             get_category_expenses, get_category_incomes,
             get_top_expense_categories, get_top_income_categories_for_user
         ])
-        tools.extend(make_wallbit_tools(user.external_id))
+        tools.extend(
+            make_wallbit_tools(
+                user.external_id,
+                channel="telegram",
+                user_message=raw_text,
+            )
+        )
 
         # Obtener las categorías con sus detalles específicas del usuario
         categories_with_details = await get_categories_with_details(user)

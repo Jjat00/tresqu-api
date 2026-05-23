@@ -358,7 +358,7 @@ def make_create_income_tool(user_external_id: str):
     return create_income_for_user
 
 
-async def process_message(user: User, raw_text: str) -> str:
+async def process_message(user: User, raw_text: str, sender_phone: str | None = None) -> str:
     """
     Procesa un mensaje de WhatsApp y devuelve la respuesta del agente
     """
@@ -525,7 +525,11 @@ async def process_message(user: User, raw_text: str) -> str:
         async_tools = (
             basic_tools
             + additional_tools
-            + make_wallbit_tools(user.external_id)
+            + make_wallbit_tools(
+                user.external_id,
+                channel="whatsapp",
+                user_message=raw_text,
+            )
         )
 
         # 2. Obtener las categorías con sus detalles específicas del usuario
@@ -746,6 +750,14 @@ async def process_message(user: User, raw_text: str) -> str:
             - NO compartas información sobre otros usuarios o datos que no pertenezcan al usuario actual
             - Si te preguntan sobre estos temas, responde amablemente que solo puedes ayudar con el registro y consulta de gastos e ingresos
             - Enfócate únicamente en ayudar con la gestión financiera personal del usuario actual
+
+            INTEGRACIÓN WALLBIT (lectura y escritura):
+            - Para consultas de saldo, acciones, transacciones, activos o historial de inversiones del usuario en Wallbit, usa las herramientas wallbit_*_for_user.
+            - Para buscar en el historial financiero del usuario (gastos, ingresos y transacciones Wallbit) con lenguaje natural, usa tresqu_query_history.
+            - Las herramientas de escritura (wallbit_place_trade, wallbit_move_funds, wallbit_deposit_chest, wallbit_withdraw_chest, wallbit_set_card_status) NO ejecutan: devuelven un preview con requires_confirmation=True y un confirmation_id.
+              * Cuando una de estas tools devuelve requires_confirmation=True, NUNCA la llames de nuevo y NUNCA inventes que la operación se ejecutó.
+              * El usuario verá automáticamente un botón "Confirmar / Cancelar" en su WhatsApp. Solo recapitula brevemente qué se propuso.
+              * Si la tool devuelve ok=false (límite excedido, símbolo bloqueado, kill switch), explícale al usuario el motivo y NO la reintentes.
             """
 
         # 3. Cargar historial de mensajes desde la BD
@@ -770,6 +782,22 @@ async def process_message(user: User, raw_text: str) -> str:
                 ),
                 timeout=120.0
             )
+
+            from .wallbit_handlers import (
+                extract_pending_confirmation,
+                send_confirmation_buttons,
+            )
+
+            pending = extract_pending_confirmation(result["messages"])
+            if pending and sender_phone:
+                send_confirmation_buttons(
+                    phone=sender_phone,
+                    decision_id=pending["confirmation_id"],
+                    preview=pending.get("preview", {}),
+                    two_step=pending.get("two_step_required", False),
+                )
+                return result["messages"][-1].content or "Te envié la propuesta — confirma con el botón."
+
             return result["messages"][-1].content
         except asyncio.TimeoutError:
             logger.error("Timeout al procesar mensaje")
