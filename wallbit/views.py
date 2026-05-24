@@ -6,7 +6,7 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .agent_safety import get_account_or_raise, get_pending_decision
+from .agent_safety import AccountNotConnected, get_account_or_raise, get_pending_decision
 from .client import (
     WallbitAuthError,
     WallbitClient,
@@ -15,10 +15,15 @@ from .client import (
 )
 from .crypto import encrypt_api_key
 from .executors import UnknownTool, execute_decision
-from .models import AgentDecision, AgentLimits, WallbitAccount
+from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
+from .portfolio import get_holdings, get_summary, get_timeline
 from .serializers import (
     AgentDecisionSerializer,
     AgentLimitsSerializer,
+    HoldingSerializer,
+    InvestmentSerializer,
+    PortfolioSummarySerializer,
+    TimelinePointSerializer,
     WallbitConnectSerializer,
     WallbitStatusSerializer,
 )
@@ -200,4 +205,97 @@ class WallbitSyncView(APIView):
         return Response(
             {"task_id": async_result.id, "queued": True},
             status=status.HTTP_202_ACCEPTED,
+        )
+
+
+class InvestmentPagination(PageNumberPagination):
+    page_size = 20
+    page_size_query_param = "page_size"
+    max_page_size = 100
+
+
+class InvestmentListView(APIView):
+    """GET /api/wallbit/investments — paginated list of user's investments.
+
+    Query params: ``kind`` (STOCK|ETF|BOND|ROBO|CHEST),
+    ``action`` (BUY|SELL|DEPOSIT|WITHDRAW), ``symbol``.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        qs = Investment.objects.filter(user=request.user).order_by("-created_at")
+        kind = request.query_params.get("kind")
+        action = request.query_params.get("action")
+        symbol = request.query_params.get("symbol")
+        if kind:
+            qs = qs.filter(kind=kind.upper())
+        if action:
+            qs = qs.filter(action=action.upper())
+        if symbol:
+            qs = qs.filter(symbol__iexact=symbol)
+
+        paginator = InvestmentPagination()
+        page = paginator.paginate_queryset(qs, request, view=self)
+        serializer = InvestmentSerializer(page, many=True)
+        return paginator.get_paginated_response(serializer.data)
+
+
+class PortfolioSummaryView(APIView):
+    """GET /api/wallbit/portfolio/summary — hero metrics with live valuation."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            summary = get_summary(request.user)
+        except AccountNotConnected:
+            return Response(
+                {"detail": "Wallbit not connected", "connected": False},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        except WallbitError as exc:
+            logger.warning("portfolio summary upstream failure", exc_info=exc)
+            return Response(
+                {"detail": f"Wallbit upstream error: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(PortfolioSummarySerializer(summary).data)
+
+
+class PortfolioHoldingsView(APIView):
+    """GET /api/wallbit/portfolio/holdings — live positions with cost basis + P&L."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        try:
+            holdings = get_holdings(request.user)
+        except AccountNotConnected:
+            return Response(
+                {"detail": "Wallbit not connected", "connected": False},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        except WallbitError as exc:
+            logger.warning("portfolio holdings upstream failure", exc_info=exc)
+            return Response(
+                {"detail": f"Wallbit upstream error: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(HoldingSerializer(holdings, many=True).data)
+
+
+class PortfolioTimelineView(APIView):
+    """GET /api/wallbit/portfolio/timeline — cumulative net invested over time."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        period = request.query_params.get("period", "3m").lower()
+        points = get_timeline(request.user, period=period)
+        return Response(
+            {
+                "period": period,
+                "points": TimelinePointSerializer(points, many=True).data,
+            }
         )

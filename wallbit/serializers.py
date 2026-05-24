@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import AgentDecision, AgentLimits, WallbitAccount
+from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
 
 
 class WallbitConnectSerializer(serializers.Serializer):
@@ -57,3 +57,60 @@ class AgentLimitsSerializer(serializers.ModelSerializer):
             "blocked_symbols",
             "require_2step_above_usd",
         )
+
+
+class InvestmentSerializer(serializers.ModelSerializer):
+    wallbit_tx_uuid = serializers.SerializerMethodField()
+
+    class Meta:
+        model = Investment
+        fields = (
+            "id",
+            "kind",
+            "action",
+            "symbol",
+            "chest_category",
+            "amount_usd",
+            "shares",
+            "wallbit_tx_uuid",
+            "created_at",
+        )
+        read_only_fields = fields
+
+    def get_wallbit_tx_uuid(self, obj: Investment) -> str | None:
+        return obj.wallbit_tx.wallbit_uuid if obj.wallbit_tx_id else None
+
+
+class CashBalanceSerializer(serializers.Serializer):
+    currency = serializers.CharField()
+    amount = serializers.DecimalField(max_digits=18, decimal_places=8)
+
+
+class PortfolioSummarySerializer(serializers.Serializer):
+    total_invested_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    total_withdrawn_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    net_invested_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    current_value_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pnl_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pnl_pct = serializers.FloatField()
+    holdings_count = serializers.IntegerField()
+    cash = CashBalanceSerializer(many=True)
+    last_sync_at = serializers.DateTimeField(allow_null=True)
+
+
+class HoldingSerializer(serializers.Serializer):
+    symbol = serializers.CharField()
+    name = serializers.CharField(allow_blank=True)
+    kind = serializers.CharField(allow_blank=True)
+    shares = serializers.DecimalField(max_digits=18, decimal_places=8)
+    avg_cost = serializers.DecimalField(max_digits=18, decimal_places=4)
+    current_price = serializers.DecimalField(max_digits=18, decimal_places=4)
+    cost_basis = serializers.DecimalField(max_digits=18, decimal_places=2)
+    market_value = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pnl_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pnl_pct = serializers.FloatField()
+
+
+class TimelinePointSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    invested_total_usd = serializers.DecimalField(max_digits=18, decimal_places=2)

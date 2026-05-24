@@ -21,7 +21,7 @@ from langchain_openai import OpenAIEmbeddings
 
 from .client import WallbitClient, WallbitError
 from .crypto import decrypt_api_key
-from .models import WallbitAccount, WallbitTxMirror
+from .models import Investment, WallbitAccount, WallbitTxMirror
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +100,61 @@ def _decimal(value: Any) -> Decimal:
         return Decimal(0)
 
 
+# Maps Wallbit tx_type to (Investment.kind, Investment.action).
+# tx_types not listed here don't represent an investment movement (CARD_PAYMENT,
+# DEPOSIT, WITHDRAW, INTERNAL...) and are skipped during backfill.
+_TX_TYPE_TO_INVESTMENT: dict[str, tuple[str, str]] = {
+    "TRADE": (Investment.STOCK, Investment.BUY),  # BUY/SELL refined below from amounts
+    "ROBOADVISOR_DEPOSIT": (Investment.CHEST, Investment.DEPOSIT),
+    "ROBOADVISOR_WITHDRAW": (Investment.CHEST, Investment.WITHDRAW),
+}
+
+
+def _backfill_investment(mirror: WallbitTxMirror, tx: dict[str, Any], account: WallbitAccount) -> bool:
+    """If `mirror` represents an investment-class tx and there's no Investment
+    linked yet, create one. Returns True if a row was created.
+    """
+    mapping = _TX_TYPE_TO_INVESTMENT.get(mirror.tx_type.upper())
+    if mapping is None:
+        return False
+    if Investment.objects.filter(wallbit_tx=mirror).exists():
+        return False
+
+    kind, default_action = mapping
+    symbol = ""
+    amount_usd = Decimal(0)
+    shares: Decimal | None = None
+
+    if mirror.tx_type.upper() == "TRADE":
+        # Wallbit TRADE: source_* is what the user paid with, dest_* is what they got.
+        # BUY: source=USD, dest=AAPL. SELL: source=AAPL, dest=USD.
+        if mirror.dest_currency and mirror.dest_currency.upper() != "USD":
+            action = Investment.BUY
+            symbol = mirror.dest_currency.upper()
+            amount_usd = mirror.source_amount or Decimal(0)
+            shares = mirror.dest_amount
+        else:
+            action = Investment.SELL
+            symbol = (mirror.source_currency or "").upper()
+            amount_usd = mirror.dest_amount or Decimal(0)
+            shares = mirror.source_amount
+    else:
+        action = default_action
+        # ROBOADVISOR_* uses source_amount as the USD delta
+        amount_usd = mirror.source_amount or mirror.dest_amount or Decimal(0)
+
+    Investment.objects.create(
+        user=account.user,
+        kind=kind,
+        action=action,
+        symbol=symbol[:16],
+        amount_usd=amount_usd,
+        shares=shares,
+        wallbit_tx=mirror,
+    )
+    return True
+
+
 def _extract_transactions(payload: Any) -> list[dict[str, Any]]:
     """Pull a list of tx dicts out of whatever shape Wallbit returned."""
     if payload is None:
@@ -133,6 +188,7 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
     api_key = decrypt_api_key(account.encrypted_api_key)
     upserted = 0
     embeddings_made = 0
+    investments_created = 0
 
     try:
         with WallbitClient(api_key) as client:
@@ -203,6 +259,14 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
                         "embedding failed for tx %s: %s", obj.wallbit_uuid, exc
                     )
 
+        try:
+            if _backfill_investment(obj, tx, account):
+                investments_created += 1
+        except Exception as exc:
+            logger.warning(
+                "investment backfill failed for tx %s: %s", obj.wallbit_uuid, exc
+            )
+
     account.last_sync_at = timezone.now()
     account.last_error = ""
     account.save(update_fields=["last_sync_at", "last_error"])
@@ -211,6 +275,7 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
         "ok": True,
         "upserted": upserted,
         "embeddings_made": embeddings_made,
+        "investments_created": investments_created,
         "account_id": account_id,
     }
 

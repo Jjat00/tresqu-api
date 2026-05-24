@@ -275,7 +275,50 @@ Ver TaskList de la sesión actual (10 tareas, hito = "saldo" por WhatsApp).
 
 ---
 
-## 13. Referencias
+## 13. Pendientes post-MVP (2026-05-24)
+
+Lo que **funciona hoy en prod** quedó cubierto en las secciones 4-12. Lo que sigue son brechas detectadas al revisar el flujo end-to-end después del primer sync real:
+
+### A. Handoff de `WallbitTxMirror` → modelos de negocio
+
+- **`CARD_PAYMENT` → `Expense`** — Crear gasto automático en `expenses.Expense` cuando entra una tx `CARD_PAYMENT` en el sync. Necesita resolver `UserExpenseCategory` (auto-categorizar con IA o dejar `null` y pedir categoría por WhatsApp como hace `gmailbot`).
+- **`TRADE` / `ROBOADVISOR_*` → `Investment`** — Hoy `Investment` sólo se llena cuando el agente ejecuta una orden desde Tresqu. Las tx originadas en la app de Wallbit nunca entran a `Investment`. Mirror las desde `tasks.py:sync_wallbit_transactions` mapeando `tx_type → Investment.kind/action`.
+- **Ejecuciones del agente cruzan directo al mirror** — Cuando `executors.execute_decision()` recibe una respuesta exitosa de Wallbit con la nueva tx, insertarla en `WallbitTxMirror` **en el mismo request** en vez de esperar hasta 15 min al próximo sync.
+
+### B. Cobertura del sync
+
+- **Paginación retroactiva** — `sync_wallbit_transactions` sólo trae `page=1&limit=50`. Si un usuario hace >50 tx entre dos ticks (15 min) se pierden las más viejas. Implementar:
+  - Cursor por `account.last_sync_at` → `params["from_date"] = last_sync_at.date()`
+  - Loop de paginación mientras haya más resultados
+- **Backfill on-connect** — Cuando un usuario conecta Wallbit por primera vez, encolar un sync histórico completo (todas las páginas) en lugar de esperar al beat.
+
+### C. Notificaciones proactivas
+
+- **"Detectamos tx nueva en Wallbit"** — Cuando el sync detecta una tx con `created=True`, mandar mensaje al canal preferido del usuario (Telegram/WhatsApp) con resumen y botón "categorizar/clasificar".
+- **Anomalías** — Tx fuera de los patrones históricos (símbolo nuevo, monto >2σ del promedio) → push proactivo con opción de bloquear tarjeta o revocar key.
+
+### D. Optimizaciones
+
+- **No re-upsertear filas inalteradas** — Hoy el `update_or_create` reescribe 50 filas en cada tick aunque nada haya cambiado. Comparar fingerprint del `raw` antes de tocar la DB.
+- **`if created:` en vez de `if obj.embedding is None`** — Sutil, pero más correcto: hoy si por algún motivo se borra el embedding de una tx vieja, el siguiente sync lo recalcula (no es estrictamente lo deseado).
+- **Filtrar tx ya existentes antes del loop de embeddings** — Bulk `values_list("wallbit_uuid", flat=True)` y skip de los que ya están.
+
+### E. UI faltante en la web
+
+- **Panel de `AgentLimits`** — Endpoints `GET/POST /api/wallbit/limits/` listos; falta la página que los gestiona.
+- **Historial de `AgentDecision`** — Endpoint `/api/wallbit/agent/decisions/` paginado listo; falta el componente con filtros (ejecutadas / rechazadas / pendientes).
+- **Vista de `WallbitTxMirror`** — Tabla con búsqueda semántica vía `tresqu_query_history` para que el usuario explore su historial Wallbit desde la web (hoy sólo accesible vía chat).
+- **Botones de confirmación inline en el chat web** — Hoy el flujo de confirmación sólo vive en WhatsApp/Telegram (`write_tools.py` devuelve `requires_confirmation: True` + `confirmation_id`). El widget `src/components/chatbot/` no renderiza los botones.
+
+### F. Limpieza / housekeeping
+
+- **Eliminar `WORKER_BOOTSTRAP=1`** del worker en Railway — variable que se usó para forzar el primer deploy, ya es harmless pero ensucia.
+- **Borrar `pgvector` del env `develop`** en Railway si no se está usando (prod va contra Supabase Postgres).
+- **Telegram inline keyboard** — Hoy WhatsApp tiene botones de confirmación, Telegram aún recibe el preview como texto. Cablear `InlineKeyboardMarkup` en `telegrambot/services.py` para paridad.
+
+---
+
+## 14. Referencias
 
 - **Brief original (técnica detallada API Wallbit, endpoints, scopes, gotchas):** `/mnt/d/Projects/challenge-wallbit/TRESQU_PILOT_BRIEF.md`
 - **Wallbit docs:** https://developer.wallbit.io/docs/api-reference/introduction
