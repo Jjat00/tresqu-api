@@ -68,6 +68,24 @@ def _decimal(value: Any) -> Decimal:
         return Decimal(0)
 
 
+def _extract_transactions(payload: Any) -> list[dict[str, Any]]:
+    """Pull a list of tx dicts out of whatever shape Wallbit returned."""
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if isinstance(payload, dict):
+        for key in ("data", "transactions", "items", "results"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = _extract_transactions(value)
+                if nested:
+                    return nested
+    return []
+
+
 @shared_task(bind=True, max_retries=2)
 def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> dict[str, Any]:
     """Pull the latest page of /transactions and upsert into the local mirror."""
@@ -99,12 +117,23 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
             pass
         return {"ok": False, "error": str(exc)}
 
-    payload = response.data or {}
-    items = payload.get("data") if isinstance(payload, dict) else payload
-    items = items or []
+    items = _extract_transactions(response.data)
+    if not items:
+        logger.info(
+            "wallbit sync: no transactions in response for account %s (payload type=%s)",
+            account_id,
+            type(response.data).__name__,
+        )
 
     embedder = None
     for tx in items:
+        if not isinstance(tx, dict):
+            logger.warning(
+                "wallbit sync: skipping non-dict tx item type=%s account=%s",
+                type(tx).__name__,
+                account_id,
+            )
+            continue
         uuid = tx.get("uuid") or tx.get("id")
         if not uuid:
             continue
