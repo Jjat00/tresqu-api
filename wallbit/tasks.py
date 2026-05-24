@@ -38,14 +38,38 @@ def _get_embeddings() -> OpenAIEmbeddings:
     return _embeddings
 
 
+def _str_field(value: Any) -> str:
+    """Coerce a Wallbit response field to a string.
+
+    Wallbit returns several fields (currency, type, status...) as nested
+    objects like ``{"code": "USD", "name": "US Dollar"}``. Falls back to
+    common identifying keys before giving up.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        for key in ("code", "symbol", "name", "value", "id", "ticker"):
+            nested = value.get(key)
+            if isinstance(nested, str) and nested:
+                return nested
+            if isinstance(nested, (int, float)):
+                return str(nested)
+        return ""
+    return str(value)
+
+
 def _tx_text(tx: dict[str, Any]) -> str:
     parts = [
-        tx.get("type", ""),
-        tx.get("status", ""),
-        f"{tx.get('source_amount', '')} {tx.get('source_currency', '')}",
-        f"→ {tx.get('dest_amount', '')} {tx.get('dest_currency', '')}",
-        tx.get("comment", "") or "",
-        tx.get("external_address", "") or "",
+        _str_field(tx.get("type")),
+        _str_field(tx.get("status")),
+        f"{_str_field(tx.get('source_amount'))} {_str_field(tx.get('source_currency'))}".strip(),
+        f"→ {_str_field(tx.get('dest_amount'))} {_str_field(tx.get('dest_currency'))}".strip(),
+        _str_field(tx.get("comment")),
+        _str_field(tx.get("external_address")),
     ]
     return " | ".join(p for p in parts if p)
 
@@ -62,6 +86,14 @@ def _parse_dt(value: Any) -> datetime | None:
 
 
 def _decimal(value: Any) -> Decimal:
+    if isinstance(value, dict):
+        for key in ("value", "amount", "raw"):
+            nested = value.get(key)
+            if nested is not None:
+                value = nested
+                break
+        else:
+            return Decimal(0)
     try:
         return Decimal(str(value or 0))
     except Exception:
@@ -138,17 +170,18 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
         if not uuid:
             continue
 
+        external_address = _str_field(tx.get("external_address"))[:256]
         defaults = {
             "account": account,
-            "tx_type": tx.get("type", "")[:32],
-            "status": tx.get("status", "")[:32],
-            "source_currency": (tx.get("source_currency") or "")[:8],
-            "dest_currency": (tx.get("dest_currency") or "")[:8],
+            "tx_type": _str_field(tx.get("type"))[:32],
+            "status": _str_field(tx.get("status"))[:32],
+            "source_currency": _str_field(tx.get("source_currency"))[:8],
+            "dest_currency": _str_field(tx.get("dest_currency"))[:8],
             "source_amount": _decimal(tx.get("source_amount")),
             "dest_amount": _decimal(tx.get("dest_amount")),
-            "external_address": (tx.get("external_address") or "")[:256] or None,
+            "external_address": external_address or None,
             "created_at_wallbit": _parse_dt(tx.get("created_at")) or timezone.now(),
-            "comment": tx.get("comment", "") or "",
+            "comment": _str_field(tx.get("comment")),
             "raw": tx,
         }
 
