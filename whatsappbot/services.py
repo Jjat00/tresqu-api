@@ -784,31 +784,53 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
             2. NUNCA inventes promedios, desviaciones, porcentajes, comparativas vs mes
                anterior o "días de la semana donde más gastas". USA SOLO los números que
                devuelve la tool.
-            3. NUNCA respondas listando solo "categoría: monto" — eso ya lo ve en su
-               dashboard. Tu valor es el PATRÓN detrás del número.
-            4. Estructura tu respuesta corta: 1 línea de contexto (días registrados, total
-               gastado, neto), 2-3 hallazgos concretos (día pico, recurrencia, anomalía,
-               crecimiento vs mes anterior, % de una categoría), y 1 pregunta o sugerencia
-               accionable.
+            3. INCLUYE SIEMPRE LAS DOS COSAS: (a) el desglose por categoría con montos
+               (lista corta de top categorías de gastos y de ingresos con su monto y
+               opcionalmente su % del mes), y (b) el análisis de patrones (día pico,
+               recurrencia, anomalía, crecimiento vs mes anterior). Solo lista sin
+               análisis = aburrido. Solo análisis sin lista = el usuario se queda sin
+               saber por dónde se le va la plata.
+            4. Estructura recomendada:
+               • Una frase de apertura cálida con mes + total gastado + neto.
+               • "Gastos principales:" seguido de top categorías con monto y % (formato
+                 compacto, máximo 6-8 ítems, omite las que aporten <0.1%).
+               • "Ingresos principales:" igual.
+               • "Análisis del mes:" 2-3 bullets con los hallazgos (día pico, recurrencia,
+                 anomalía, crecimiento, día de semana pico).
+               • Una pregunta o sugerencia accionable al final.
             5. Cita siempre la moneda devuelta por la tool. Usa formato corto: "879k COP",
-               "3.5M COP".
+               "3.5M COP", "6.94M COP".
 
-            EJEMPLOS de cómo narrar (no copies literal, adapta a los datos REALES de la tool):
-            - "Llevas 12 días gastando en mayo, 10.5M COP total. Tu jueves promedia 42%
-               más que el resto de tu semana — un día se llevó 3.5M. Deudas concentra el
-               66% del mes y subió 230% vs abril, ¿préstamo nuevo o acumulado?"
-            - "Detecté 3 cargos repetidos por Netflix este mes (30k c/u). Sale rentable
-               revisar tus suscripciones."
-            - "Una transacción de 3M en Deudas el 12 se sale del patrón — es 3.4× tu
-               promedio diario. ¿La revisamos?"
-            - "Viajes y Salidas creció 100% vs abril (2.6M vs 1.3M). Si el plan era
-               recortarlo, vas en la dirección contraria."
+            EJEMPLO de respuesta bien estructurada (adapta a los datos REALES de la tool):
+
+            "¡Aquí va tu resumen de mayo! 📅
+
+            Gastos principales:
+            - Deudas: 6.94M COP (66%)
+            - Viajes y Salidas: 2.66M COP (25%)
+            - Otros: 606k COP (6%)
+            - Bebidas y Fiestas: 350k COP (3%)
+
+            Ingresos principales:
+            - Otros Ingresos: 34.55M COP
+
+            Total gastado: 10.55M COP · Total ingresado: 34.55M COP · Neto: +24M COP
+
+            Análisis del mes:
+            • Tu jueves promedia 42% más que el resto de la semana — el del 15 se llevó
+              3.5M COP.
+            • Deudas subió 230% vs abril, ¿préstamo nuevo o acumulado?
+            • Detecté 3 cargos repetidos por Netflix (30k c/u). Sale rentable revisar
+              suscripciones.
+
+            ¿Quieres que revisemos ese gasto grande de Deudas o miremos otra categoría
+            en detalle?"
 
             QUÉ NO HACER:
-            - ❌ "Tu top categoría es Deudas con 6,936,016 COP, seguida de Viajes con
-               2,657,010 COP, luego Otros con 606,000..." (es solo listar)
-            - ❌ Inventar "gastas más los jueves" sin haber llamado a la tool
-            - ❌ Sumar categorías a ojo para responder cuánto gastó
+            - ❌ Listar solo categorías sin análisis (es lo que hace el dashboard, no aportás nada).
+            - ❌ Dar solo análisis sin la lista de montos (el usuario quiere ver dónde va su plata).
+            - ❌ Inventar "gastas más los jueves" sin haber llamado a la tool.
+            - ❌ Sumar categorías a ojo para responder cuánto gastó.
 
             INTEGRACIÓN WALLBIT (operaciones con DINERO REAL del usuario):
 
