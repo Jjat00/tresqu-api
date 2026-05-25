@@ -19,6 +19,7 @@ from decimal import Decimal
 from typing import Any
 
 from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from users.models import User
@@ -271,27 +272,32 @@ _PERIOD_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "all": 3650}
 def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
     """Daily series of cumulative net invested capital.
 
-    Walks Investment rows in chronological order and emits one cumulative
-    point per day where activity happened. The frontend fills gaps visually.
+    Groups by the real trade date (``executed_at``, falling back to
+    ``created_at`` for rows that pre-date the field). One cumulative point
+    per day with activity; the frontend renders the line with visual gaps.
     """
     days = _PERIOD_DAYS.get(period, 90)
     since = timezone.now() - timedelta(days=days)
 
     qs = (
-        Investment.objects.filter(user=user, created_at__gte=since)
-        .order_by("created_at")
-        .values_list("created_at", "action", "amount_usd")
+        Investment.objects.filter(user=user)
+        .annotate(effective_at=Coalesce("executed_at", "created_at"))
+        .filter(effective_at__gte=since)
+        .order_by("effective_at")
+        .values_list("effective_at", "action", "amount_usd")
     )
 
     daily_delta: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
-    for created_at, action, amount in qs:
+    for effective_at, action, amount in qs:
         sign = 1 if action in (Investment.BUY, Investment.DEPOSIT) else -1
-        daily_delta[created_at.date()] += Decimal(sign) * Decimal(amount)
+        daily_delta[effective_at.date()] += Decimal(sign) * Decimal(amount)
 
     # Seed cumulative with historical sum before `since` so the series starts
     # at the user's real net-invested position, not zero.
     seed = (
-        Investment.objects.filter(user=user, created_at__lt=since)
+        Investment.objects.filter(user=user)
+        .annotate(effective_at=Coalesce("executed_at", "created_at"))
+        .filter(effective_at__lt=since)
         .aggregate(
             buys=Sum("amount_usd", filter=_action_filter(Investment.BUY, Investment.DEPOSIT)),
             sells=Sum("amount_usd", filter=_action_filter(Investment.SELL, Investment.WITHDRAW)),

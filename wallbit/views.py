@@ -187,7 +187,12 @@ class AgentLimitsView(APIView):
 
 
 class WallbitSyncView(APIView):
-    """POST /api/wallbit/sync — manually trigger a transaction sync."""
+    """POST /api/wallbit/sync — manually trigger a transaction sync.
+
+    Default mode runs the sync inline so the dashboard can refresh with
+    fresh data on the same request. Pass ``?async=true`` to keep the old
+    fire-and-forget behaviour (queues via Celery and returns ``task_id``).
+    """
 
     permission_classes = [permissions.IsAuthenticated]
 
@@ -199,13 +204,24 @@ class WallbitSyncView(APIView):
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        from .tasks import sync_wallbit_transactions
+        from .tasks import run_wallbit_sync, sync_wallbit_transactions
 
-        async_result = sync_wallbit_transactions.delay(account.id)
-        return Response(
-            {"task_id": async_result.id, "queued": True},
-            status=status.HTTP_202_ACCEPTED,
-        )
+        wants_async = request.query_params.get("async", "").lower() in ("1", "true", "yes")
+        if wants_async:
+            async_result = sync_wallbit_transactions.delay(account.id)
+            return Response(
+                {"task_id": async_result.id, "queued": True},
+                status=status.HTTP_202_ACCEPTED,
+            )
+
+        result = run_wallbit_sync(account.id)
+        account.refresh_from_db()
+        payload = {
+            **result,
+            "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
+        }
+        http_status = status.HTTP_200_OK if result.get("ok") else status.HTTP_502_BAD_GATEWAY
+        return Response(payload, status=http_status)
 
 
 class InvestmentPagination(PageNumberPagination):

@@ -151,6 +151,7 @@ def _backfill_investment(mirror: WallbitTxMirror, tx: dict[str, Any], account: W
         amount_usd=amount_usd,
         shares=shares,
         wallbit_tx=mirror,
+        executed_at=mirror.created_at_wallbit,
     )
     return True
 
@@ -173,9 +174,13 @@ def _extract_transactions(payload: Any) -> list[dict[str, Any]]:
     return []
 
 
-@shared_task(bind=True, max_retries=2)
-def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> dict[str, Any]:
-    """Pull the latest page of /transactions and upsert into the local mirror."""
+def run_wallbit_sync(account_id: int, page_limit: int = 50) -> dict[str, Any]:
+    """Synchronous core of the Wallbit sync.
+
+    Used directly by the manual /sync endpoint (so the dashboard can refresh
+    on the same request) and wrapped by ``sync_wallbit_transactions`` for the
+    Celery beat / fire-and-forget path.
+    """
     try:
         account = WallbitAccount.objects.get(id=account_id)
     except WallbitAccount.DoesNotExist:
@@ -199,11 +204,7 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
         logger.warning("wallbit sync fetch failed for account %s", account_id, exc_info=exc)
         account.last_error = str(exc)[:500]
         account.save(update_fields=["last_error"])
-        try:
-            self.retry(exc=exc, countdown=60)
-        except self.MaxRetriesExceededError:
-            pass
-        return {"ok": False, "error": str(exc)}
+        return {"ok": False, "error": str(exc), "upstream_failed": True}
 
     items = _extract_transactions(response.data)
     if not items:
@@ -278,6 +279,18 @@ def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> di
         "investments_created": investments_created,
         "account_id": account_id,
     }
+
+
+@shared_task(bind=True, max_retries=2)
+def sync_wallbit_transactions(self, account_id: int, page_limit: int = 50) -> dict[str, Any]:
+    """Celery wrapper: runs the sync and retries on upstream failure."""
+    result = run_wallbit_sync(account_id, page_limit=page_limit)
+    if not result.get("ok") and result.get("upstream_failed"):
+        try:
+            self.retry(exc=WallbitError(result.get("error", "unknown")), countdown=60)
+        except self.MaxRetriesExceededError:
+            pass
+    return result
 
 
 @shared_task

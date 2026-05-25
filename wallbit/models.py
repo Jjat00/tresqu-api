@@ -117,11 +117,13 @@ class Investment(models.Model):
         blank=True,
         related_name="investment",
     )
+    executed_at = models.DateTimeField(null=True, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         indexes = [
             models.Index(fields=["user", "-created_at"]),
+            models.Index(fields=["user", "-executed_at"]),
             models.Index(fields=["kind", "action"]),
         ]
 
