@@ -1401,3 +1401,36 @@ def get_top_income_categories(user_external_id: str, start_date: str | None = No
     except Exception as e:
         logger.error(f"Error obteniendo top categorías de ingresos: {e}")
         return []
+
+
+@tool
+def get_monthly_insights(user_external_id: str, year: int | None = None, month: int | None = None) -> Dict[str, Any]:
+    """
+    Devuelve análisis financiero pre-computado del mes del usuario, listo para
+    narrar. Incluye totales (gastos, ingresos, neto), promedio diario y
+    desviación estándar, día con mayor gasto del mes, breakdown por día de la
+    semana con día pico y % vs resto, top categorías con % del total y conteo,
+    crecimiento por categoría vs mes anterior, top 5 transacciones individuales,
+    gastos recurrentes detectados (misma descripción ≥2 cargos) y anomalías
+    (txs con monto > promedio diario + 2σ).
+
+    LLAMA SIEMPRE esta tool cuando el usuario pida resumen, balance, análisis,
+    "cómo voy este mes", "qué tal el mes pasado" o similar. NUNCA inventes
+    promedios, desviaciones, porcentajes ni comparativas temporales — usa SOLO
+    los números devueltos por esta tool. NO recalcules nada sobre el raw.
+
+    Args:
+        user_external_id: id externo del usuario.
+        year: año (ej 2026). Si None, mes actual en TZ del usuario.
+        month: mes 1-12. Si None, mes actual en TZ del usuario.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+    except User.DoesNotExist:
+        return {"error": "Usuario no encontrado"}
+    try:
+        from expenses.insights import compute_monthly_insights
+        return compute_monthly_insights(user, year=year, month=month)
+    except Exception as e:
+        logger.error(f"Error en get_monthly_insights: {e}")
+        return {"error": str(e)}

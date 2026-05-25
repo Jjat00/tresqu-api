@@ -47,6 +47,7 @@ from telegrambot.tools import (
     search_incomes_by_text,
     get_incomes_by_category,
     get_top_income_categories,
+    get_monthly_insights,
 
 )
 
@@ -513,12 +514,32 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
                     f"Error al obtener top categorías de ingresos: {e}")
                 return {'error': str(e)}
 
+        @tool
+        async def get_user_monthly_insights(year: int | None = None, month: int | None = None) -> Dict[str, Any]:
+            """
+            Análisis financiero pre-agregado del mes (totales, promedio diario,
+            día pico, día de semana pico, top categorías, crecimiento vs mes
+            anterior, recurrentes, anomalías). LLÁMALA SIEMPRE para resúmenes,
+            balances, "cómo voy", "qué tal el mes". NUNCA inventes promedios
+            ni porcentajes — usa solo lo que devuelve esta tool.
+            """
+            try:
+                return await get_monthly_insights.ainvoke({
+                    "user_external_id": user.external_id,
+                    "year": year,
+                    "month": month,
+                })
+            except Exception as e:
+                logger.error(f"Error get_user_monthly_insights: {e}")
+                return {"error": str(e)}
+
         # Agregar herramientas adicionales al conjunto
         additional_tools = [
             get_user_expenses, get_user_incomes,
             search_expenses, search_incomes,
             get_category_expenses, get_category_incomes,
-            get_top_expense_categories, get_top_income_categories_for_user
+            get_top_expense_categories, get_top_income_categories_for_user,
+            get_user_monthly_insights,
         ]
 
         # Combinar todas las herramientas (incluyendo Wallbit read tools)
@@ -751,6 +772,43 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
             - NO compartas información sobre otros usuarios o datos que no pertenezcan al usuario actual
             - Si te preguntan sobre estos temas, responde amablemente que solo puedes ayudar con el registro y consulta de gastos e ingresos
             - Enfócate únicamente en ayudar con la gestión financiera personal del usuario actual
+
+            INSIGHTS Y RESÚMENES MENSUALES:
+
+            Cuando el usuario pida un resumen, balance, análisis, "cómo voy este mes",
+            "qué tal el mes pasado", "dame el resumen", "más profundidad", "patrones",
+            "tendencias" o similar:
+
+            1. LLAMA SIEMPRE get_user_monthly_insights ANTES de responder. Sin año/mes
+               para el mes actual, o con year/month explícitos para meses específicos.
+            2. NUNCA inventes promedios, desviaciones, porcentajes, comparativas vs mes
+               anterior o "días de la semana donde más gastas". USA SOLO los números que
+               devuelve la tool.
+            3. NUNCA respondas listando solo "categoría: monto" — eso ya lo ve en su
+               dashboard. Tu valor es el PATRÓN detrás del número.
+            4. Estructura tu respuesta corta: 1 línea de contexto (días registrados, total
+               gastado, neto), 2-3 hallazgos concretos (día pico, recurrencia, anomalía,
+               crecimiento vs mes anterior, % de una categoría), y 1 pregunta o sugerencia
+               accionable.
+            5. Cita siempre la moneda devuelta por la tool. Usa formato corto: "879k COP",
+               "3.5M COP".
+
+            EJEMPLOS de cómo narrar (no copies literal, adapta a los datos REALES de la tool):
+            - "Llevas 12 días gastando en mayo, 10.5M COP total. Tu jueves promedia 42%
+               más que el resto de tu semana — un día se llevó 3.5M. Deudas concentra el
+               66% del mes y subió 230% vs abril, ¿préstamo nuevo o acumulado?"
+            - "Detecté 3 cargos repetidos por Netflix este mes (30k c/u). Sale rentable
+               revisar tus suscripciones."
+            - "Una transacción de 3M en Deudas el 12 se sale del patrón — es 3.4× tu
+               promedio diario. ¿La revisamos?"
+            - "Viajes y Salidas creció 100% vs abril (2.6M vs 1.3M). Si el plan era
+               recortarlo, vas en la dirección contraria."
+
+            QUÉ NO HACER:
+            - ❌ "Tu top categoría es Deudas con 6,936,016 COP, seguida de Viajes con
+               2,657,010 COP, luego Otros con 606,000..." (es solo listar)
+            - ❌ Inventar "gastas más los jueves" sin haber llamado a la tool
+            - ❌ Sumar categorías a ojo para responder cuánto gastó
 
             INTEGRACIÓN WALLBIT (operaciones con DINERO REAL del usuario):
 
