@@ -74,10 +74,15 @@ async def send_confirmation_buttons(
 
 @sync_to_async
 def _resolve_user_and_dispatch(callback_data: str, telegram_chat_id: str) -> str:
-    """Synchronous DB lookup wrapped for the async handler."""
-    user = User.objects.filter(
-        platform="telegram", external_id=telegram_chat_id
-    ).first()
+    """Synchronous DB lookup wrapped for the async handler.
+
+    Uses the same lookup the rest of the Telegram bot uses
+    (``get_user_by_external_id`` in ``telegrambot.bot``): match on
+    ``external_id`` without filtering by ``platform``, since the
+    platform field is stored uppercase and a user may already be
+    flagged as ``MULTIPLTAFORMA``.
+    """
+    user = User.objects.filter(external_id=telegram_chat_id).first()
     if user is None:
         return "No reconocí tu cuenta en Tresqu."
     return handle_button_press(callback_data, user)
