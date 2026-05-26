@@ -1,0 +1,359 @@
+"""Expenses & Income subagent.
+
+Owns every tool related to personal-finance bookkeeping for the user:
+parsing, classification, CRUD and analytics on expenses and incomes.
+
+The supervisor invokes it as a single ``@tool`` with a natural-language
+instruction. Categories context is injected into the subagent's own
+system prompt so the supervisor does not need to forward it.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import Any, Dict, List
+
+from django.conf import settings
+from langchain.agents import create_agent
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+
+from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
+from telegrambot.tools import (
+    create_expense,
+    create_income,
+    delete_expense,
+    delete_income,
+    get_current_date,
+    get_expense_by_id,
+    get_expenses_by_category,
+    get_expenses_by_user,
+    get_income_by_id,
+    get_incomes_by_category,
+    get_incomes_by_user,
+    get_monthly_insights,
+    get_or_create_category,
+    get_or_create_income_category,
+    get_top_categories,
+    get_top_income_categories,
+    is_greeting,
+    parse_expense,
+    parse_expenses,
+    parse_income,
+    parse_incomes,
+    parse_relative_date,
+    search_expenses_by_text,
+    search_incomes_by_text,
+    update_expense,
+    update_income,
+)
+from users.models import User
+
+logger = logging.getLogger(__name__)
+
+
+def _model() -> ChatOpenAI:
+    return ChatOpenAI(
+        model=getattr(settings, "AGENT_EXPENSES_MODEL", "gpt-4.1"),
+        temperature=0.1,
+        api_key=settings.OPENAI_API_KEY,
+        request_timeout=OPENAI_REQUEST_TIMEOUT,
+        max_retries=OPENAI_MAX_RETRIES,
+    )
+
+
+def build_expenses_tools(user: User) -> list:
+    """All tools the expenses subagent needs, with ``user_external_id`` bound."""
+
+    external_id = user.external_id
+
+    @tool
+    def get_current_date_for_user() -> str:
+        """Obtiene la fecha actual en formato YYYY-MM-DD considerando la zona horaria del usuario."""
+        try:
+            return get_current_date.invoke({"user_external_id": external_id})
+        except Exception as exc:
+            logger.error(f"get_current_date_for_user: {exc}")
+            return datetime.now().strftime("%Y-%m-%d")
+
+    @tool
+    def parse_relative_date_for_user(date_text: str) -> str:
+        """Convierte referencias temporales relativas a fechas YYYY-MM-DD."""
+        try:
+            return parse_relative_date.invoke({
+                "date_text": date_text,
+                "user_external_id": external_id,
+            })
+        except Exception as exc:
+            logger.error(f"parse_relative_date_for_user: {exc}")
+            return datetime.now().strftime("%Y-%m-%d")
+
+    @tool
+    def create_expense_for_user(
+        amount: float,
+        currency: str,
+        category: str,
+        spent_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Registra un gasto del usuario en la base de datos."""
+        return create_expense.invoke({
+            "user_external_id": external_id,
+            "amount": amount,
+            "currency": currency,
+            "category": category,
+            "spent_at": spent_at,
+            "note": note,
+        })
+
+    @tool
+    def create_income_for_user(
+        amount: float,
+        currency: str,
+        category: str,
+        received_at: str | None = None,
+        note: str | None = "",
+        category_description: str | None = None,
+        category_example: str | None = None,
+        category_color: str | None = None,
+    ) -> str:
+        """Registra un ingreso del usuario. Si la categoría no existe, la crea."""
+        get_or_create_income_category.invoke({
+            "name": category,
+            "description": category_description,
+            "example": category_example,
+            "color": category_color,
+        })
+        return create_income.invoke({
+            "user_external_id": external_id,
+            "amount": amount,
+            "currency": currency,
+            "category": category,
+            "received_at": received_at,
+            "note": note,
+        })
+
+    @tool
+    def get_user_expenses(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+        """Obtiene los gastos del usuario en un rango de fechas opcional."""
+        try:
+            return get_expenses_by_user.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_user_expenses: {exc}")
+            return []
+
+    @tool
+    def get_user_incomes(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+        """Obtiene los ingresos del usuario en un rango de fechas opcional."""
+        try:
+            return get_incomes_by_user.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_user_incomes: {exc}")
+            return []
+
+    @tool
+    def search_expenses(search_text: str) -> List[Dict[str, Any]]:
+        """Búsqueda semántica de gastos por texto libre (usa embeddings)."""
+        try:
+            return search_expenses_by_text.invoke({
+                "user_external_id": external_id,
+                "search_text": search_text,
+            })
+        except Exception as exc:
+            logger.error(f"search_expenses: {exc}")
+            return []
+
+    @tool
+    def search_incomes(search_text: str) -> List[Dict[str, Any]]:
+        """Búsqueda semántica de ingresos por texto libre (usa embeddings)."""
+        try:
+            return search_incomes_by_text.invoke({
+                "user_external_id": external_id,
+                "search_text": search_text,
+            })
+        except Exception as exc:
+            logger.error(f"search_incomes: {exc}")
+            return []
+
+    @tool
+    def get_category_expenses(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+        """Obtiene gastos de una categoría específica en un rango de fechas."""
+        try:
+            return get_expenses_by_category.invoke({
+                "user_external_id": external_id,
+                "category": category,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_category_expenses: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def get_category_incomes(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+        """Obtiene ingresos de una categoría específica en un rango de fechas."""
+        try:
+            return get_incomes_by_category.invoke({
+                "user_external_id": external_id,
+                "category": category,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_category_incomes: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def get_top_expense_categories(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+        """Top categorías de gastos del usuario en un rango de fechas."""
+        try:
+            return get_top_categories.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_top_expense_categories: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def get_top_income_categories_for_user(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
+        """Top categorías de ingresos del usuario en un rango de fechas."""
+        try:
+            return get_top_income_categories.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_top_income_categories_for_user: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def get_user_monthly_insights(year: int | None = None, month: int | None = None) -> Dict[str, Any]:
+        """Análisis financiero pre-agregado del mes (totales, día pico, anomalías, etc).
+
+        LLÁMALA SIEMPRE para resúmenes / balances / "cómo voy". Sin año/mes para
+        el mes actual; con year/month explícitos para meses específicos.
+        """
+        try:
+            return get_monthly_insights.invoke({
+                "user_external_id": external_id,
+                "year": year,
+                "month": month,
+            })
+        except Exception as exc:
+            logger.error(f"get_user_monthly_insights: {exc}")
+            return {"error": str(exc)}
+
+    return [
+        get_current_date_for_user,
+        parse_relative_date_for_user,
+        parse_expense,
+        parse_expenses,
+        parse_income,
+        parse_incomes,
+        is_greeting,
+        create_expense_for_user,
+        create_income_for_user,
+        get_or_create_category,
+        update_expense,
+        update_income,
+        delete_expense,
+        delete_income,
+        get_expense_by_id,
+        get_income_by_id,
+        get_user_expenses,
+        get_user_incomes,
+        search_expenses,
+        search_incomes,
+        get_category_expenses,
+        get_category_incomes,
+        get_top_expense_categories,
+        get_top_income_categories_for_user,
+        get_user_monthly_insights,
+    ]
+
+
+def _build_system_prompt(
+    expense_categories_str: str,
+    income_categories_str: str,
+    current_date: str,
+) -> str:
+    return f"""Eres el subagente de gastos e ingresos de Tresqu. El supervisor te delega instrucciones puntuales — ejecútalas con las tools disponibles y devuelve una respuesta breve y concreta para que el supervisor la presente al usuario.
+
+FECHA ACTUAL (zona horaria del usuario): {current_date}
+Usa esta fecha como referencia para "hoy", "este mes", "este año", "el mes pasado", etc. Si la instrucción del supervisor incluye un rango temporal calculado, úsalo tal cual; si menciona referencias relativas crudas ("ayer", "el sábado"), resuélvelas con parse_relative_date_for_user. NUNCA asumas que estamos en un año distinto al indicado arriba.
+
+Categorías disponibles para gastos: {expense_categories_str}
+Categorías disponibles para ingresos: {income_categories_str}
+
+REGLAS DE OPERACIÓN:
+- Si la instrucción menciona un saludo o conversación general, usa is_greeting y devuelve.
+- Si la instrucción es un GASTO único, usa parse_expense + create_expense_for_user.
+- Si son varios gastos (separados por "y", "," ";"), usa parse_expenses y crea uno por uno.
+- Mismo patrón para INGRESOS con parse_income/parse_incomes/create_income_for_user.
+- Si hay referencias temporales (ayer, el sábado, hace una semana), usa parse_relative_date_for_user. Para días de semana, asume el más reciente en el pasado.
+- Si falta fecha, usa get_current_date_for_user.
+- Si falta moneda, las tools asignan la del usuario por defecto.
+
+CLASIFICACIÓN:
+- PRIMERO intenta usar una categoría existente de la lista.
+- Solo crea nueva con get_or_create_category / get_or_create_income_category si ninguna existente encaja.
+- Para nueva categoría provee: name, description, example, color (#RRGGBB) coherente con la temática.
+- Crea las categorías en el mismo idioma del usuario.
+
+EDICIÓN / ELIMINACIÓN:
+- Si hay ID, verifica con get_expense_by_id / get_income_by_id.
+- Si no hay ID pero describe el movimiento, usa search_expenses / search_incomes.
+- Luego update_expense/update_income o delete_expense/delete_income.
+
+CONSULTAS:
+- Por categoría + período: get_category_expenses / get_category_incomes.
+- Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
+- Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
+- Listar todo: get_user_expenses / get_user_incomes.
+
+INSIGHTS MENSUALES:
+- Para resúmenes, balances, "cómo voy", "qué tal el mes": LLAMA SIEMPRE get_user_monthly_insights antes de responder.
+- NUNCA inventes promedios, %s o comparativas. Usa solo los datos de la tool.
+- Devuelve un resumen con (a) top categorías con monto y %, y (b) análisis de patrones (día pico, anomalías, crecimiento vs mes anterior).
+
+FORMATO:
+- Devuelve respuestas concisas — el supervisor las envuelve con personalidad.
+- Para reportes: *negrita* con asterisco; _cursiva_ con guión bajo.
+- Usa el mismo idioma que el usuario.
+- Para montos en resumen usa formato corto: 879k COP, 3.5M COP.
+
+QUÉ NO HACER:
+- ❌ Inventar promedios, días pico o patrones sin llamar get_user_monthly_insights.
+- ❌ Sumar categorías a ojo.
+- ❌ Crear categoría nueva si hay una existente que encaje.
+"""
+
+
+def build_expenses_subagent(
+    user: User,
+    expense_categories_str: str,
+    income_categories_str: str,
+    current_date: str,
+):
+    """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
+
+    tools = build_expenses_tools(user)
+    return create_agent(
+        model=_model(),
+        tools=tools,
+        system_prompt=_build_system_prompt(
+            expense_categories_str, income_categories_str, current_date
+        ),
+    )
