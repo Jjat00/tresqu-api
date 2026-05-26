@@ -29,7 +29,7 @@ from wallbit.agent_safety import (
     get_pending_decision,
     mark_failed,
 )
-from wallbit.executors import UnknownTool, execute_decision
+from wallbit.executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from wallbit.models import AgentDecision
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,15 @@ def _execute(user: User, decision_id: int) -> str:
         mark_failed(decision, error=str(exc))
         return f"❌ {exc}"
 
-    if account.kill_switch_until and account.kill_switch_until > timezone.now():
+    # Tools in LOCAL_ONLY_TOOLS (currently wallbit_resume) must be allowed
+    # through even when the kill switch is active — they're how the user
+    # lifts the pause from chat. Other writes still get blocked.
+    tool_name = (decision.tools_called or [{}])[0].get("tool", "")
+    if (
+        tool_name not in LOCAL_ONLY_TOOLS
+        and account.kill_switch_until
+        and account.kill_switch_until > timezone.now()
+    ):
         mark_failed(decision, error="kill_switch_active")
         return "🛑 El kill switch de Wallbit está activo. La operación fue cancelada."
 

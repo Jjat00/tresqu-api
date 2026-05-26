@@ -10,6 +10,8 @@ from .views import (
     PortfolioTimelineView,
     WallbitConnectView,
     WallbitDisconnectView,
+    WallbitPauseView,
+    WallbitResumeView,
     WallbitStatusView,
     WallbitSyncView,
 )
@@ -17,6 +19,8 @@ from .views import (
 urlpatterns = [
     path("connect/", WallbitConnectView.as_view(), name="wallbit-connect"),
     path("disconnect/", WallbitDisconnectView.as_view(), name="wallbit-disconnect"),
+    path("pause/", WallbitPauseView.as_view(), name="wallbit-pause"),
+    path("resume/", WallbitResumeView.as_view(), name="wallbit-resume"),
     path("status/", WallbitStatusView.as_view(), name="wallbit-status"),
     path("sync/", WallbitSyncView.as_view(), name="wallbit-sync"),
     path("agent/decisions/", AgentDecisionListView.as_view(), name="wallbit-agent-decisions"),

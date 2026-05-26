@@ -17,6 +17,7 @@ import logging
 from decimal import Decimal
 from typing import Any
 
+from django.utils import timezone
 from langchain_core.tools import tool
 
 from users.models import User
@@ -31,6 +32,7 @@ from .agent_safety import (
     evaluate_trade_limits,
     get_account_or_raise,
 )
+from .models import WallbitAccount
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +291,70 @@ def _preview_set_card_status(
     return _pending_payload(decision.id, preview, two_step_required=False)
 
 
+_PAUSE_MAX_HOURS = 24 * 30
+
+
+def _pause_bot_directly(*, user: User, duration_hours: int) -> dict[str, Any]:
+    """Activate the kill switch for ``duration_hours``. Safety-positive — no
+    confirmation step needed. If a longer pause is already active, keep it.
+    """
+    account = WallbitAccount.objects.filter(user=user).first()
+    if account is None:
+        return {"ok": False, "error": "wallbit_not_connected",
+                "message": "No tienes Wallbit conectado."}
+    if duration_hours <= 0 or duration_hours > _PAUSE_MAX_HOURS:
+        return {"ok": False, "error": "duration_invalid",
+                "message": f"duration_hours debe estar entre 1 y {_PAUSE_MAX_HOURS}."}
+
+    new_until = timezone.now() + timezone.timedelta(hours=duration_hours)
+    if not account.kill_switch_until or account.kill_switch_until < new_until:
+        account.kill_switch_until = new_until
+        account.save(update_fields=["kill_switch_until"])
+
+    return {
+        "ok": True,
+        "requires_confirmation": False,
+        "paused_until": account.kill_switch_until.isoformat(),
+        "duration_hours": duration_hours,
+        "summary": (
+            f"⏸️ Pausé el bot de Wallbit por {duration_hours}h "
+            f"(hasta {account.kill_switch_until.strftime('%d/%m %H:%M')}). "
+            "Ningún BUY/SELL/move se ejecutará hasta ese momento."
+        ),
+    }
+
+
+def _preview_resume_bot(
+    *, user: User, channel: str, user_message: str,
+) -> dict[str, Any]:
+    """Propose lifting the kill switch — requires explicit confirmation."""
+    account = WallbitAccount.objects.filter(user=user).first()
+    if account is None:
+        return {"ok": False, "error": "wallbit_not_connected",
+                "message": "No tienes Wallbit conectado."}
+    if not account.kill_switch_until or account.kill_switch_until <= timezone.now():
+        return {"ok": False, "error": "not_paused",
+                "message": "El bot no está pausado."}
+
+    preview = {
+        "action": "RESUME",
+        "currently_paused_until": account.kill_switch_until.isoformat(),
+        "summary": (
+            f"Reanudar el bot ahora (estaba pausado hasta "
+            f"{account.kill_switch_until.strftime('%d/%m %H:%M')})"
+        ),
+    }
+    decision = create_pending_decision(
+        user=user,
+        channel=channel,
+        user_message=user_message,
+        tool_name="wallbit_resume",
+        tool_args={},
+        preview=preview,
+    )
+    return _pending_payload(decision.id, preview, two_step_required=True)
+
+
 def make_wallbit_write_tools(
     user: User, channel: str, user_message: str
 ) -> list:
@@ -385,10 +451,45 @@ def make_wallbit_write_tools(
             card_uuid=card_uuid, new_status=new_status,
         )
 
+    @tool
+    def wallbit_pause(duration_hours: int = 24) -> dict[str, Any]:
+        """Pausa el bot de Wallbit (kill switch local) durante N horas.
+
+        Acción de seguridad — se ejecuta DIRECTO, sin confirmación. Úsalo
+        cuando el usuario diga "pausa wallbit", "freno", "pausa el bot",
+        "no opere por hoy", "stop wallbit", etc.
+
+        Mientras el kill switch esté activo, NINGÚN BUY/SELL/move/chest/
+        card del bot se ejecutará. El usuario puede seguir operando desde
+        la app oficial de Wallbit (esto solo pausa al asistente).
+
+        Args:
+            duration_hours: Horas a pausar (default 24, máximo 720 = 30 días).
+                Valores típicos: 1, 6, 24, 72 (3 días), 168 (1 semana).
+        """
+        return _pause_bot_directly(user=user, duration_hours=int(duration_hours))
+
+    @tool
+    def wallbit_resume() -> dict[str, Any]:
+        """Propone reanudar el bot de Wallbit (NO ejecuta).
+
+        Acción que QUITA protección — siempre requiere confirmación
+        explícita del usuario. Úsalo cuando el usuario diga "reanuda
+        wallbit", "vuelve a operar", "quita la pausa".
+
+        Devuelve un preview + confirmation_id. El usuario confirma con
+        botón y recién ahí se limpia el kill switch.
+        """
+        return _preview_resume_bot(
+            user=user, channel=channel, user_message=user_message,
+        )
+
     return [
         wallbit_place_trade,
         wallbit_move_funds,
         wallbit_deposit_chest,
         wallbit_withdraw_chest,
         wallbit_set_card_status,
+        wallbit_pause,
+        wallbit_resume,
     ]

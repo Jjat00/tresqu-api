@@ -193,12 +193,34 @@ def execute_set_card_status(
     }
 
 
+def execute_resume_bot(
+    decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]  # noqa: ARG001
+) -> dict[str, Any]:
+    """Clear the kill switch — purely local, no Wallbit API call.
+
+    This executor must run even when ``account.kill_switch_until`` is
+    active, because that's the whole point. The confirm view treats it
+    as an exception (see ``LOCAL_ONLY_TOOLS``).
+    """
+    account.kill_switch_until = None
+    account.save(update_fields=["kill_switch_until"])
+    mark_executed(decision)
+    return {"ok": True, "resumed": True}
+
+
+# Tools that only touch our DB (not Wallbit's API). They bypass the
+# kill-switch refusal in AgentConfirmView so the user can lift their own
+# pause via chat.
+LOCAL_ONLY_TOOLS = frozenset({"wallbit_resume"})
+
+
 EXECUTORS: dict[str, Callable[..., dict[str, Any]]] = {
     "wallbit_place_trade": execute_place_trade,
     "wallbit_move_funds": execute_move_funds,
     "wallbit_deposit_chest": execute_deposit_chest,
     "wallbit_withdraw_chest": execute_withdraw_chest,
     "wallbit_set_card_status": execute_set_card_status,
+    "wallbit_resume": execute_resume_bot,
 }
 
 

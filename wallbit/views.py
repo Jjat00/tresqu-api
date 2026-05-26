@@ -14,7 +14,7 @@ from .client import (
     WallbitPermissionError,
 )
 from .crypto import encrypt_api_key
-from .executors import UnknownTool, execute_decision
+from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
 from .portfolio import get_holdings, get_summary, get_timeline
 from .serializers import (
@@ -106,6 +106,90 @@ class WallbitDisconnectView(APIView):
         return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
 
 
+# Bounded set of pause durations the dashboard offers. Custom values are
+# accepted via the API (capped at 30 days) but the UI sticks to these
+# presets so users don't accidentally lock themselves out for a year.
+_PAUSE_PRESETS_HOURS = {1, 6, 24, 72, 168}
+_PAUSE_MAX_HOURS = 24 * 30
+
+
+class WallbitPauseView(APIView):
+    """POST /api/wallbit/pause — activate the agent kill switch for N hours.
+
+    Safety-positive action: pausing the bot only adds protection. The
+    request body accepts ``{"duration_hours": int}`` (default 24). If a
+    pause is already active and the new ``until`` would be sooner, we
+    keep the longer of the two — never weaken an existing pause.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        account = WallbitAccount.objects.filter(user=request.user).first()
+        if not account:
+            return Response(
+                {"detail": "No Wallbit account connected."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        raw_hours = request.data.get("duration_hours", 24)
+        try:
+            hours = int(raw_hours)
+        except (TypeError, ValueError):
+            return Response(
+                {"detail": "duration_hours must be an integer."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if hours <= 0 or hours > _PAUSE_MAX_HOURS:
+            return Response(
+                {"detail": f"duration_hours must be between 1 and {_PAUSE_MAX_HOURS}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        new_until = timezone.now() + timezone.timedelta(hours=hours)
+        if account.kill_switch_until and account.kill_switch_until > new_until:
+            # Don't shorten an existing protection — keep the longer pause.
+            pass
+        else:
+            account.kill_switch_until = new_until
+            account.save(update_fields=["kill_switch_until"])
+
+        logger.info(
+            "wallbit pause: user=%s duration_hours=%s until=%s",
+            request.user.id, hours, account.kill_switch_until,
+        )
+        return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
+
+
+class WallbitResumeView(APIView):
+    """POST /api/wallbit/resume — clear the kill switch.
+
+    Safety-negative action: removing protection. Requires the user to be
+    authenticated. The agent layer requires an extra confirmation step
+    before exposing this (see ``wallbit/write_tools.py``); the REST
+    endpoint trusts the JWT'd user directly.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        account = WallbitAccount.objects.filter(user=request.user).first()
+        if not account:
+            return Response(
+                {"detail": "No Wallbit account connected."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        if account.status == WallbitAccount.REVOKED:
+            return Response(
+                {"detail": "Account is revoked — reconnect from the dashboard."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        account.kill_switch_until = None
+        account.save(update_fields=["kill_switch_until"])
+        logger.info("wallbit resume: user=%s cleared kill switch", request.user.id)
+        return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
+
+
 class AgentDecisionPagination(PageNumberPagination):
     page_size = 20
     page_size_query_param = "page_size"
@@ -146,7 +230,13 @@ class AgentConfirmView(APIView):
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
 
-        if account.kill_switch_until and account.kill_switch_until > timezone.now():
+        tool_name = (decision.tools_called or [{}])[0].get("tool", "")
+        bypass_kill_switch = tool_name in LOCAL_ONLY_TOOLS
+        if (
+            not bypass_kill_switch
+            and account.kill_switch_until
+            and account.kill_switch_until > timezone.now()
+        ):
             return Response(
                 {"detail": "Kill switch active — cannot execute."},
                 status=status.HTTP_403_FORBIDDEN,
