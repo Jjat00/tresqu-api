@@ -799,14 +799,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Procesar mensaje
         response = await process_message(chat_user, user_message_text)
 
-        await update.message.reply_text(response, parse_mode="Markdown")
+        await update.message.reply_text(response.text, parse_mode="Markdown")
+
+        # Si la herramienta devolvió un preview pendiente de confirmación
+        # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
+        # justo después del recap textual.
+        pending = response.pending_confirmation
+        if pending:
+            try:
+                from .wallbit_handlers import send_confirmation_buttons
+                await send_confirmation_buttons(
+                    bot=context.bot,
+                    chat_id=update.effective_chat.id,
+                    decision_id=pending["confirmation_id"],
+                    preview=pending.get("preview", {}),
+                    two_step=pending.get("two_step_required", False),
+                )
+            except Exception as exc:
+                logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
 
         # Registrar respuesta
         await create_message_async(
             chat,
             "ai_response",
             "outgoing",
-            response
+            response.text
         )
     except Exception as e:
         logger.error(f"Error al procesar mensaje: {e}")
@@ -1206,6 +1223,8 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 transcription = await transcribe_audio(temp_path)
 
                 # Guardar la transcripción en la base de datos
+                response_text = ""
+                pending = None
                 if transcription:
                     await create_message_async(
                         chat,
@@ -1215,25 +1234,42 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     )
 
                     # Procesar el mensaje con la transcripción
-                    response = await process_message(chat_user, transcription)
+                    agent_response = await process_message(chat_user, transcription)
+                    response_text = agent_response.text
+                    pending = agent_response.pending_confirmation
                 else:
-                    response = "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
+                    response_text = "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
             except Exception as e:
                 logger.error(f"Error al transcribir audio: {e}")
-                response = "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo."
+                response_text = "Lo siento, hubo un error al procesar tu mensaje de voz. Por favor, intenta de nuevo."
+                pending = None
 
             # Eliminar el mensaje de espera
             await context.bot.delete_message(chat_id=chat_id, message_id=wait_message.message_id)
 
             # Enviar la respuesta
-            await update.message.reply_text(response, parse_mode="Markdown")
+            await update.message.reply_text(response_text, parse_mode="Markdown")
+
+            # Enviar botones de confirmación si la respuesta incluye un preview pendiente
+            if pending:
+                try:
+                    from .wallbit_handlers import send_confirmation_buttons
+                    await send_confirmation_buttons(
+                        bot=context.bot,
+                        chat_id=update.effective_chat.id,
+                        decision_id=pending["confirmation_id"],
+                        preview=pending.get("preview", {}),
+                        two_step=pending.get("two_step_required", False),
+                    )
+                except Exception as exc:
+                    logger.exception(f"send_confirmation_buttons (telegram voice) failed: {exc}")
 
             # Registrar respuesta
             await create_message_async(
                 chat,
                 "ai_response",
                 "outgoing",
-                response
+                response_text
             )
 
         # Eliminar el archivo temporal
@@ -1519,6 +1555,16 @@ def setup_bot():
 
     # Agregar manejador de errores
     application.add_error_handler(error_handler)
+
+    # Callbacks específicos de Wallbit (Confirmar / Cancelar) — debe ir
+    # ANTES del debug_callback global para que ese no los intercepte.
+    from .wallbit_handlers import wallbit_callback_handler
+    application.add_handler(
+        CallbackQueryHandler(
+            wallbit_callback_handler,
+            pattern=r"^wallbit_(confirm|cancel)_\d+$",
+        )
+    )
 
     # Agregar manejador de callback query global para debugging
     application.add_handler(CallbackQueryHandler(debug_callback))

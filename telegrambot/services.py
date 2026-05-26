@@ -22,7 +22,7 @@ from telegrambot.config import (
 from telegrambot.utils import log_ssl_error_details
 from users.models import User
 
-from agents.services import process_message as _agent_process_message
+from agents.services import AgentResponse, process_message as _agent_process_message
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
@@ -77,14 +77,17 @@ async def transcribe_audio(audio_file_path: str) -> str:
         return ""
 
 
-async def process_message(user: User, raw_text: str) -> str:
-    """Public Telegram entry point — delegates to the unified agents supervisor."""
+async def process_message(user: User, raw_text: str) -> AgentResponse:
+    """Public Telegram entry point — delegates to the unified agents supervisor.
+
+    Returns the full ``AgentResponse`` so the bot layer can act on
+    ``pending_confirmation`` (e.g. send Wallbit confirm/cancel buttons).
+    """
 
     history = await build_history(user.id)
-    response = await _agent_process_message(
+    return await _agent_process_message(
         user=user,
         raw_text=raw_text,
         channel="telegram",
         history=history,
     )
-    return response.text

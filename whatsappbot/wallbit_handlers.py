@@ -1,76 +1,29 @@
 """WhatsApp glue for the Wallbit confirmation flow.
 
-Responsibilities:
-
-- `extract_pending_confirmation(messages)`: scan the LangChain ToolMessages
-  produced by the agent for the most recent `requires_confirmation: True`
-  result. Returns the preview payload or None.
-- `send_confirmation_buttons(phone, decision_id, preview, two_step)`:
-  build a Meta WhatsApp interactive `button` message and POST it. Two
-  buttons: Confirmar / Cancelar (or "Doble confirmación" when two_step).
-- `handle_button_press(button_id, user)`: dispatch a `wallbit_confirm_*`
-  or `wallbit_cancel_*` button tap to the executor and return a
-  user-facing reply.
+The channel-agnostic lifecycle (preview text, execute, cancel,
+button-id parsing) lives in ``wallbit.confirmation_actions`` and is
+shared with Telegram. This module only handles the WhatsApp-specific
+HTTP call against Meta's Cloud API and re-exports the helpers that
+``agents/services.py`` already imports from here.
 """
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any
 
 import requests
 from django.conf import settings
-from django.utils import timezone
 
 from users.models import User
-from wallbit.agent_safety import (
-    AccountNotConnected,
-    get_account_or_raise,
-    get_pending_decision,
-    mark_failed,
+from wallbit.confirmation_actions import (
+    CANCEL_PREFIX,
+    CONFIRM_PREFIX,
+    extract_pending_confirmation,
+    handle_button_press,
+    summary_text,
 )
-from wallbit.executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
-from wallbit.models import AgentDecision
 
 logger = logging.getLogger(__name__)
-
-CONFIRM_PREFIX = "wallbit_confirm_"
-CANCEL_PREFIX = "wallbit_cancel_"
-
-
-def extract_pending_confirmation(messages: list[Any]) -> dict[str, Any] | None:
-    """Return the latest tool result that requires confirmation, if any."""
-    for msg in reversed(messages):
-        if msg.__class__.__name__ != "ToolMessage":
-            continue
-        raw = getattr(msg, "content", None)
-        if not raw:
-            continue
-        payload = _coerce_payload(raw)
-        if isinstance(payload, dict) and payload.get("requires_confirmation"):
-            return payload
-    return None
-
-
-def _coerce_payload(content: Any) -> Any:
-    if isinstance(content, dict):
-        return content
-    if isinstance(content, str):
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return None
-    return None
-
-
-def _summary_text(preview: dict[str, Any], two_step: bool) -> str:
-    summary = preview.get("summary") or "Operación pendiente"
-    header = "⚠️ Doble confirmación requerida" if two_step else "🔒 Confirmación requerida"
-
-    risk_warning = (preview.get("risk_warning") or "").strip()
-    risk_block = f"\n\n🛡️ Riesgo: {risk_warning}" if risk_warning else ""
-
-    return f"{header}\n\n{summary}{risk_block}\n\n¿Confirmas?"
 
 
 def send_confirmation_buttons(
@@ -82,7 +35,7 @@ def send_confirmation_buttons(
         logger.error("Meta credentials missing; cannot send confirmation buttons")
         return False
 
-    body_text = _summary_text(preview, two_step)
+    body_text = summary_text(preview, two_step)
     confirm_label = "Confirmar 2x" if two_step else "Confirmar"
 
     payload = {
@@ -136,67 +89,16 @@ def send_confirmation_buttons(
     return True
 
 
-def handle_button_press(button_id: str, user: User) -> str:
-    if button_id.startswith(CONFIRM_PREFIX):
-        try:
-            decision_id = int(button_id[len(CONFIRM_PREFIX):])
-        except ValueError:
-            return "No reconocí esa acción."
-        return _execute(user, decision_id)
-
-    if button_id.startswith(CANCEL_PREFIX):
-        try:
-            decision_id = int(button_id[len(CANCEL_PREFIX):])
-        except ValueError:
-            return "No reconocí esa acción."
-        return _cancel(user, decision_id)
-
-    return ""
+def handle_button_press_for_user(button_id: str, user: User) -> str:
+    """Thin alias kept for backward compatibility with existing WhatsApp wiring."""
+    return handle_button_press(button_id, user)
 
 
-def _execute(user: User, decision_id: int) -> str:
-    try:
-        decision = get_pending_decision(user, decision_id)
-    except AgentDecision.DoesNotExist:
-        return "Esa operación ya fue resuelta o no existe."
-
-    try:
-        account = get_account_or_raise(user)
-    except AccountNotConnected as exc:
-        mark_failed(decision, error=str(exc))
-        return f"❌ {exc}"
-
-    # Tools in LOCAL_ONLY_TOOLS (currently wallbit_resume) must be allowed
-    # through even when the kill switch is active — they're how the user
-    # lifts the pause from chat. Other writes still get blocked.
-    tool_name = (decision.tools_called or [{}])[0].get("tool", "")
-    if (
-        tool_name not in LOCAL_ONLY_TOOLS
-        and account.kill_switch_until
-        and account.kill_switch_until > timezone.now()
-    ):
-        mark_failed(decision, error="kill_switch_active")
-        return "🛑 El kill switch de Wallbit está activo. La operación fue cancelada."
-
-    try:
-        result = execute_decision(decision, account)
-    except UnknownTool as exc:
-        mark_failed(decision, error=str(exc))
-        return f"❌ Operación desconocida: {exc}"
-
-    if result.get("ok"):
-        tx_uuid = result.get("wallbit_tx_uuid")
-        suffix = f"\n\n🧾 Tx: `{tx_uuid}`" if tx_uuid else ""
-        return f"✅ Operación ejecutada en Wallbit.{suffix}"
-
-    err = result.get("error") or "error desconocido"
-    return f"❌ Wallbit rechazó la operación: {err}"
-
-
-def _cancel(user: User, decision_id: int) -> str:
-    try:
-        decision = get_pending_decision(user, decision_id)
-    except AgentDecision.DoesNotExist:
-        return "Esa operación ya fue resuelta o no existe."
-    mark_failed(decision, error="cancelled_by_user")
-    return "🚫 Operación cancelada."
+__all__ = [
+    "CANCEL_PREFIX",
+    "CONFIRM_PREFIX",
+    "extract_pending_confirmation",
+    "handle_button_press",
+    "handle_button_press_for_user",
+    "send_confirmation_buttons",
+]
