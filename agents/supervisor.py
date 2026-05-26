@@ -9,6 +9,7 @@ supervisor pattern described in
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from django.conf import settings
 from langchain.agents import create_agent
@@ -19,6 +20,7 @@ from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
+from . import risk_profiler_service
 from .subagents.expenses import build_expenses_subagent
 from .subagents.wallbit import build_wallbit_subagent
 
@@ -45,6 +47,12 @@ CUÁNDO USAR `manage_wallbit`:
 - Saldo Wallbit, transacciones Wallbit, búsqueda de activos.
 - Operaciones reales: comprar, vender, mover entre cuentas internas, depositar/retirar de Robo Advisor, activar/suspender tarjeta.
 - Preguntas que cruzan gastos+ingresos+Wallbit en una sola búsqueda semántica.
+
+CUÁNDO USAR `start_risk_profiler`:
+- El usuario pide armar su perfil de riesgo / inversión / tolerancia a pérdidas.
+- Frases como "quiero saber qué tan arriesgado soy invirtiendo", "haz mi perfil de inversión", "evalúa mi tolerancia al riesgo", "qué tipo de inversionista soy".
+- Cuando recomendaste una inversión y el usuario te pregunta si encaja con su perfil pero aún no hay perfil registrado.
+- NO la uses si el usuario solo pide ver / consultar su perfil actual (eso es lectura). Solo úsala para INICIAR una nueva evaluación.
 
 REGLA DE MONTOS Y SÍMBOLOS:
 - Cuando delegues una operación con dinero, pasa los montos, símbolos y porcentajes EXACTOS que dio el usuario. NUNCA los redondees, recortes ni "ajustes" por tu cuenta. Si el usuario dice "compra 50 USD de AAPL", la instrucción al subagente debe contener "50 USD" y "AAPL" textualmente.
@@ -105,15 +113,19 @@ def build_supervisor(
     income_categories_str: str,
     current_date: str,
 ):
-    """Builds the main Tresqu supervisor with both subagents wired as tools.
+    """Builds the main Tresqu supervisor with subagents and risk-profiler wired as tools.
 
-    Returns a tuple ``(agent, pending_container)``. The container is a dict
-    mutated by the Wallbit subagent wrapper when a confirmation-requiring
-    tool fires — the caller reads it after invoking the supervisor to know
-    whether to surface confirmation buttons. This bridge is necessary
-    because subagents' ``ToolMessage`` results never bubble up to the
-    supervisor's top-level message list (they are wrapped into a single
-    string by the ``@tool`` return).
+    Returns a tuple ``(agent, pending_container, risk_profiler_signal)``.
+
+    - ``pending_container`` is mutated by the Wallbit subagent wrapper when a
+      confirmation-requiring tool fires — the caller reads it after invoking
+      the supervisor to know whether to surface confirmation buttons. This
+      bridge is necessary because subagents' ``ToolMessage`` results never
+      bubble up to the supervisor's top-level message list.
+    - ``risk_profiler_signal`` is mutated by the ``start_risk_profiler`` tool
+      when the supervisor decides to start a Q&A. The outer
+      ``process_message`` reads it to surface the raw question instead of the
+      supervisor's wrapped recap.
     """
 
     expenses_agent = build_expenses_subagent(
@@ -122,6 +134,10 @@ def build_supervisor(
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
 
     pending_container: dict[str, dict | None] = {"confirmation": None}
+    # When the supervisor decides to start the risk profiler, it sets this flag
+    # so the outer ``process_message`` knows to surface the first question
+    # instead of the supervisor's recap (which would otherwise wrap it in chatter).
+    risk_profiler_signal: dict[str, Any] = {"first_step": None}
 
     @tool("manage_expenses_and_income")
     async def call_expenses_subagent(instruction: str) -> str:
@@ -169,9 +185,31 @@ def build_supervisor(
             logger.exception(f"wallbit subagent failed: {exc}")
             return f"(error en subagente Wallbit: {exc})"
 
+    @tool("start_risk_profiler")
+    async def start_risk_profiler() -> str:
+        """Inicia un Q&A multi-turno para construir el perfil de riesgo / inversión del usuario.
+
+        Úsala SOLO cuando el usuario quiera EVALUAR o ARMAR su perfil
+        (no para consultarlo). El Q&A toma 5 mensajes; los siguientes mensajes
+        del usuario se interpretan como respuestas a las preguntas.
+
+        Devuelve la primera pregunta del Q&A — tu trabajo después es presentarla
+        al usuario tal cual, sin reformularla ni añadir comentarios largos.
+        """
+
+        try:
+            step = await risk_profiler_service.start_session(user.id, channel)
+        except Exception as exc:
+            logger.exception(f"start_risk_profiler failed: {exc}")
+            return "(error iniciando el perfil de riesgo, pídele al usuario que reintente con /perfil)"
+
+        risk_profiler_signal["first_step"] = step
+        question = step.get("question") or step.get("final_text") or ""
+        return question
+
     agent = create_agent(
         model=_supervisor_model(),
-        tools=[call_expenses_subagent, call_wallbit_subagent],
+        tools=[call_expenses_subagent, call_wallbit_subagent, start_risk_profiler],
         system_prompt=_build_supervisor_prompt(current_date),
     )
-    return agent, pending_container
+    return agent, pending_container, risk_profiler_signal
