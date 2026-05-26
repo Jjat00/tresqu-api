@@ -5,7 +5,9 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .effective_profile import get_effective_profile
 from .models import RiskAssessment, RiskProfile
+from .risk_inference import DEFAULT_MAX_AGE_DAYS
 from .serializers import (
     RiskAssessmentSerializer,
     RiskProfileSerializer,
@@ -94,3 +96,32 @@ class RiskAssessmentListView(APIView):
         page = paginator.paginate_queryset(qs, request, view=self)
         serializer = RiskAssessmentSerializer(page, many=True)
         return paginator.get_paginated_response(serializer.data)
+
+
+class RiskProfileEffectiveView(APIView):
+    """GET /api/agents/risk-profile/effective/ — combined declared + inferred profile.
+
+    Query params:
+    - ``refresh=1`` forces a fresh auto-inference even if a cached one exists.
+    - ``max_age_days=N`` overrides the default 7-day inference cache TTL.
+
+    This is the endpoint frontend and safety guardrails should call. It runs
+    on-demand inference (cached for ``max_age_days``) and applies the
+    declared-vs-inferred safety rule.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        refresh = request.query_params.get("refresh") in ("1", "true", "yes")
+        try:
+            max_age = int(request.query_params.get("max_age_days", DEFAULT_MAX_AGE_DAYS))
+        except (TypeError, ValueError):
+            max_age = DEFAULT_MAX_AGE_DAYS
+
+        effective = get_effective_profile(
+            request.user,
+            max_age_days=0 if refresh else max_age,
+            refresh_inference=True,
+        )
+        return Response(effective.to_dict(), status=status.HTTP_200_OK)

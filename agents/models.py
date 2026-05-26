@@ -46,12 +46,14 @@ class RiskProfile(models.Model):
 class RiskAssessment(models.Model):
     INITIAL = "initial"
     CHAT_QA = "chat_qa"
+    AUTO_INFERENCE = "auto_inference"
     CONTEXT_DRIFT = "context_drift"
     USER_REQUEST = "user_request"
     MANUAL_OVERRIDE = "manual_override"
     TRIGGER_CHOICES = [
         (INITIAL, "Initial"),
         (CHAT_QA, "Chat Q&A"),
+        (AUTO_INFERENCE, "Auto inference"),
         (CONTEXT_DRIFT, "Context drift"),
         (USER_REQUEST, "User request"),
         (MANUAL_OVERRIDE, "Manual override"),
