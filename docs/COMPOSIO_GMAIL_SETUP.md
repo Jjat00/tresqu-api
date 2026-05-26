@@ -112,7 +112,7 @@ ComposioConnection.objects.get(user__email='tester@example.com')
 1. Cuenta Gmail conectada (paso 6) y `trigger_id` poblado.
 2. Mandar un correo de compra real al inbox conectado (ej. receta de
    Rappi, MercadoPago, etc.).
-3. Composio detecta el correo en su próximo poll (máximo 15 min).
+3. Composio detecta el correo en su próximo poll (~2 min por default; configurable vía `interval` en el trigger config).
 4. POST al webhook → backend verifica firma → `ProcessedEmail` se
    inserta con `status='pending'` → Celery task se encola.
 5. Celery worker procesa: AI parse → si es compra/ingreso, crea
@@ -169,9 +169,11 @@ del User sigue (best-effort).
 
 ## 9. Tradeoffs aceptados
 
-- **Latencia ~15 min**: triggers Gmail de Composio son polling, no
-  push. Es el costo por bypass del CASA. No es negociable hasta que
-  Composio agregue push (no anunciado).
+- **Latencia ~2 min** (default del trigger; configurable bajando el
+  `interval` en `composio_handler.py:trigger_specs` y reconectando):
+  los triggers Gmail de Composio son polling, no push. Es el costo por
+  bypass del CASA. No es negociable hasta que Composio agregue push
+  (no anunciado).
 - **Webhook dropped si conexión desconectada**: 200 + log + drop. Si
   el usuario reconecta y Composio reusa el mismo `connected_account_id`,
   el row vuelve a `active` por el callback. Si crea uno nuevo, el

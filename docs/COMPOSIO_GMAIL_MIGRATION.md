@@ -16,9 +16,10 @@ proveedor de toolkits/triggers.
 
 ## Tradeoffs aceptados
 
-- **Latencia**: trigger Gmail de Composio es polling con mínimo
-  documentado de 15 min (vs. push casi en tiempo real con Pub/Sub).
-  Aceptado como costo del CASA-bypass.
+- **Latencia**: trigger Gmail de Composio es polling. El default real
+  observado es **2 min** (campo `interval` del trigger config,
+  configurable de 1 min hacia arriba). Vs. push casi en tiempo real
+  con Pub/Sub. Aceptado como costo del CASA-bypass.
 - **Re-conexión obligatoria**: los usuarios con `GoogleAccount` actual
   tendrían que re-conectar Gmail vía Composio. **No hay usuarios reales
   con Gmail conectado todavía** — sin coste de migración real.
@@ -174,7 +175,7 @@ intacto hasta el merge final.
 
 ## Confirmaciones del usuario al inicio de la migración
 
-- ✅ Latencia ~15 min aceptable (motivo: bypass de CASA)
+- ✅ Latencia ~2 min aceptable (motivo: bypass de CASA; real medido tras deploy)
 - ✅ Tiene cuenta Composio + API key disponible
 - ✅ Va a cargar `COMPOSIO_API_KEY` en Railway
 - ✅ Borrar todo lo viejo (no convivencia)

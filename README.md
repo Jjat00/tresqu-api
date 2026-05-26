@@ -30,7 +30,7 @@ Tresqu es un copiloto financiero conversacional. El usuario habla con él por **
 
 - Registra gastos/ingresos en lenguaje natural ("gasté 30k en almuerzo")
 - Categoriza automáticamente con IA
-- Detecta compras en correos de Gmail vía Pub/Sub
+- Detecta compras en correos de Gmail (polling vía Composio, ~2 min de latencia)
 - Genera reportes y responde preguntas analíticas
 - **(nuevo)** Consulta saldos y transacciones de **Wallbit**
 - **(nuevo)** Propone órdenes de compra/venta de activos, movimientos entre cuentas DEFAULT/INVESTMENT, depósitos/retiros de Robo Advisor y bloqueo de tarjetas — todo bajo un flujo de **preview → confirmación explícita → ejecución** con límites por usuario y audit log
@@ -47,7 +47,7 @@ flowchart LR
         WA[WhatsApp<br/>Meta Cloud API]
         TG[Telegram<br/>python-telegram-bot]
         WEB[Web Dashboard<br/>tresqu.com]
-        GM[Gmail Push<br/>Pub/Sub]
+        GM[Composio Webhook<br/>Gmail trigger]
     end
 
     subgraph API["cashbot-api (Django + DRF)"]
@@ -65,7 +65,7 @@ flowchart LR
     subgraph External["APIs externas"]
         WB[Wallbit API]
         OAI[OpenAI<br/>GPT-4.1 + embeddings]
-        GMAPI[Google Gmail API]
+        COMPOSIO[Composio API<br/>OAuth + Gmail polling]
     end
 
     WA --> ROUTER
@@ -77,6 +77,7 @@ flowchart LR
     AGENT --> SAFETY
     AGENT --> DB
     AGENT --> OAI
+    ROUTER --> COMPOSIO
 
     SAFETY --> WB
     SAFETY --> DB
@@ -84,7 +85,7 @@ flowchart LR
     ROUTER -->|encola tareas| REDIS
     WORKER -->|consume| REDIS
     WORKER --> WB
-    WORKER --> GMAPI
+    WORKER --> COMPOSIO
     WORKER --> DB
     WORKER --> OAI
 ```
@@ -177,7 +178,7 @@ sequenceDiagram
 | Persistencia | PostgreSQL + pgvector |
 | Async | Celery 5.5, Redis 7 (broker + result backend), Beat embebido |
 | IA | LangChain + LangGraph 1.x, OpenAI GPT-4.1, text-embedding-3-small |
-| Integraciones | python-telegram-bot, Meta WhatsApp Cloud API, Google Gmail API + Pub/Sub, Wallbit API |
+| Integraciones | python-telegram-bot, Meta WhatsApp Cloud API, Composio SDK (Gmail toolkit), Wallbit API |
 | Seguridad | cryptography (Fernet) para cifrado de API keys, scope/IP whitelist en Wallbit |
 | HTTP | httpx con backoff y respeto de `Retry-After` |
 | Producción | Gunicorn, Docker, Railway (web + worker + Redis) |
@@ -209,60 +210,72 @@ WALLBIT_ENCRYPTION_KEY=<cualquier string largo — se deriva con SHA-256 + Ferne
 
 > `WALLBIT_ENCRYPTION_KEY` puede ser cualquier string. Tresqu lo pasa por `SHA-256 → base64 → Fernet` antes de cifrar las API keys de los usuarios. **No la cambies en producción una vez tengas cuentas conectadas: invalidaría todas las keys cifradas.**
 
-### 2. Levantar los servicios
+### 2. Levantar los servicios de soporte (db, redis, worker)
+
+En dev corremos **Django directamente en el host** (recarga inmediata, debug más cómodo) y dejamos solo los servicios de soporte en Docker:
 
 ```bash
-docker-compose -f docker-compose.dev.yml up --build
+docker-compose -f docker-compose.dev.yml up -d db redis worker
 ```
-
-Esto arranca cuatro contenedores:
 
 | Servicio | Puerto host | Descripción |
 |----------|-------------|-------------|
-| `web` | 8000 | Django + Gunicorn / runserver |
-| `worker` | — | Celery worker con Beat embebido |
 | `db` | 5433 | PostgreSQL + pgvector |
-| `redis` | 6379 | Broker y result backend |
+| `redis` | 6379 | Broker y result backend (expuesto al host para el runserver) |
+| `worker` | — | Celery worker con Beat embebido (apunta a `redis:6379` interno) |
 
-### 3. Migrar la base de datos
+> El servicio `web` del compose existe pero no lo usamos en dev — corremos `runserver` en el host. Asegurate de tener `CELERY_BROKER_URL=redis://localhost:6379/0` en el `.env` para que el host hable con el Redis dockerizado.
 
-Las migraciones corren automáticamente en el comando del `web`, pero si necesitas correrlas manualmente:
+### 3. Instalar dependencias y migrar en el venv del host
 
 ```bash
-docker-compose -f docker-compose.dev.yml exec web python manage.py migrate
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+python manage.py migrate
+python manage.py createcachetable  # tabla del state-token anti-replay (Composio)
 ```
 
 ### 4. Crear un superusuario (opcional)
 
 ```bash
-docker-compose -f docker-compose.dev.yml exec web python manage.py createsuperuser
+python manage.py createsuperuser
 ```
 
-### 5. Verificar que todo está vivo
+### 5. Arrancar Django
+
+```bash
+python manage.py runserver
+```
+
+### 6. Verificar que todo está vivo
 
 ```bash
 # API responde
 curl http://localhost:8000/schema/swagger-ui/
 
 # Worker registró las tareas
-docker-compose -f docker-compose.dev.yml logs worker | grep "wallbit.tasks"
+docker logs cashbot-worker | grep -E "wallbit\.tasks|composio_integration\.tasks|gmailbot\.composio_tasks"
 ```
 
-Deberías ver `wallbit.tasks.sync_wallbit_transactions` y `wallbit.tasks.sync_all_connected_accounts` en los logs del worker.
+Deberías ver al menos:
+- `wallbit.tasks.sync_wallbit_transactions`, `wallbit.tasks.sync_all_connected_accounts`
+- `composio_integration.tasks.provision_triggers_async`, `reprocess_stale_pending`, `retry_failed_connections`
+- `gmailbot.composio_tasks.process_gmail_message_async`
 
 ### Comandos útiles
 
 ```bash
-# Ver logs (sigue en vivo)
-docker-compose -f docker-compose.dev.yml logs -f web
-docker-compose -f docker-compose.dev.yml logs -f worker
+# Logs del worker (vivo)
+docker logs -f cashbot-worker
 
-# Shell de Django
-docker-compose -f docker-compose.dev.yml exec web python manage.py shell
+# Shell de Django (host)
+python manage.py shell
 
 # Disparar manualmente una sync de Wallbit
-docker-compose -f docker-compose.dev.yml exec web python manage.py shell -c \
-  "from wallbit.tasks import sync_all_connected_accounts; sync_all_connected_accounts.delay()"
+python manage.py shell -c "from wallbit.tasks import sync_all_connected_accounts; sync_all_connected_accounts.delay()"
+
+# Rebuild del worker tras cambiar requirements.txt
+docker-compose -f docker-compose.dev.yml up -d --build worker
 
 # Resetear toda la BD (destruye volúmenes)
 docker-compose -f docker-compose.dev.yml down -v
@@ -279,11 +292,13 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `OPENAI_API_KEY` | Agente LangChain + embeddings de pgvector |
 | `WALLBIT_API_BASE_URL` | Default `https://api.wallbit.io` |
 | `WALLBIT_ENCRYPTION_KEY` | Clave maestra para cifrar las API keys de los usuarios |
-| `CELERY_BROKER_URL` | Redis. Default `redis://redis:6379/0` |
-| `CELERY_RESULT_BACKEND` | Redis DB distinta. Default `redis://redis:6379/1` |
+| `CELERY_BROKER_URL` | Redis. En dev/host: `redis://localhost:6379/0`. En el worker dockerizado: `redis://redis:6379/0` (hardcoded en `docker-compose.dev.yml`) |
+| `CELERY_RESULT_BACKEND` | Redis DB distinta. Mismas reglas de host vs container |
 | `DATABASE_URL` | Postgres + pgvector |
-| `GMAIL_TOKEN_ENCRYPTION_KEY` | Fernet key para tokens OAuth de Gmail |
-| `GOOGLE_CLIENT_ID` / `_SECRET` / `_REDIRECT_URI` | OAuth de Gmail |
+| `COMPOSIO_API_KEY` | Llave de Composio (composio.dev) para el SDK |
+| `COMPOSIO_WEBHOOK_SECRET` | Secret del webhook subscription de Composio — verifica HMAC de cada evento entrante |
+| `COMPOSIO_GMAIL_AUTH_CONFIG_ID` | ID `ac_xxx` del auth config Gmail creado en el dashboard de Composio |
+| `FRONTEND_URL` | Origen al que el callback OAuth redirige al usuario tras autorizar (ej. `https://tresqu.com`) |
 | `META_WHATSAPP_*` | WhatsApp Cloud API |
 | `TELEGRAM_BOT_TOKEN` | Telegram |
 
@@ -301,7 +316,8 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `savings/` | Metas de ahorro y proyecciones |
 | `telegrambot/` | Bot de Telegram — NLP + agente LangChain |
 | `whatsappbot/` | Bot WhatsApp — Meta API, voz (Whisper), imágenes (Vision) |
-| `gmailbot/` | OAuth + Gmail Push + parser de compras |
+| `gmailbot/` | Parser de compras: recibe eventos del webhook de Composio, crea `ProcessedEmail` y `Expense`. La parte de OAuth/polling vive en `composio_integration/`. |
+| **`composio_integration/`** | **(nuevo)** Broker genérico Composio (composio.dev). Hosting del SDK client, state machine OAuth (connect → callback → active → disconnect), verificación HMAC del webhook, state-token JWT con nonce anti-replay y tareas Celery. Toolkits nuevos (Slack, Notion, …) implementan el protocolo `ToolkitHandler` y se enganchan vía `registry`. Detalle: [`docs/COMPOSIO_ARCHITECTURE.md`](docs/COMPOSIO_ARCHITECTURE.md), [`docs/COMPOSIO_GMAIL_SETUP.md`](docs/COMPOSIO_GMAIL_SETUP.md) |
 | **`wallbit/`** | Integración Wallbit: cliente HTTP, modelos, tools del agente, flujo de confirmación, sync periódico, RAG sobre transacciones |
 | **`agents/`** | **(nuevo)** Perfil de riesgo del usuario: cuestionario LangGraph + inferencia automática + combinador. Ver [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md) |
 
@@ -374,23 +390,35 @@ Las tools **write** nunca llaman a Wallbit por sí mismas. Solo crean una `Agent
 
 ## Integración Gmail
 
-Detección automática de compras en correos:
+Detección automática de compras en correos vía **Composio**:
 
-1. Usuario conecta Gmail vía OAuth2 desde Perfil → Conexiones
-2. Gmail Watch + Pub/Sub notifica al webhook en tiempo real
-3. La IA analiza si el correo es una compra
-4. Si lo es, se crea el `Expense` y se pregunta categoría por WhatsApp
-5. El usuario responde y la categoría queda asignada
+1. Usuario abre Perfil → Conexiones → "Conectar Gmail".
+2. El frontend pide `GET /api/integrations/gmail/connect-url/` → backend crea un `ComposioConnection(status=pending)` con state-token JWT firmado, devuelve la URL de Connect Link alojada por Composio.
+3. El usuario autoriza en Google → Composio redirige a `/api/integrations/gmail/callback/?state=...&connected_account_id=ca_xxx`.
+4. El backend valida state-token + nonce, marca `status=active`, llama `complete_connect_flow` y encola `provision_triggers_async`.
+5. El worker llama al SDK de Composio y crea un trigger `GMAIL_NEW_GMAIL_MESSAGE` (polling cada 2 min por default).
+6. Cada nuevo correo: Composio → `POST /api/integrations/gmail/composio-webhook/` (HMAC firmado) → backend valida firma, crea `ProcessedEmail`, encola `gmailbot.composio_tasks.process_gmail_message_async`.
+7. La IA analiza si es compra; si lo es, crea el `Expense` y queda `awaiting_categorization=true`. El usuario asigna categoría desde la UI o respondiendo por WhatsApp/Telegram.
 
-### Management commands
+### Endpoints (todo bajo el prefijo genérico `/api/integrations/<toolkit>/`)
 
-```bash
-python manage.py renew_gmail_watches
-python manage.py gmail_manual_sync --all
-python manage.py gmail_manual_sync --user_id 31
-```
+| Endpoint | Método | Auth | Propósito |
+|----------|--------|------|----------|
+| `/connect-url/` | GET | JWT | Inicia OAuth, devuelve `{redirect_url, connected_account_id, already_connected}` |
+| `/callback/` | GET | — (state-token) | Landing del OAuth — redirige al frontend |
+| `/composio-webhook/` | POST | HMAC (`webhook-signature`) | Eventos de trigger entrantes |
+| `/status/` | GET | JWT | Estado para la UI (`connected`, `trigger_active`, contadores) |
+| `/disconnect/` | POST | JWT | Borra trigger + connected_account en Composio, marca local `disconnected` |
+| `/retry-trigger/` | POST | JWT | Re-encola `provision_triggers_async` si quedó en `failed` |
 
-Detalle: [`gmailbot/README.md`](gmailbot/README.md) · [`docs/GMAIL_SETUP_GUIDE.md`](docs/GMAIL_SETUP_GUIDE.md)
+El listado read-only de correos procesados sigue en `/api/gmail/processed-emails/` (paginado).
+
+### Beat schedules
+
+- `composio-reprocess-stale-pending` cada 5 min: re-encola `ProcessedEmail` stuck en `pending > 10 min`.
+- `composio-retry-failed-connections` cada 1 h: vuelve a `active` y reintenta provisioning en conexiones que cayeron en `failed`.
+
+Detalle de arquitectura, decisiones de diseño y migración: [`docs/COMPOSIO_ARCHITECTURE.md`](docs/COMPOSIO_ARCHITECTURE.md) · [`docs/COMPOSIO_GMAIL_SETUP.md`](docs/COMPOSIO_GMAIL_SETUP.md) · [`docs/COMPOSIO_GMAIL_MIGRATION.md`](docs/COMPOSIO_GMAIL_MIGRATION.md) · [`gmailbot/README.md`](gmailbot/README.md)
 
 ---
 
@@ -476,7 +504,8 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 | `/api/incomes/` | CRUD de ingresos |
 | `/api/categories/` | Categorías |
 | `/api/savings/` | Metas de ahorro |
-| `/api/gmail/*` | Integración Gmail (OAuth, status, sync) |
+| `/api/integrations/gmail/*` | Conectar / desconectar / status / webhook de Gmail (vía Composio) |
+| `/api/gmail/processed-emails/` | Listado paginado de correos procesados |
 | **`/api/wallbit/connect/`** | Valida y guarda una API key cifrada |
 | **`/api/wallbit/status/`** | Estado de conexión del usuario |
 | **`/api/wallbit/disconnect/`** | Revoca + activa kill switch |
@@ -489,7 +518,6 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 | **`/api/agents/risk-profile/history/`** | Audit log paginado de `RiskAssessment` |
 | `/telegram/` | Webhook Telegram |
 | `/whatsapp/` | Webhook WhatsApp (Meta) |
-| `/gmail/webhook/` | Webhook Gmail Pub/Sub |
 | `/schema/swagger-ui/` · `/schema/redoc/` | Documentación interactiva |
 
 ---
@@ -499,7 +527,10 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 - **Broker:** Redis (`CELERY_BROKER_URL`)
 - **Result backend:** Redis DB separada (`CELERY_RESULT_BACKEND`)
 - **Beat:** embebido en el worker con `-B --scheduler celery.beat:PersistentScheduler` (1 sola réplica obligatoria por eso)
-- **Schedules activos:** `wallbit-sync-all-connected` cada 15 min
+- **Schedules activos:**
+  - `wallbit-sync-all-connected` cada 15 min
+  - `composio-reprocess-stale-pending` cada 5 min
+  - `composio-retry-failed-connections` cada 1 hora
 - **Timeouts:** `CELERY_TASK_TIME_LIMIT = 5 min` / `_SOFT_TIME_LIMIT = 4 min`
 
 ---
@@ -516,7 +547,14 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 
 ## Despliegue
 
-Tresqu corre en producción en **Railway** con tres servicios (`web`, `worker`, `Redis`) y autodeploy desde `main`. La BD productiva es **Supabase Postgres** (con `pgvector` habilitado), no la instancia de Railway. Para detalle de configuración por servicio ver el README interno del equipo.
+Tresqu corre en producción en **Railway** con tres servicios (`web`, `worker`, `Redis`) y autodeploy desde `main`. La BD productiva es **Supabase Postgres** (con `pgvector` habilitado), no la instancia de Railway.
+
+- `Procfile` declara `release: python manage.py migrate && python manage.py createcachetable` y `web: gunicorn cashbotapp.wsgi` — cada release aplica migraciones nuevas y garantiza la existencia de `django_cache_table` (usada por el state-token anti-replay de Composio).
+- El servicio `worker` corre `celery -A cashbotapp worker -B --scheduler celery.beat:PersistentScheduler` con beat embebido — **una sola réplica** porque el scheduler persistente no tolera múltiples instancias.
+- Variables Composio (`COMPOSIO_API_KEY`, `COMPOSIO_WEBHOOK_SECRET`, `COMPOSIO_GMAIL_AUTH_CONFIG_ID`) deben estar seteadas en **ambos** servicios (web y worker).
+- El webhook URL configurado en el dashboard de Composio debe apuntar a `https://api.tresqu.com/api/integrations/gmail/composio-webhook/`.
+
+Para detalle de configuración por servicio ver el README interno del equipo.
 
 ---
 

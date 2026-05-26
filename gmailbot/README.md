@@ -26,7 +26,7 @@ de Google).
 ```
 Gmail nuevo correo
        │
-       ▼  (poll cada 15 min)
+       ▼  (poll cada ~2 min, configurable en composio_handler.py:trigger_specs)
    Composio
        │
        ▼  (POST con firma HMAC)
@@ -72,12 +72,17 @@ Ver [docs/COMPOSIO_GMAIL_SETUP.md](../docs/COMPOSIO_GMAIL_SETUP.md).
   constraint parcial.
 - `0005_drop_legacy_google_models.py` — drop de `GoogleAccount` y
   `GmailWatch`.
+- `0006_remove_composioconnection_gmailbot_compconn_pending_idx_and_more.py`
+  — limpieza del índice parcial `compconn_pending_idx` después de
+  reorganizar el set de constraints (artefacto de Django, sin cambio
+  de schema relevante para consumidores).
 
 ## Tradeoffs
 
-- **Latencia ~15 min** entre la llegada del email a Gmail y la
-  creación del `Expense`/`Income`. Es el costo del polling de
-  Composio.
+- **Latencia ~2 min** entre la llegada del email a Gmail y la
+  creación del `Expense`/`Income`. Es el polling default del trigger
+  `GMAIL_NEW_GMAIL_MESSAGE` (se puede subir/bajar tocando el `interval`
+  en `composio_handler.py:trigger_specs` y reconectando).
 - El pipeline AI puede tardar varios segundos (LLM call + embedding);
   por eso se ejecuta en Celery, no en el webhook.
 - `ProcessedEmail.composio_connection` es `SET_NULL`: si el usuario
