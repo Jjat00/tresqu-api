@@ -40,8 +40,10 @@ services:
       - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID:-}
       - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      # Hardcoded: dentro de la red de compose el host de Redis es `redis`,
+      # no `localhost` (lo que usa el web cuando corre con runserver en host).
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - WALLBIT_API_BASE_URL=${WALLBIT_API_BASE_URL:-https://api.wallbit.io}
       - WALLBIT_ENCRYPTION_KEY=${WALLBIT_ENCRYPTION_KEY:-}
     ports:
@@ -71,8 +73,10 @@ services:
       - GOOGLE_CLOUD_PROJECT_ID=${GOOGLE_CLOUD_PROJECT_ID:-}
       - GMAIL_TOKEN_ENCRYPTION_KEY=${GMAIL_TOKEN_ENCRYPTION_KEY:-}
       - FRONTEND_URL=${FRONTEND_URL:-http://localhost:5173}
-      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/0}
-      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      # Hardcoded: dentro de la red de compose el host de Redis es `redis`,
+      # no `localhost` (que dentro de un container se refiere a sí mismo).
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
       - WALLBIT_API_BASE_URL=${WALLBIT_API_BASE_URL:-https://api.wallbit.io}
       - WALLBIT_ENCRYPTION_KEY=${WALLBIT_ENCRYPTION_KEY:-}
     volumes:

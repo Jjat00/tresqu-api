@@ -32,7 +32,7 @@ urlpatterns = [
     path('api/gmail/', include('gmailbot.urls'), name='gmail'),
     path('api/wallbit/', include('wallbit.urls'), name='wallbit'),
     path('api/agents/', include('agents.urls'), name='agents'),
-    path('gmail/', include('gmailbot.webhook_urls'), name='gmail-webhook'),
+    path('', include('composio_integration.urls'), name='composio-integration'),
     # JWT auth
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
     path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),

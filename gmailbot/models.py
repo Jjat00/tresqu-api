@@ -2,56 +2,58 @@ from django.db import models
 from users.models import User
 
 
-class GoogleAccount(models.Model):
+class ComposioConnection(models.Model):
+    """Conexión Gmail de un usuario gestionada por Composio.
+
+    Reemplaza a ``GoogleAccount`` (OAuth directo) en la migración a
+    Composio. Los tokens y refresh quedan en Composio; aquí solo
+    persistimos identificadores para correlacionar webhooks entrantes
+    con el ``User`` y exponer estado en el dashboard.
     """
-    Almacena las credenciales de Google OAuth2 de un usuario.
-    Los tokens se almacenan cifrados con Fernet.
-    """
+
+    STATUS_PENDING = 'pending'
+    STATUS_ACTIVE = 'active'
+    STATUS_FAILED = 'failed'
+    STATUS_DISCONNECTED = 'disconnected'
+    STATUS_CHOICES = [
+        (STATUS_PENDING, 'Pendiente de autenticación'),
+        (STATUS_ACTIVE, 'Activa'),
+        (STATUS_FAILED, 'Fallida'),
+        (STATUS_DISCONNECTED, 'Desconectada'),
+    ]
+
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
-        related_name='google_account'
+        related_name='composio_connection',
     )
-    google_email = models.CharField(max_length=255)
-    access_token_encrypted = models.BinaryField()
-    refresh_token_encrypted = models.BinaryField()
-    token_expiry = models.DateTimeField(null=True, blank=True)
-    scopes = models.TextField(
-        default='https://www.googleapis.com/auth/gmail.readonly'
+    connected_account_id = models.CharField(
+        max_length=128,
+        unique=True,
+        help_text='Composio connected_account_id (ca_xxx)',
     )
-    is_active = models.BooleanField(default=True)
+    trigger_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default='',
+        help_text='Composio trigger_id (ti_xxx) del GMAIL_NEW_GMAIL_MESSAGE',
+    )
+    google_email = models.CharField(max_length=255, blank=True, default='')
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default=STATUS_PENDING,
+    )
+    last_error = models.TextField(blank=True, default='')
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        verbose_name = 'Cuenta de Google'
-        verbose_name_plural = 'Cuentas de Google'
+        verbose_name = 'Conexión Composio'
+        verbose_name_plural = 'Conexiones Composio'
 
-    def __str__(self):
-        return f"{self.user} - {self.google_email}"
-
-
-class GmailWatch(models.Model):
-    """
-    Almacena la información de la suscripción push de Gmail (Pub/Sub).
-    """
-    google_account = models.OneToOneField(
-        GoogleAccount,
-        on_delete=models.CASCADE,
-        related_name='watch'
-    )
-    history_id = models.CharField(max_length=255, null=True, blank=True)
-    watch_expiration = models.DateTimeField(null=True, blank=True)
-    is_active = models.BooleanField(default=True)
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
-
-    class Meta:
-        verbose_name = 'Gmail Watch'
-        verbose_name_plural = 'Gmail Watches'
-
-    def __str__(self):
-        return f"Watch: {self.google_account.google_email} (active={self.is_active})"
+    def __str__(self) -> str:
+        return f"{self.user} - {self.connected_account_id} ({self.status})"
 
 
 class ProcessedEmail(models.Model):
@@ -66,10 +68,17 @@ class ProcessedEmail(models.Model):
         ('error', 'Error'),
     ]
 
-    google_account = models.ForeignKey(
-        GoogleAccount,
+    user = models.ForeignKey(
+        User,
         on_delete=models.CASCADE,
-        related_name='processed_emails'
+        related_name='processed_emails',
+    )
+    composio_connection = models.ForeignKey(
+        ComposioConnection,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name='processed_emails',
     )
     gmail_message_id = models.CharField(max_length=255)
     subject = models.CharField(max_length=500, default='')
@@ -113,10 +122,16 @@ class ProcessedEmail(models.Model):
     updated_at = models.DateTimeField(auto_now=True)
 
     class Meta:
-        unique_together = ('google_account', 'gmail_message_id')
         verbose_name = 'Email Procesado'
         verbose_name_plural = 'Emails Procesados'
         ordering = ['-created_at']
+        constraints = [
+            models.UniqueConstraint(
+                fields=['user', 'composio_connection', 'gmail_message_id'],
+                condition=models.Q(composio_connection__isnull=False),
+                name='gmailbot_processedemail_user_conn_msg_uniq',
+            ),
+        ]
 
     def __str__(self):
         return f"{self.subject[:60]} - {self.processing_status}"

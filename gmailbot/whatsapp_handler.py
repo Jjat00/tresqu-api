@@ -29,7 +29,7 @@ def check_pending_categorization(user) -> ProcessedEmail | None:
     """
     try:
         pending = ProcessedEmail.objects.filter(
-            google_account__user=user,
+            user=user,
             awaiting_categorization=True,
             processing_status='processed',
         ).order_by('-created_at').first()
@@ -56,7 +56,7 @@ def find_processed_email_by_notification(
         return None
     try:
         return ProcessedEmail.objects.filter(
-            google_account__user=user,
+            user=user,
             notification_message_id=notification_message_id,
         ).first()
     except Exception as e:

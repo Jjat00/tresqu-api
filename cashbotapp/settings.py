@@ -62,6 +62,7 @@ INSTALLED_APPS = [
     'gmailbot',
     'wallbit',
     'agents',
+    'composio_integration',
 ]
 
 REST_FRAMEWORK = {
@@ -235,14 +236,18 @@ META_APP_SECRET = os.getenv('META_APP_SECRET', '')
 # API Key para funciones administrativas (mensajes masivos)
 ADMIN_API_KEY = os.getenv('ADMIN_API_KEY', 'admin_secret_key')
 
-# Google Gmail Integration
-GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')
-GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')
-GOOGLE_REDIRECT_URI = os.getenv('GOOGLE_REDIRECT_URI', 'http://localhost:8000/api/gmail/oauth/callback/')
-GOOGLE_PUBSUB_TOPIC = os.getenv('GOOGLE_PUBSUB_TOPIC', '')
-GOOGLE_CLOUD_PROJECT_ID = os.getenv('GOOGLE_CLOUD_PROJECT_ID', '')
-GMAIL_TOKEN_ENCRYPTION_KEY = os.getenv('GMAIL_TOKEN_ENCRYPTION_KEY', '')
+# URL del frontend para construir redirects (post-OAuth, callbacks, etc.)
 FRONTEND_URL = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+
+# Composio (Gmail toolkit + futuros integrations)
+COMPOSIO_API_KEY = os.getenv('COMPOSIO_API_KEY', '')
+COMPOSIO_WEBHOOK_SECRET = os.getenv('COMPOSIO_WEBHOOK_SECRET', '')
+# Mapeo toolkit slug → auth_config_id del dashboard de Composio.
+# Cada toolkit que se conecte necesita un auth_config creado en el dashboard
+# y su id (ac_xxx) cargado como env var.
+COMPOSIO_AUTH_CONFIGS = {
+    'gmail': os.getenv('COMPOSIO_GMAIL_AUTH_CONFIG_ID', ''),
+}
 
 SPECTACULAR_SETTINGS = {
     'TITLE': 'Cashbot API',
@@ -337,6 +342,11 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': True,
         },
+        'composio_integration': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
     },
 }
 
@@ -383,6 +393,14 @@ CELERY_BEAT_SCHEDULE = {
     "wallbit-sync-all-connected": {
         "task": "wallbit.tasks.sync_all_connected_accounts",
         "schedule": 15 * 60,  # every 15 minutes
+    },
+    "composio-reprocess-stale-pending": {
+        "task": "composio_integration.tasks.reprocess_stale_pending",
+        "schedule": 5 * 60,  # every 5 minutes
+    },
+    "composio-retry-failed-connections": {
+        "task": "composio_integration.tasks.retry_failed_connections",
+        "schedule": 60 * 60,  # every 1 hour
     },
 }
 
