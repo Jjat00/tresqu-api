@@ -16,6 +16,7 @@ Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots intel
 - [Apps Django](#apps-django)
 - [Integración Wallbit](#integración-wallbit)
 - [Integración Gmail](#integración-gmail)
+- [Perfil de riesgo del usuario](#perfil-de-riesgo-del-usuario)
 - [Endpoints REST](#endpoints-rest)
 - [Celery & beat](#celery--beat)
 - [Documentación API](#documentación-api)
@@ -299,7 +300,8 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `telegrambot/` | Bot de Telegram — NLP + agente LangChain |
 | `whatsappbot/` | Bot WhatsApp — Meta API, voz (Whisper), imágenes (Vision) |
 | `gmailbot/` | OAuth + Gmail Push + parser de compras |
-| **`wallbit/`** | **(nuevo)** Integración Wallbit: cliente HTTP, modelos, tools del agente, flujo de confirmación, sync periódico, RAG sobre transacciones |
+| **`wallbit/`** | Integración Wallbit: cliente HTTP, modelos, tools del agente, flujo de confirmación, sync periódico, RAG sobre transacciones |
+| **`agents/`** | **(nuevo)** Perfil de riesgo del usuario: cuestionario LangGraph + inferencia automática + combinador. Ver [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md) |
 
 ### Estructura interna de `wallbit/`
 
@@ -386,6 +388,59 @@ Detalle: [`gmailbot/README.md`](gmailbot/README.md) · [`docs/GMAIL_SETUP_GUIDE.
 
 ---
 
+## Perfil de riesgo del usuario
+
+Antes de que Tresqu (o el agente) opere dinero del usuario en Wallbit, hace
+falta saber **qué tan agresivo puede ser**. La app `agents/` resuelve eso
+combinando tres piezas independientes:
+
+```mermaid
+flowchart LR
+    QA["Q&A WhatsApp/Telegram<br/>RiskProfilerGraph"] --> ASSESS_QA["RiskAssessment<br/>(chat_qa)"]
+    CTX["Income · Expense · Investment"] --> INF["risk_inference.py<br/>5 dimensiones"]
+    INF --> ASSESS_AUTO["RiskAssessment<br/>(auto_inference)"]
+    ASSESS_QA --> CMB["effective_profile.py<br/>7 reglas"]
+    ASSESS_AUTO --> CMB
+    CMB --> EP[EffectiveProfile]
+    EP --> UI["RiskProfileCard<br/>/profile"]
+    EP --> SAFETY["agent_safety<br/>Wallbit guardrail"]
+```
+
+### Piezas
+
+| Pieza | Tipo | LLM | Tools |
+|-------|------|-----|-------|
+| `agents/graphs/risk_profiler.py` | LangGraph con interrupts | 1 llamada GPT-4.1 (síntesis final) | **0** |
+| `agents/risk_inference.py` | Código determinista | — | — |
+| `agents/effective_profile.py` | Reglas puras | — | — |
+
+### Cinco dimensiones inferidas (escala 0-100, más alto = más agresivo)
+
+| Dimensión | Peso | Fuente | Lectura |
+|-----------|------|--------|---------|
+| `savings_rate` | 25% | `Income`/`Expense` 90d | % de ingreso que no se gasta |
+| `income_stability` | 20% | `Income` mensual, downside-only | Solo penaliza meses por debajo de la media |
+| `expense_stability` | 10% | `Expense` mensual, upside-only | Solo penaliza picos por encima de la media |
+| `holdings_appetite` | 25% | `Investment` (Wallbit) | % en STOCK/ETF vs BOND/ROBO/CHEST |
+| `liquidity_buffer` | 20% | Histórico completo | Meses de gasto cubiertos por ahorro acumulado |
+
+Score → tolerancia: 0-35 conservative · 36-65 moderate · 66-100 aggressive.
+
+### Regla de combinación clave
+
+| Caso | Decisión | Por qué |
+|------|----------|---------|
+| Declarado **más conservador** que inferido | Respetamos lo declarado | Si te subestimas, tu prudencia gana |
+| Declarado **más agresivo** que inferido (sin `user_override`) | **Safety cap** — usamos el inferido | Si te sobreestimas, tu billetera real gana |
+| `user_override=True` (editado manualmente) | Lo declarado siempre | Quien edita desde el dashboard sabe lo que firma |
+
+Cache de inferencia: **7 días** (`DEFAULT_MAX_AGE_DAYS`). Se recomputa
+on-demand cuando `get_effective_profile()` ve un assessment vencido.
+
+Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md).
+
+---
+
 ## Endpoints REST
 
 | Endpoint | Descripción |
@@ -404,6 +459,9 @@ Detalle: [`gmailbot/README.md`](gmailbot/README.md) · [`docs/GMAIL_SETUP_GUIDE.
 | **`/api/wallbit/limits/`** | GET/POST de `AgentLimits` |
 | **`/api/wallbit/agent/decisions/`** | Audit log paginado |
 | **`/api/wallbit/agent/confirm/{id}/`** | Ejecuta una decisión pendiente |
+| **`/api/agents/risk-profile/`** | GET/POST/DELETE del perfil declarado (POST = manual override) |
+| **`/api/agents/risk-profile/effective/`** | Perfil **efectivo** combinando declarado + inferido (consume esto desde frontend y guardrails) |
+| **`/api/agents/risk-profile/history/`** | Audit log paginado de `RiskAssessment` |
 | `/telegram/` | Webhook Telegram |
 | `/whatsapp/` | Webhook WhatsApp (Meta) |
 | `/gmail/webhook/` | Webhook Gmail Pub/Sub |
