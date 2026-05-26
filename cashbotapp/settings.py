@@ -61,6 +61,7 @@ INSTALLED_APPS = [
     'savings',
     'gmailbot',
     'wallbit',
+    'agents',
 ]
 
 REST_FRAMEWORK = {
@@ -327,6 +328,11 @@ LOGGING = {
             'propagate': True,
         },
         'gmailbot': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
+        'agents': {
             'handlers': ['console', 'file'],
             'level': 'DEBUG',
             'propagate': True,
