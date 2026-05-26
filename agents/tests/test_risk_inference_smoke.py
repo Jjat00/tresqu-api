@@ -60,6 +60,7 @@ def _run() -> int:
         "income_stability",
         "expense_stability",
         "holdings_appetite",
+        "liquidity_buffer",
     }
     for dim, val in result.dimensions.items():
         assert 0 <= val <= 100, f"dimension {dim} out of range: {val}"

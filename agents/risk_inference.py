@@ -1,20 +1,27 @@
 """Automatic risk-tolerance inference from a user's financial context.
 
 This module derives an *inferred* risk profile from observable behavior
-(savings rate, income stability, expense stability, holdings appetite),
-distinct from the user's *declared* profile coming from the Q&A flow
-(see ``risk_profiler_service``). The two are combined elsewhere into an
-effective profile.
+(savings rate, income stability, expense stability, holdings appetite,
+liquidity buffer), distinct from the user's *declared* profile coming
+from the Q&A flow. The two are combined elsewhere into an effective
+profile.
 
 All dimensions are normalized so that **higher scores indicate higher
 capacity / appetite for risk** (i.e. more aggressive):
 
 - ``savings_rate``      — % of income not spent over the last 90 days
-- ``income_stability``  — inverse of monthly income coefficient of variation
-- ``expense_stability`` — inverse of monthly expense coefficient of variation
+- ``income_stability``  — penalizes only months *below* the mean (downside
+                          deviation, Sortino-style): a bonus month does not
+                          count against you
+- ``expense_stability`` — penalizes only months *above* the mean (upside
+                          deviation): cheap months don't count against you
 - ``holdings_appetite`` — observed allocation to higher-risk instruments
+- ``liquidity_buffer``  — months of expenses covered by net accumulated
+                          savings (lifetime income minus lifetime expenses).
+                          NOTE: derived from our records, not an actual
+                          bank balance.
 
-The aggregate ``score`` is a weighted average of those four dimensions
+The aggregate ``score`` is a weighted average of those five dimensions
 and maps to a categorical tolerance (conservative / moderate / aggressive).
 
 Inferences are persisted as ``RiskAssessment(triggered_by="auto_inference")``
@@ -49,11 +56,17 @@ DEFAULT_MAX_AGE_DAYS = 7
 
 # Dimension weights for the aggregate score. Must sum to 1.0.
 WEIGHTS = {
-    "savings_rate": 0.30,
-    "income_stability": 0.25,
-    "expense_stability": 0.15,
-    "holdings_appetite": 0.30,
+    "savings_rate": 0.25,
+    "income_stability": 0.20,
+    "expense_stability": 0.10,
+    "holdings_appetite": 0.25,
+    "liquidity_buffer": 0.20,
 }
+
+# Need at least this many days of records before the buffer signal becomes
+# meaningful — otherwise it just reflects whatever happened in the last few
+# weeks and would penalize/reward newcomers unfairly.
+BUFFER_MIN_DAYS = 60
 
 CONSERVATIVE_MAX = 35
 MODERATE_MAX = 65
@@ -137,14 +150,39 @@ def _monthly_totals(values: list[tuple[Any, Decimal]]) -> list[float]:
     return [v for v in buckets.values() if v > 0]
 
 
-def _coefficient_of_variation(samples: list[float]) -> float | None:
+def _downside_cv(samples: list[float], *, direction: str) -> float | None:
+    """Semi-deviation / mean. Only counts the 'bad' side.
+
+    ``direction="below"`` → only months *below* the mean count as instability
+    (used for income: a bonus month is good, not unstable).
+    ``direction="above"`` → only months *above* the mean count as instability
+    (used for expenses: a cheap month is good, not unstable).
+
+    Returns ``None`` with fewer than 2 samples or a non-positive mean,
+    matching the previous CV contract so ``_stability_from_cv(None)`` keeps
+    yielding the neutral 50 score.
+    """
+
     if len(samples) < 2:
         return None
     mean = statistics.mean(samples)
-    if mean == 0:
+    if mean <= 0:
         return None
-    stdev = statistics.pstdev(samples)
-    return stdev / mean
+    if direction == "below":
+        bad = [s for s in samples if s < mean]
+    elif direction == "above":
+        bad = [s for s in samples if s > mean]
+    else:
+        raise ValueError(f"unknown direction: {direction!r}")
+    if not bad:
+        # All months landed on the favorable side of the mean → perfect stability.
+        return 0.0
+    # Mean squared deviation over *all* samples, but summing only the bad side.
+    # Dividing by len(samples) (not len(bad)) keeps the scale comparable to the
+    # full CV when downside dominates, and gives a softer signal when bad
+    # months are rare.
+    semi_var = sum((s - mean) ** 2 for s in bad) / len(samples)
+    return (semi_var ** 0.5) / mean
 
 
 def _compute_savings_signals(user: User, since) -> dict[str, Any]:
@@ -169,8 +207,8 @@ def _compute_savings_signals(user: User, since) -> dict[str, Any]:
     monthly_income = _monthly_totals(incomes)
     monthly_expense = _monthly_totals(expenses)
 
-    income_cv = _coefficient_of_variation(monthly_income)
-    expense_cv = _coefficient_of_variation(monthly_expense)
+    income_cv = _downside_cv(monthly_income, direction="below")
+    expense_cv = _downside_cv(monthly_expense, direction="above")
 
     return {
         "savings_rate_value": rate,
@@ -182,6 +220,85 @@ def _compute_savings_signals(user: User, since) -> dict[str, Any]:
         "expense_months": len(monthly_expense),
         "total_income": float(total_income),
         "total_expense": float(total_expense),
+    }
+
+
+def _bucket_buffer_months(months: float) -> int:
+    """Map months-of-expenses buffer into a 0-100 capacity score.
+
+    Anchors:
+    - 0 months or net debt → no cushion
+    - 1-3 months           → minimal cushion (LATAM survival)
+    - 3-6 months           → healthy (Dave Ramsey range)
+    - 6-12 months          → strong
+    - 12+ months           → exceptional
+    """
+
+    if months < 0:
+        return 0
+    if months < 1:
+        return 15
+    if months < 3:
+        return 40
+    if months < 6:
+        return 70
+    if months < 12:
+        return 90
+    return 100
+
+
+def _compute_buffer_signals(user: User, savings: dict[str, Any]) -> dict[str, Any]:
+    """Net accumulated savings expressed as months of average expense covered.
+
+    Sums income and expense across the user's *entire* recorded history (not
+    just the 90-day window) and divides by the recent monthly expense
+    average. This is **not** the user's real bank balance — it is what we
+    can derive from their records, and we flag it as such in the UI.
+
+    Returns a neutral 50 with ``has_buffer=False`` when there isn't enough
+    history (< ``BUFFER_MIN_DAYS`` days) so newcomers don't get penalized
+    or rewarded based on noise.
+    """
+
+    income_rows = list(
+        Income.objects.filter(user=user).values_list("timestamp", "amount")
+    )
+    expense_rows = list(
+        Expense.objects.filter(user=user).values_list("timestamp", "amount")
+    )
+
+    total_income_all = sum((amt for _, amt in income_rows if amt is not None), Decimal(0))
+    total_expense_all = sum((amt for _, amt in expense_rows if amt is not None), Decimal(0))
+    net_accumulated = float(total_income_all - total_expense_all)
+
+    timestamps = [ts for ts, _ in income_rows + expense_rows if ts is not None]
+    if timestamps:
+        earliest = min(timestamps)
+        days_with_records = max(1, (timezone.now() - earliest).days)
+    else:
+        days_with_records = 0
+
+    monthly_avg_expense = savings["total_expense"] / 3.0 if savings["total_expense"] > 0 else 0.0
+
+    if days_with_records < BUFFER_MIN_DAYS or monthly_avg_expense <= 0:
+        return {
+            "liquidity_buffer_value": 50,
+            "has_buffer": False,
+            "net_accumulated": round(net_accumulated, 2),
+            "monthly_avg_expense": round(monthly_avg_expense, 2),
+            "months_of_buffer": None,
+            "days_with_records": days_with_records,
+        }
+
+    months_of_buffer = net_accumulated / monthly_avg_expense
+
+    return {
+        "liquidity_buffer_value": _bucket_buffer_months(months_of_buffer),
+        "has_buffer": True,
+        "net_accumulated": round(net_accumulated, 2),
+        "monthly_avg_expense": round(monthly_avg_expense, 2),
+        "months_of_buffer": round(months_of_buffer, 1),
+        "days_with_records": days_with_records,
     }
 
 
@@ -255,7 +372,11 @@ def _tolerance_for(score: int) -> str:
     return RiskProfile.AGGRESSIVE
 
 
-def _confidence_for(savings: dict[str, Any], holdings: dict[str, Any]) -> float:
+def _confidence_for(
+    savings: dict[str, Any],
+    holdings: dict[str, Any],
+    buffer: dict[str, Any],
+) -> float:
     confidence = 0.40
     txs = savings["income_count"] + savings["expense_count"]
     if txs >= 10:
@@ -268,10 +389,17 @@ def _confidence_for(savings: dict[str, Any], holdings: dict[str, Any]) -> float:
         confidence += 0.10
     if holdings["has_holdings"]:
         confidence += 0.10
+    if buffer["has_buffer"]:
+        confidence += 0.05
     return min(0.95, round(confidence, 2))
 
 
-def _reason_for(dimensions: dict[str, int], savings: dict[str, Any], holdings: dict[str, Any]) -> str:
+def _reason_for(
+    dimensions: dict[str, int],
+    savings: dict[str, Any],
+    holdings: dict[str, Any],
+    buffer: dict[str, Any],
+) -> str:
     """Short human-readable explanation, Spanish-first."""
 
     bits: list[str] = []
@@ -282,9 +410,13 @@ def _reason_for(dimensions: dict[str, int], savings: dict[str, Any], holdings: d
         bits.append("sin ingresos registrados en la ventana de análisis")
 
     if savings["income_cv"] is not None:
-        bits.append(f"estabilidad de ingreso {dimensions['income_stability']}/100")
+        bits.append(
+            f"previsibilidad de ingreso {dimensions['income_stability']}/100 (solo cuenta meses bajos)"
+        )
     if savings["expense_cv"] is not None:
-        bits.append(f"estabilidad de gasto {dimensions['expense_stability']}/100")
+        bits.append(
+            f"previsibilidad de gasto {dimensions['expense_stability']}/100 (solo cuenta meses altos)"
+        )
 
     if holdings["has_holdings"]:
         bits.append(
@@ -292,6 +424,13 @@ def _reason_for(dimensions: dict[str, int], savings: dict[str, Any], holdings: d
         )
     else:
         bits.append("sin inversiones registradas")
+
+    if buffer["has_buffer"]:
+        bits.append(
+            f"reserva acumulada ≈ {buffer['months_of_buffer']} meses de gasto"
+        )
+    else:
+        bits.append("aún sin suficiente historial para evaluar la reserva acumulada")
 
     return "Inferencia automática: " + "; ".join(bits) + "."
 
@@ -306,12 +445,14 @@ def compute_inference(user: User) -> InferenceResult:
     since = timezone.now() - timedelta(days=INFERENCE_WINDOW_DAYS)
     savings = _compute_savings_signals(user, since)
     holdings = _compute_holdings_signals(user)
+    buffer = _compute_buffer_signals(user, savings)
 
     dimensions = {
         "savings_rate": _bucket_savings_rate(savings["savings_rate_value"]),
         "income_stability": _stability_from_cv(savings["income_cv"]),
         "expense_stability": _stability_from_cv(savings["expense_cv"]),
         "holdings_appetite": holdings["holdings_appetite_value"],
+        "liquidity_buffer": buffer["liquidity_buffer_value"],
     }
 
     raw_score = sum(dimensions[key] * weight for key, weight in WEIGHTS.items())
@@ -322,13 +463,14 @@ def compute_inference(user: User) -> InferenceResult:
         tolerance=_tolerance_for(score),
         score=score,
         dimensions=dimensions,
-        confidence=_confidence_for(savings, holdings),
+        confidence=_confidence_for(savings, holdings, buffer),
         context_snapshot={
             "window_days": INFERENCE_WINDOW_DAYS,
             "savings": savings,
             "holdings": holdings,
+            "buffer": buffer,
         },
-        reason=_reason_for(dimensions, savings, holdings),
+        reason=_reason_for(dimensions, savings, holdings, buffer),
     )
 
 
