@@ -4,12 +4,13 @@ Every write path must:
 1. Resolve the connected WallbitAccount (or refuse)
 2. Check kill_switch
 3. Evaluate AgentLimits (trade cap, daily cap, allow/block lists)
-4. Persist an AgentDecision(requires_confirmation=True) with the preview
-5. Wait for /api/wallbit/agent/confirm/{id}/ to execute
+4. Evaluate the user's effective risk profile for BUYs (warn, never block)
+5. Persist an AgentDecision(requires_confirmation=True) with the preview
+6. Wait for /api/wallbit/agent/confirm/{id}/ to execute
 
 The two-step flag is informational for the bot layer — limits above
-require_2step_above_usd warrant a stronger confirmation prompt but the
-decision row is identical.
+require_2step_above_usd or a risk-profile mismatch warrant a stronger
+confirmation prompt but the decision row is identical.
 """
 from __future__ import annotations
 
@@ -207,3 +208,124 @@ def mark_failed(decision: AgentDecision, *, error: str) -> None:
     decision.error = (error or "")[:8000]
     decision.confirmed_at = timezone.now()
     decision.save(update_fields=["error", "confirmed_at"])
+
+
+# --------------------------------------------------------------------------- #
+# Risk-profile gate
+#
+# Only BUY-style operations need this: selling, moving funds internally, robo
+# deposits/withdraws and freezing cards do not increase market-risk exposure.
+# The gate never blocks — for real-money paths the user always has the final
+# word. It surfaces a warning and an `extra_two_step` flag so the bot layer can
+# show a stronger confirmation prompt when the user's effective tolerance
+# disagrees with the trade size.
+# --------------------------------------------------------------------------- #
+
+
+# Fraction of `AgentLimits.max_trade_usd` above which a moderate user gets
+# the friction prompt. Below this size, moderate users pass through silently.
+_MODERATE_FRICTION_RATIO = Decimal("0.5")
+
+
+@dataclass
+class RiskGate:
+    pass_through: bool
+    warning: str = ""
+    extra_two_step: bool = False
+    snapshot: dict[str, Any] | None = None
+
+
+def _gate_passthrough(snapshot: dict[str, Any] | None) -> RiskGate:
+    return RiskGate(pass_through=True, snapshot=snapshot)
+
+
+def _effective_profile_snapshot(user: User) -> dict[str, Any] | None:
+    """Read the effective profile without forcing a refresh — gates run on
+    every preview, and re-inferring on a hot path would be expensive. The
+    inference is refreshed elsewhere (dashboard load, /perfil command,
+    Celery beat) so a slightly stale read is acceptable here.
+    """
+    # Lazy import: ``agents`` imports ``wallbit.models``, so importing it at
+    # module top would create a cycle during Django app loading.
+    from agents.effective_profile import get_effective_profile
+
+    try:
+        effective = get_effective_profile(user, refresh_inference=False)
+    except Exception:  # pragma: no cover — defensive, never block a trade
+        logger = __import__("logging").getLogger(__name__)
+        logger.exception("risk gate could not read effective profile for user=%s", user.id)
+        return None
+    return effective.to_dict()
+
+
+def evaluate_risk_profile_gate(
+    user: User,
+    *,
+    action: str,
+    amount_usd: Decimal | float | int,
+) -> RiskGate:
+    """Decide whether a buy needs an extra confirmation step on top of limits.
+
+    Returns a ``RiskGate`` whose ``pass_through=False`` means *show a stronger
+    prompt*, not *block*. Selling, moving funds and card status changes always
+    pass through.
+    """
+    action_norm = (action or "").upper()
+    if action_norm != "BUY":
+        return _gate_passthrough(None)
+
+    snapshot = _effective_profile_snapshot(user)
+    if snapshot is None:
+        return _gate_passthrough(None)
+
+    tolerance = snapshot.get("tolerance")
+    source = snapshot.get("source")
+    amount = _to_decimal(amount_usd)
+
+    if tolerance == "aggressive":
+        return _gate_passthrough(snapshot)
+
+    low_certainty = source in {"inferred", "default"}
+
+    if tolerance == "conservative":
+        base = (
+            "Tu perfil efectivo es conservador. Esta compra te expone a "
+            "riesgo de mercado. Confirma con cuidado."
+        )
+        if low_certainty:
+            base += (
+                " Tu perfil está estimado solo desde tu contexto; "
+                "podés evaluarlo formalmente pidiéndoselo a tu asistente."
+            )
+        return RiskGate(
+            pass_through=False,
+            warning=base,
+            extra_two_step=True,
+            snapshot=snapshot,
+        )
+
+    if tolerance == "moderate":
+        limits = _limits_for(user)
+        threshold = (limits.max_trade_usd * _MODERATE_FRICTION_RATIO).quantize(Decimal("0.01"))
+        if amount < threshold:
+            return _gate_passthrough(snapshot)
+
+        base = (
+            f"USD {amount} es una porción grande de tu límite por operación "
+            f"(USD {limits.max_trade_usd}) y tu perfil efectivo es moderado. "
+            "Doble check antes de confirmar."
+        )
+        if low_certainty:
+            base += (
+                " Tu perfil está estimado solo desde tu contexto; "
+                "podés evaluarlo formalmente con tu asistente."
+            )
+        return RiskGate(
+            pass_through=False,
+            warning=base,
+            extra_two_step=True,
+            snapshot=snapshot,
+        )
+
+    # Unknown tolerance value — be conservative.
+    return _gate_passthrough(snapshot)

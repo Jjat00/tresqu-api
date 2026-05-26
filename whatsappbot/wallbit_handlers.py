@@ -66,7 +66,11 @@ def _coerce_payload(content: Any) -> Any:
 def _summary_text(preview: dict[str, Any], two_step: bool) -> str:
     summary = preview.get("summary") or "Operación pendiente"
     header = "⚠️ Doble confirmación requerida" if two_step else "🔒 Confirmación requerida"
-    return f"{header}\n\n{summary}\n\n¿Confirmas?"
+
+    risk_warning = (preview.get("risk_warning") or "").strip()
+    risk_block = f"\n\n🛡️ Riesgo: {risk_warning}" if risk_warning else ""
+
+    return f"{header}\n\n{summary}{risk_block}\n\n¿Confirmas?"
 
 
 def send_confirmation_buttons(

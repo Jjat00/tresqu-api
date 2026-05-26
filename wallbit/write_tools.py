@@ -27,6 +27,7 @@ from .agent_safety import (
     check_kill_switch,
     create_pending_decision,
     evaluate_move_limits,
+    evaluate_risk_profile_gate,
     evaluate_trade_limits,
     get_account_or_raise,
 )
@@ -88,22 +89,47 @@ def _preview_place_trade(
     if not check.ok:
         return _limits_error_payload(check)
 
-    preview = {
+    gate = evaluate_risk_profile_gate(user, action=action_norm, amount_usd=amount)
+
+    preview: dict[str, Any] = {
         "action": action_norm,
         "symbol": symbol_norm,
         "amount_usd": str(amount),
         "summary": f"{action_norm} {symbol_norm} por USD {amount}",
     }
+    if gate.warning:
+        preview["risk_warning"] = gate.warning
+    if gate.snapshot:
+        preview["risk_profile"] = {
+            "tolerance": gate.snapshot.get("tolerance"),
+            "source": gate.snapshot.get("source"),
+            "confidence": gate.snapshot.get("confidence"),
+        }
+
+    tool_args: dict[str, Any] = {
+        "action": action_norm,
+        "symbol": symbol_norm,
+        "amount_usd": str(amount),
+    }
+    if gate.snapshot:
+        tool_args["risk_gate"] = {
+            "pass_through": gate.pass_through,
+            "extra_two_step": gate.extra_two_step,
+            "warning": gate.warning or None,
+            "tolerance": gate.snapshot.get("tolerance"),
+            "source": gate.snapshot.get("source"),
+        }
+
     decision = create_pending_decision(
         user=user,
         channel=channel,
         user_message=user_message,
         tool_name="wallbit_place_trade",
-        tool_args={"action": action_norm, "symbol": symbol_norm,
-                   "amount_usd": str(amount)},
+        tool_args=tool_args,
         preview=preview,
     )
-    return _pending_payload(decision.id, preview, check.two_step_required)
+    two_step_required = check.two_step_required or gate.extra_two_step
+    return _pending_payload(decision.id, preview, two_step_required)
 
 
 _ACCOUNT_BUCKETS = {"DEFAULT", "INVESTMENT"}
