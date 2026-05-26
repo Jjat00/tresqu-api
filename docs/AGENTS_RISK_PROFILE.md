@@ -6,8 +6,10 @@ automática derivada de su contexto financiero, aplicando reglas de
 combinación que protegen contra la auto-evaluación inflada sin quitar
 agencia al usuario.
 
-Este perfil es el insumo que el guardrail `wallbit/agent_safety.py` usará
-para autorizar operaciones de dinero real con Wallbit (ver
+Este perfil es el insumo que el guardrail
+`wallbit/agent_safety.evaluate_risk_profile_gate` consume para gradar la
+fricción de las compras en Wallbit (ver
+[Pieza 4](#pieza-4--gate-de-confirmación-para-buys-en-wallbit) y
 [`WALLBIT_INTEGRATION.md`](WALLBIT_INTEGRATION.md)).
 
 ---
@@ -19,6 +21,7 @@ para autorizar operaciones de dinero real con Wallbit (ver
 - [Pieza 1 — `RiskProfilerGraph` (Q&A conversacional)](#pieza-1--riskprofilergraph-qa-conversacional)
 - [Pieza 2 — Inferencia automática (`risk_inference.py`)](#pieza-2--inferencia-automática-risk_inferencepy)
 - [Pieza 3 — Perfil efectivo (`effective_profile.py`)](#pieza-3--perfil-efectivo-effective_profilepy)
+- [Pieza 4 — Gate de confirmación para BUYs en Wallbit](#pieza-4--gate-de-confirmación-para-buys-en-wallbit)
 - [Modelos de datos](#modelos-de-datos)
 - [Endpoints REST](#endpoints-rest)
 - [Frontend (RiskProfileCard)](#frontend-riskprofilecard)
@@ -91,7 +94,7 @@ flowchart TB
     DB --> Combine
     Combine --> EP
     EP --> Card[RiskProfileCard<br/>frontend]
-    EP --> Safety[agent_safety<br/>Wallbit guardrail]
+    EP --> Safety[evaluate_risk_profile_gate<br/>fricción en BUYs Wallbit]
 ```
 
 **Las tres piezas son independientes**:
@@ -317,6 +320,89 @@ directamente. **No pisa `dimensions` si el perfil es `user_override`**.
 
 ---
 
+## Pieza 4 — Gate de confirmación para BUYs en Wallbit
+
+Vive en `wallbit/agent_safety.evaluate_risk_profile_gate`. Es el primer
+consumidor real del `EffectiveProfile` fuera del dashboard: convierte la
+tolerancia combinada en **fricción** sobre las compras propuestas por el
+agente.
+
+### Qué hace y qué no hace
+
+- **No bloquea.** Wallbit son operaciones de dinero real; la última
+  palabra siempre es del usuario. El gate solo emite un `warning` y
+  enciende `extra_two_step` para que el bot muestre un prompt de
+  confirmación más fuerte.
+- **Solo aplica a BUYs.** Vender, mover fondos entre cuentas internas,
+  depositar/retirar de Robo Advisor y congelar tarjetas pasan derecho
+  porque no aumentan exposición a riesgo de mercado.
+- **Lee con `refresh_inference=False`.** El gate está en el hot path de
+  cada preview; recomputar la inferencia ahí sería caro. El refresh se
+  dispara desde el dashboard, el comando `/perfil` por chat y los runs de
+  Celery beat.
+
+### Reglas
+
+| Tolerancia efectiva | Tamaño del trade | Resultado |
+|---------------------|------------------|-----------|
+| `aggressive`       | cualquiera | `pass_through`, sin warning |
+| `moderate`         | < 50 % de `max_trade_usd` | `pass_through`, sin warning |
+| `moderate`         | ≥ 50 % de `max_trade_usd` | warning + `extra_two_step` |
+| `conservative`     | cualquiera | warning + `extra_two_step` |
+| desconocida / null | cualquiera | `pass_through` (degradado seguro) |
+
+Cuando `effective.source ∈ {inferred, default}` (baja certeza), el warning
+añade una invitación a evaluar el perfil formalmente con el asistente.
+
+### Lugar en la pipeline de seguridad
+
+`_preview_place_trade` (`wallbit/write_tools.py`) corre los checks en este
+orden — los errores cortan antes de llegar al gate:
+
+1. `get_account_or_raise` — cuenta conectada
+2. `check_kill_switch` — kill switch apagado
+3. `evaluate_trade_limits` — monto + allow/block lists + tope diario
+4. **`evaluate_risk_profile_gate` — apetito vs tamaño**
+5. `create_pending_decision` — persiste `AgentDecision` con preview
+
+### Audit log
+
+El veredicto del gate se persiste dentro de `AgentDecision.tools_called[0].args.risk_gate`:
+
+```json
+{
+  "pass_through": false,
+  "extra_two_step": true,
+  "warning": "Tu perfil efectivo es conservador...",
+  "tolerance": "conservative",
+  "source": "safety_cap"
+}
+```
+
+Esto permite reconstruir, para cualquier trade pasado, qué decidió el
+gate en el momento — útil para investigar discrepancias o reclamos
+futuros.
+
+### Render en el canal
+
+El preview lleva dos campos opcionales que el bot puede mostrar:
+
+| Campo | Tipo | Notas |
+|-------|------|-------|
+| `preview.risk_warning` | string | Texto humano del gate. Solo presente cuando no es `pass_through`. |
+| `preview.risk_profile` | object | `{tolerance, source, confidence}` siempre que haya snapshot. |
+
+Hoy `whatsappbot/wallbit_handlers._summary_text` lo embebe como un bloque
+`🛡️ Riesgo: …` arriba del "¿Confirmas?". El label del botón cambia a
+"Confirmar 2x" cuando `two_step_required` es `true` (puede venir del
+límite de monto o del gate; cualquiera de los dos lo activa).
+
+Telegram aún no renderiza preview de Wallbit. Cuando se cablée el chat
+web (sub-fase pendiente), debe consumir los mismos dos campos para
+paridad.
+
+---
+
 ## Modelos de datos
 
 ### `RiskProfile` (1 por usuario)
@@ -481,27 +567,30 @@ sequenceDiagram
     G-->>U: "Listo, tu perfil es conservador. Score 25/100."
 ```
 
-### Flujo C — Pre-trade guardrail (futuro, sub-fase 1.5)
+### Flujo C — Gate de BUY (sub-fase 1.5, implementada)
 
 ```mermaid
 sequenceDiagram
-    participant U as Usuario
-    participant W as Wallbit write tool
+    participant U as Usuario (WhatsApp)
+    participant BOT as whatsappbot
+    participant WT as wallbit_place_trade
     participant SF as agent_safety
     participant EP as effective_profile
-    participant WB as Wallbit API
+    participant DB as AgentDecision
 
-    U->>W: "compra USD 200 de TSLA"
-    W->>SF: evaluate_decision(symbol=TSLA, kind=STOCK, ...)
-    SF->>EP: get_effective_profile(user)
-    EP-->>SF: {tolerance: conservative, source: declared, ...}
-    alt conservative + activo agresivo
-        SF-->>W: requires_extra_confirmation + warning
-        W-->>U: "Tu perfil es conservador. ¿Seguro de comprar TSLA?"
-    else moderate/aggressive
-        SF-->>W: ok
-        W-->>U: preview normal
-    end
+    U->>BOT: "compra USD 200 de TSLA"
+    BOT->>WT: BUY TSLA 200
+    WT->>SF: check_kill_switch + evaluate_trade_limits
+    WT->>SF: evaluate_risk_profile_gate(BUY, 200)
+    SF->>EP: get_effective_profile(refresh=False)
+    EP-->>SF: {tolerance: conservative, source: safety_cap, ...}
+    Note over SF: conservative → warning + extra_two_step
+    SF-->>WT: RiskGate(pass_through=False, warning, snapshot)
+    WT->>DB: create_pending_decision(preview + risk_gate)
+    WT-->>BOT: pending {two_step=true, risk_warning}
+    BOT-->>U: 🔒 + summary + 🛡️ Riesgo: ... + botón "Confirmar 2x"
+    U->>BOT: tap "Confirmar 2x"
+    BOT->>SF: execute_decision (ahora sí pega a Wallbit)
 ```
 
 ---
@@ -537,8 +626,9 @@ sequenceDiagram
 | 1.2 — `RiskProfilerGraph` (Q&A) | ✅ | 5 preguntas + síntesis con LLM |
 | 1.3 — Inferencia automática + combinador | ✅ | 5 dimensiones + 7 reglas |
 | 1.4 — `RiskProfileCard` en dashboard | ✅ | UI con radar y explicaciones |
-| 1.5 — Hook en `agent_safety` pre-Wallbit | ⬜ | Bloquear/avisar en operaciones que chocan con el perfil |
+| 1.5 — Gate en `agent_safety` para BUYs | ✅ | Warning + `extra_two_step`, sin bloquear. WhatsApp ya lo renderiza |
 | 1.6 — Endpoint REST del `RiskProfilerGraph` | ⬜ | Para chat web (hoy solo WhatsApp/Telegram) |
 | — | ⬜ | Trigger proactivo: si el usuario menciona invertir sin tener perfil, el bot propone hacerlo |
 | — | ⬜ | Re-inferencia programada (Celery beat) cuando cambie sustancialmente el contexto |
 | — | ⬜ | Aislamiento de smoke tests destructivos |
+| — | ⬜ | Paridad del gate en Telegram + chat web |

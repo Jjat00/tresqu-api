@@ -106,16 +106,17 @@ flowchart TB
     subgraph Safety["wallbit/agent_safety.py"]
         K{Kill switch?}
         L{AgentLimits?}
+        R{Risk gate<br/>(solo BUY)}
         D[create_pending_decision]
     end
 
     subgraph Confirm["Flujo de confirmación"]
-        UI[WhatsApp/Telegram/Web<br/>botón 'Confirmar']
+        UI["WhatsApp / Telegram / Web<br/>botón 'Confirmar' (2x si gate o limit)"]
         EX[executors.execute_decision]
     end
 
     subgraph Storage["Persistencia"]
-        AD[(AgentDecision<br/>audit log)]
+        AD[(AgentDecision<br/>audit log + risk_gate)]
         WTM[(WallbitTxMirror<br/>+ embedding)]
         INV[(Investment)]
     end
@@ -126,7 +127,8 @@ flowchart TB
     TOOLS_R --> WB1[Wallbit API]
     TOOLS_W --> K
     K -->|ok| L
-    L -->|ok| D
+    L -->|ok| R
+    R -->|warning si aplica| D
     D --> AD
     D --> UI
     UI -->|POST /agent/confirm/:id| EX
@@ -347,14 +349,18 @@ Las tools **write** nunca llaman a Wallbit por sí mismas. Solo crean una `Agent
 ### Modelo de seguridad (resumen)
 
 1. **API key Wallbit nunca sale del backend.** Se valida contra `/balance/checking` al conectar, se cifra con Fernet y se persiste como `encrypted_api_key`.
-2. **Pre-flight obligatorio** en toda escritura: `get_account_or_raise → check_kill_switch → evaluate_*_limits`.
+2. **Pre-flight de 4 pasos** en toda escritura:
+   1. `get_account_or_raise` — cuenta conectada
+   2. `check_kill_switch` — kill switch apagado
+   3. `evaluate_*_limits` — monto + tope diario + allow/block lists
+   4. `evaluate_risk_profile_gate` — solo BUYs; nunca bloquea, solo agrega warning + doble confirmación cuando el monto no encaja con la tolerancia efectiva (ver [Perfil de riesgo](#perfil-de-riesgo-del-usuario))
 3. **`AgentLimits` por usuario** (configurables vía `/api/wallbit/limits/`):
    - `max_trade_usd` (default 500)
    - `max_daily_move_usd` (default 1000)
    - `allowed_symbols` / `blocked_symbols`
    - `require_2step_above_usd` (default 200)
 4. **Kill switch global por cuenta** (`WallbitAccount.kill_switch_until`). Al desconectar desde la UI se setea a hoy + 365d.
-5. **Audit log inmutable** en `AgentDecision`: input del usuario, tool propuesta, args, preview, ejecutado sí/no, uuid de la tx Wallbit resultante.
+5. **Audit log inmutable** en `AgentDecision`: input del usuario, tool propuesta, args (incluye `risk_gate` cuando aplica), preview, ejecutado sí/no, uuid de la tx Wallbit resultante.
 6. **Logs nunca contienen la API key** — `WallbitClient` la pasa solo por header `X-API-Key`.
 
 ### Sincronización periódica
@@ -403,7 +409,7 @@ flowchart LR
     ASSESS_AUTO --> CMB
     CMB --> EP[EffectiveProfile]
     EP --> UI["RiskProfileCard<br/>/profile"]
-    EP --> SAFETY["agent_safety<br/>Wallbit guardrail"]
+    EP --> GATE["evaluate_risk_profile_gate<br/>fricción en BUYs Wallbit"]
 ```
 
 ### Piezas
@@ -436,6 +442,25 @@ Score → tolerancia: 0-35 conservative · 36-65 moderate · 66-100 aggressive.
 
 Cache de inferencia: **7 días** (`DEFAULT_MAX_AGE_DAYS`). Se recomputa
 on-demand cuando `get_effective_profile()` ve un assessment vencido.
+
+### Consumo: gate de BUY en Wallbit
+
+`wallbit/agent_safety.evaluate_risk_profile_gate` lee el perfil efectivo
+en cada compra propuesta por el agente. **Nunca bloquea**: agrega un
+`warning` y enciende `extra_two_step` cuando el tamaño del trade no
+encaja con la tolerancia.
+
+| Tolerancia efectiva | Tamaño | Resultado |
+|---------------------|--------|-----------|
+| `aggressive` | cualquiera | pasa derecho |
+| `moderate` | < 50% `max_trade_usd` | pasa derecho |
+| `moderate` | ≥ 50% `max_trade_usd` | warning + 2x confirm |
+| `conservative` | cualquiera | warning + 2x confirm |
+
+El veredicto queda persistido en `AgentDecision.tools_called[0].args.risk_gate`
+y el bot de WhatsApp lo renderiza como bloque `🛡️ Riesgo: …` en el
+mensaje de confirmación. SELL, moves entre cuentas, robo y card status no
+pasan por el gate.
 
 Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md).
 

@@ -267,7 +267,8 @@ Ver TaskList de la sesión actual (10 tareas, hito = "saldo" por WhatsApp).
 - API key Wallbit **nunca** sale del backend. Frontend solo ve estado sincronizado
 - Toda escritura vía Wallbit **requiere confirmación explícita** del user en su canal
 - `AgentLimits` se evalúan **antes** de cualquier escritura (hard fail si supera límites)
-- `AgentDecision` se persiste **siempre**, ejecutada o no
+- `evaluate_risk_profile_gate` corre después de `AgentLimits` en **BUYs**: lee `EffectiveProfile` y, si la tolerancia no encaja con el tamaño, agrega `risk_warning` al preview y enciende `two_step_required`. Nunca bloquea — solo agrega fricción. SELL, moves entre cuentas, robo y card status no pasan por este gate. Ver [`AGENTS_RISK_PROFILE.md § Pieza 4`](AGENTS_RISK_PROFILE.md#pieza-4--gate-de-confirmación-para-buys-en-wallbit).
+- `AgentDecision` se persiste **siempre**, ejecutada o no (incluye `risk_gate` en `tools_called[0].args` cuando aplica)
 - `WallbitAccount.kill_switch_until` desactiva toda escritura globalmente
 - No commitear keys/secrets — todo en `.env`
 - No `--amend` a commits pusheados, no `--no-verify`, no reset destructivo
