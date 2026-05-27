@@ -525,6 +525,15 @@ def request_verification_code(request):
 
     # Verificar si el número ya tiene una cuenta registrada
     numero_registrado = User.objects.filter(phone_number=phone_number).exists()
+    if not numero_registrado:
+        return Response(
+            {
+                "status": "error",
+                "code": "account_not_found",
+                "message": "No encontramos una cuenta asociada a este número.",
+            },
+            status=status.HTTP_404_NOT_FOUND,
+        )
 
     # Generar código de verificación
     verification = TelegramVerification.generate_code(phone_number)

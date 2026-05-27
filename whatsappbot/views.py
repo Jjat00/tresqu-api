@@ -11,6 +11,7 @@ import random
 import string
 import time
 from django.core.cache import cache
+from django.db import models
 from rest_framework_simplejwt.tokens import RefreshToken
 from users.models import User, SubscriptionPlan
 from users.serializers import UserSerializer
@@ -1019,24 +1020,12 @@ def verify_code(request):
 
                 except User.DoesNotExist:
                     logger.info(
-                        f"No se encontró usuario con número de teléfono: {phone_number_clean}")
-                    # No existe un usuario con este número, crear uno nuevo
-                    default_plan = SubscriptionPlan.objects.get(id=1)
-                    user_name = data.get(
-                        'name', f"Usuario de WhatsApp {phone_number_clean}")
-
-                    user = User.objects.create(
-                        external_id=whatsapp_external_id,
-                        platform="WHATSAPP",
-                        first_name=user_name,
-                        phone_number=phone_number_clean,
-                        subscription_plan=default_plan,
-                        default_currency="COP",  # Moneda predeterminada
-                        timezone="America/Bogota"  # Zona horaria predeterminada
-                    )
-                    user_action = "register"
-                    logger.info(
-                        f"Nuevo usuario creado con external_id: {whatsapp_external_id}")
+                        f"verify-code rechazado: no hay cuenta para {phone_number_clean}")
+                    return JsonResponse({
+                        "status": "error",
+                        "code": "account_not_found",
+                        "message": "No encontramos una cuenta asociada a este número."
+                    }, status=404)
 
             # Generar tokens JWT
             refresh = RefreshToken.for_user(user)
@@ -1113,6 +1102,22 @@ def send_verification_code_meta(request):
             else:
                 logger.error(
                     f"❌ ERROR: Tu número no se normalizó correctamente. Esperado: {expected}, Obtenido: {phone_number_normalized}")
+
+        # Verificar que el número tenga una cuenta antes de gastar un envío
+        whatsapp_external_id = f"wa_{phone_number_normalized}"
+        account_exists = User.objects.filter(
+            models.Q(phone_number=phone_number_normalized)
+            | models.Q(external_id=whatsapp_external_id)
+            | models.Q(external_id__contains=whatsapp_external_id)
+        ).exists()
+        if not account_exists:
+            logger.info(
+                f"send-code rechazado: no hay cuenta para {phone_number_normalized}")
+            return JsonResponse({
+                "status": "error",
+                "code": "account_not_found",
+                "message": "No encontramos una cuenta asociada a este número."
+            }, status=404)
 
         # Generar un código de verificación
         verification_code = generate_verification_code()
