@@ -40,6 +40,18 @@ _LASTGOOD_TTL = 7 * 24 * 3600
 
 _TREND_THRESHOLD_PCT = 2.0
 
+# Sparklines for the markets table are cached longer than the live chart TTL
+# (they don't need second-level freshness) and the keys are global per symbol,
+# so the shared "popular" set costs only a handful of provider credits per
+# window regardless of how many users load the table.
+_SPARK_TTL = 30 * 60
+# How many points to keep in a sparkline (downsampled from the raw series).
+_SPARK_POINTS = 24
+# Default window powering the table's change% + sparkline (≈ "today").
+DEFAULT_SPARK_RANGE = "1d"
+# Twelve Data free tier allows a limited number of symbols per batch request.
+_BATCH_CHUNK = 8
+
 
 def _cache():
     """Return the dedicated market-data cache, falling back to default."""
@@ -51,6 +63,21 @@ def _cache():
 
 def _live_key(symbol: str, range_: str) -> str:
     return f"md:hist:{symbol}:{range_}"
+
+
+def _spark_key(symbol: str, range_: str) -> str:
+    return f"md:spark:{symbol}:{range_}"
+
+
+def _downsample(prices: list[float], target: int) -> list[float]:
+    """Evenly subsample ``prices`` to at most ``target`` points, keeping the last."""
+    n = len(prices)
+    if n <= target:
+        return prices
+    step = n / target
+    picked = [prices[int(i * step)] for i in range(target)]
+    picked[-1] = prices[-1]  # always anchor the latest price
+    return picked
 
 
 def _lastgood_key(symbol: str, range_: str) -> str:
@@ -150,3 +177,71 @@ def get_price_history(
     cache.set(_live_key(symbol, range_), payload, ttl)
     cache.set(_lastgood_key(symbol, range_), payload, _LASTGOOD_TTL)
     return payload
+
+
+def _spark_from_points(prices: list[float]) -> dict[str, Any] | None:
+    if not prices:
+        return None
+    first, last = prices[0], prices[-1]
+    change_pct = round((last - first) / first * 100, 2) if first else 0.0
+    return {
+        "prices": _downsample(prices, _SPARK_POINTS),
+        "change_pct": change_pct,
+        "trend": _trend(change_pct),
+    }
+
+
+def get_sparklines(
+    symbols: list[str],
+    range_: str = DEFAULT_SPARK_RANGE,
+    *,
+    provider: PriceProvider | None = None,
+) -> dict[str, dict[str, Any] | None]:
+    """Return ``{symbol: {prices, change_pct, trend} | None}`` for a markets table.
+
+    Cache-first per symbol (global keys, ~30 min TTL). Cache misses are fetched
+    from the provider in batches. Any provider failure (quota/auth/transport)
+    degrades to ``None`` for the affected symbols so the table still renders
+    from Wallbit data — it never raises except for an invalid range.
+    """
+    if range_ not in RANGE_PARAMS:
+        raise ValueError(f"invalid_range:{range_}")
+
+    cache = _cache()
+    interval, outputsize, _ttl = RANGE_PARAMS[range_]
+
+    result: dict[str, dict[str, Any] | None] = {}
+    misses: list[str] = []
+    seen: set[str] = set()
+    for raw in symbols:
+        sym = (raw or "").strip().upper()
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+        cached = cache.get(_spark_key(sym, range_))
+        if cached is not None:
+            result[sym] = cached
+        else:
+            misses.append(sym)
+
+    if not misses:
+        return result
+
+    active = provider or get_provider()
+    fetched: dict[str, list[dict[str, Any]]] = {}
+    try:
+        for i in range(0, len(misses), _BATCH_CHUNK):
+            chunk = misses[i:i + _BATCH_CHUNK]
+            fetched.update(active.fetch_series_batch(chunk, interval=interval, outputsize=outputsize))
+    except MarketDataError as exc:
+        logger.warning("sparklines batch failed: %s", exc)
+
+    for sym in misses:
+        raw_points = fetched.get(sym) or []
+        prices = [round(p["close"], 4) for p in raw_points if p.get("close") is not None]
+        spark = _spark_from_points(prices)
+        result[sym] = spark
+        if spark is not None:
+            cache.set(_spark_key(sym, range_), spark, _SPARK_TTL)
+
+    return result

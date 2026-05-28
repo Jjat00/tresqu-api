@@ -1,6 +1,6 @@
 from django.urls import path
 
-from .views import AssetPriceHistoryView
+from .views import AssetPriceHistoryView, SparklinesView
 
 urlpatterns = [
     path(
@@ -8,4 +8,5 @@ urlpatterns = [
         AssetPriceHistoryView.as_view(),
         name="market-asset-history",
     ),
+    path("sparklines/", SparklinesView.as_view(), name="market-sparklines"),
 ]

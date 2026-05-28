@@ -21,7 +21,7 @@ from .exceptions import (
     MarketDataNotFoundError,
     MarketDataRateLimitError,
 )
-from .service import VALID_RANGES, get_price_history
+from .service import VALID_RANGES, get_price_history, get_sparklines
 
 logger = logging.getLogger(__name__)
 
@@ -79,3 +79,39 @@ class AssetPriceHistoryView(APIView):
             )
 
         return Response(payload)
+
+
+class SparklinesView(APIView):
+    """GET /api/market/sparklines/?symbols=AAPL,MSFT&range=1d
+
+    Batch mini-series + change% for a markets table. Degrades gracefully: a
+    symbol with no data (or a provider outage) comes back as ``null`` so the
+    table still renders the rest from Wallbit data.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    MAX_SYMBOLS = 30
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(name="symbols", description="Símbolos separados por coma.", required=True, type=str),
+            OpenApiParameter(name="range", description=f"Rango. Uno de: {', '.join(VALID_RANGES)}.", required=False, type=str),
+        ]
+    )
+    def get(self, request):
+        symbols_raw = request.query_params.get("symbols", "")
+        range_ = request.query_params.get("range", "1d").lower()
+        symbols = [s.strip().upper() for s in symbols_raw.split(",") if s.strip()][: self.MAX_SYMBOLS]
+        if not symbols:
+            return Response({"sparklines": {}})
+
+        try:
+            data = get_sparklines(symbols, range_)
+        except ValueError:
+            return Response(
+                {"detail": f"Rango inválido. Usa uno de: {', '.join(VALID_RANGES)}."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        return Response({"sparklines": data})
