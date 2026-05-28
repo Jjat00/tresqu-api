@@ -49,6 +49,27 @@ def _cache():
         return caches["default"]
 
 
+def _cache_get(key: str):
+    """Read from the market-data cache, degrading to a miss on any backend error.
+
+    The dedicated cache points at Redis; if that Redis is unreachable or
+    misconfigured (e.g. ``MARKETDATA_CACHE_URL`` unset in prod) we treat it as
+    a cache miss instead of letting a ConnectionError bubble up as a 500.
+    """
+    try:
+        return _cache().get(key)
+    except Exception as exc:  # noqa: BLE001 — cache must never break the request
+        logger.warning("marketdata cache get failed (%s); treating as miss", exc)
+        return None
+
+
+def _cache_set(key: str, value, ttl: int) -> None:
+    try:
+        _cache().set(key, value, ttl)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("marketdata cache set failed (%s); skipping", exc)
+
+
 def _live_key(symbol: str, range_: str) -> str:
     return f"md:hist:{symbol}:{range_}"
 
@@ -121,10 +142,9 @@ def get_price_history(
     if range_ not in RANGE_PARAMS:
         raise ValueError(f"invalid_range:{range_}")
 
-    cache = _cache()
     interval, outputsize, ttl = RANGE_PARAMS[range_]
 
-    cached = cache.get(_live_key(symbol, range_))
+    cached = _cache_get(_live_key(symbol, range_))
     if cached is not None:
         return cached
 
@@ -132,7 +152,7 @@ def get_price_history(
     try:
         raw_points = active.fetch_series(symbol, interval=interval, outputsize=outputsize)
     except MarketDataError as exc:
-        last_good = cache.get(_lastgood_key(symbol, range_))
+        last_good = _cache_get(_lastgood_key(symbol, range_))
         if last_good is not None:
             logger.warning(
                 "marketdata: provider failed, serving last-good (stale)",
@@ -147,6 +167,6 @@ def get_price_history(
         # that didn't 404, etc.). Treat as not found so callers show a clear
         # message instead of a summary full of nulls.
         raise MarketDataNotFoundError(f"Sin datos de precio para '{symbol}' ({range_}).")
-    cache.set(_live_key(symbol, range_), payload, ttl)
-    cache.set(_lastgood_key(symbol, range_), payload, _LASTGOOD_TTL)
+    _cache_set(_live_key(symbol, range_), payload, ttl)
+    _cache_set(_lastgood_key(symbol, range_), payload, _LASTGOOD_TTL)
     return payload
