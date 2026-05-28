@@ -63,6 +63,7 @@ INSTALLED_APPS = [
     'wallbit',
     'agents',
     'composio_integration',
+    'marketdata',
 ]
 
 REST_FRAMEWORK = {
@@ -168,7 +169,16 @@ CACHES = {
             'MAX_ENTRIES': 1000,  # Máximo 1000 entradas en cache
             'CULL_FREQUENCY': 3,  # Eliminar 1/3 de las entradas cuando se llena
         }
-    }
+    },
+    # Cache dedicado para datos de mercado (histórico de precios). Usa Redis —
+    # ya disponible como broker de Celery — para no desalojar entradas del
+    # cache 'default' (DB, MAX_ENTRIES 1000). El backend RedisCache es nativo
+    # de Django 5.2, sin dependencias extra. Si Redis no está disponible, los
+    # consumidores caen a caches['default'] (ver marketdata/service.py).
+    'marketdata': {
+        'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+        'LOCATION': os.getenv('MARKETDATA_CACHE_URL', 'redis://redis:6379/2'),
+    },
 }
 
 # Password validation
@@ -347,6 +357,11 @@ LOGGING = {
             'level': 'DEBUG',
             'propagate': True,
         },
+        'marketdata': {
+            'handlers': ['console', 'file'],
+            'level': 'DEBUG',
+            'propagate': True,
+        },
     },
 }
 
@@ -407,3 +422,12 @@ CELERY_BEAT_SCHEDULE = {
 # Wallbit
 WALLBIT_API_BASE_URL = os.getenv("WALLBIT_API_BASE_URL", "https://api.wallbit.io")
 WALLBIT_ENCRYPTION_KEY = os.getenv("WALLBIT_ENCRYPTION_KEY", "")
+
+# Market data (histórico de precios para el agente Analista y los gráficos del
+# dashboard). Wallbit no expone histórico, así que usamos un proveedor externo
+# intercambiable; Twelve Data es el default (ver marketdata/providers.py).
+TWELVE_DATA_API_KEY = os.getenv("TWELVE_DATA_API_KEY", "")
+TWELVE_DATA_BASE_URL = os.getenv("TWELVE_DATA_BASE_URL", "https://api.twelvedata.com")
+
+# Modelo del subagente Analista de mercado.
+AGENT_ANALYST_MODEL = os.getenv("AGENT_ANALYST_MODEL", "gpt-4.1")
