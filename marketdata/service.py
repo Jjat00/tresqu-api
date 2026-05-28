@@ -15,7 +15,7 @@ from typing import Any
 from django.core.cache import caches
 from django.core.cache.backends.base import InvalidCacheBackendError
 
-from .exceptions import MarketDataError
+from .exceptions import MarketDataError, MarketDataNotFoundError
 from .providers import PriceProvider, get_provider
 
 logger = logging.getLogger(__name__)
@@ -142,6 +142,11 @@ def get_price_history(
         raise
 
     payload = _build_payload(symbol, range_, raw_points)
+    if not payload["points"]:
+        # Provider answered OK but with no usable data (delisted, bad symbol
+        # that didn't 404, etc.). Treat as not found so callers show a clear
+        # message instead of a summary full of nulls.
+        raise MarketDataNotFoundError(f"Sin datos de precio para '{symbol}' ({range_}).")
     cache.set(_live_key(symbol, range_), payload, ttl)
     cache.set(_lastgood_key(symbol, range_), payload, _LASTGOOD_TTL)
     return payload
