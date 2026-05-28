@@ -21,6 +21,7 @@ from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
 from . import risk_profiler_service
+from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
 from .subagents.wallbit import build_wallbit_subagent
 
@@ -32,9 +33,9 @@ _SUPERVISOR_PROMPT_TEMPLATE = """Eres Tresqu, asistente financiero personal. Hab
 FECHA ACTUAL (zona horaria del usuario): {current_date}
 Usa SIEMPRE esta fecha como referencia para "hoy", "este mes", "este año", "el mes pasado", etc. NUNCA infieras la fecha de tu memoria interna ni asumas que estamos en otro año. Si necesitas calcular un rango, hazlo desde esta fecha.
 
-Trabajas como ORQUESTADOR de dos subagentes especializados. Tu trabajo es:
+Trabajas como ORQUESTADOR de subagentes especializados. Tu trabajo es:
 1. Entender la intención del usuario en el contexto de la conversación.
-2. Delegar a las tools `manage_expenses_and_income` o `manage_wallbit` con una instrucción CLARA y AUTOCONTENIDA (los subagentes no recuerdan turnos anteriores — si el usuario dice "borra ese gasto", traduce a "borra el gasto ID 42 que registraste hace dos turnos").
+2. Delegar a las tools `manage_expenses_and_income`, `manage_wallbit` o `analyze_investment` con una instrucción CLARA y AUTOCONTENIDA (los subagentes no recuerdan turnos anteriores — si el usuario dice "borra ese gasto", traduce a "borra el gasto ID 42 que registraste hace dos turnos").
 3. Tomar la respuesta del subagente y presentarla al usuario con tu voz, sin omitir datos importantes (montos, fechas, IDs, previews de Wallbit).
 
 CUÁNDO USAR `manage_expenses_and_income`:
@@ -47,6 +48,13 @@ CUÁNDO USAR `manage_wallbit`:
 - Saldo Wallbit, transacciones Wallbit, búsqueda de activos.
 - Operaciones reales: comprar, vender, mover entre cuentas internas, depositar/retirar de Robo Advisor, activar/suspender tarjeta.
 - Preguntas que cruzan gastos+ingresos+Wallbit en una sola búsqueda semántica.
+
+CUÁNDO USAR `analyze_investment`:
+- Preguntas sobre la EVOLUCIÓN de un precio en el tiempo: "¿cómo va NVDA este mes?", "precio de VOO en el último año", "¿cuánto subió META esta semana?".
+- Explicar un activo (qué es, sector, dividendos, precio actual) o si encaja con el perfil del usuario: "explícame esta acción", "¿AAPL va con mi perfil?".
+- Cualquier consulta de análisis/educación sobre acciones o ETFs que NO sea una operación real.
+- Es de SOLO LECTURA y educativo: nunca ejecuta nada. Si tras el análisis el usuario quiere COMPRAR o VENDER, eso va a `manage_wallbit` (operación real con confirmación).
+- El analista NUNCA recomienda "comprá/vendé X" — presenta datos y contexto. Respeta ese tono al recapitular.
 
 CUÁNDO USAR `start_risk_profiler`:
 - El usuario pide armar su perfil de riesgo / inversión / tolerancia a pérdidas.
@@ -132,6 +140,7 @@ def build_supervisor(
         user, expense_categories_str, income_categories_str, current_date
     )
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
+    analyst_agent = build_analyst_subagent(user)
 
     pending_container: dict[str, dict | None] = {"confirmation": None}
     # When the supervisor decides to start the risk profiler, it sets this flag
@@ -185,6 +194,27 @@ def build_supervisor(
             logger.exception(f"wallbit subagent failed: {exc}")
             return f"(error en subagente Wallbit: {exc})"
 
+    @tool("analyze_investment")
+    async def call_analyst_subagent(instruction: str) -> str:
+        """Delega al subagente Analista de mercado (SOLO LECTURA / educación).
+
+        Úsalo para precio de un activo en el tiempo, explicar una acción/ETF, o
+        si encaja con el perfil del usuario. NO ejecuta operaciones.
+
+        Pasa instrucción autocontenida con el símbolo y el rango si aplica.
+        Ej: "¿Cómo va NVDA en el último mes?" o "Explica VOO y di si encaja con
+        el perfil del usuario".
+        """
+        try:
+            result = await analyst_agent.ainvoke(
+                {"messages": [{"role": "user", "content": instruction}]},
+                config={"recursion_limit": 20},
+            )
+            return result["messages"][-1].content or ""
+        except Exception as exc:
+            logger.exception(f"analyst subagent failed: {exc}")
+            return f"(error en subagente analista: {exc})"
+
     @tool("start_risk_profiler")
     async def start_risk_profiler() -> str:
         """Inicia un Q&A multi-turno para construir el perfil de riesgo / inversión del usuario.
@@ -209,7 +239,12 @@ def build_supervisor(
 
     agent = create_agent(
         model=_supervisor_model(),
-        tools=[call_expenses_subagent, call_wallbit_subagent, start_risk_profiler],
+        tools=[
+            call_expenses_subagent,
+            call_wallbit_subagent,
+            call_analyst_subagent,
+            start_risk_profiler,
+        ],
         system_prompt=_build_supervisor_prompt(current_date),
     )
     return agent, pending_container, risk_profiler_signal
