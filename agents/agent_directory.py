@@ -54,10 +54,12 @@ AGENTS: list[dict] = [
         "specialty": "Tu cuenta Wallbit: saldo, movimientos y operaciones reales (con confirmación previa).",
         "capabilities": [
             "Consultar saldo y movimientos",
-            "Comprar o vender (dinero real, requiere confirmar)",
+            "Comprar o vender (requiere confirmar)",
             "Mover fondos, Robo Advisor y tarjeta",
         ],
-        "real_money": True,
+        # Hard requirement: without a connected Wallbit account this agent has
+        # nothing to read or operate on, so the UI locks it behind a connect CTA.
+        "requires_wallbit": True,
     },
     {
         "id": "analyst",
@@ -72,6 +74,9 @@ AGENTS: list[dict] = [
         ],
         # Honest visualization: data the Analyst READS, not agent-to-agent msgs.
         "data_sources": ["Perfil de riesgo", "Portafolio de Wallbit"],
+        # Soft dependency: it works without Wallbit (prices, fundamentals, ETFs)
+        # but connecting it lets the analysis weigh your actual portfolio.
+        "prefers_wallbit": True,
     },
     {
         "id": "risk",

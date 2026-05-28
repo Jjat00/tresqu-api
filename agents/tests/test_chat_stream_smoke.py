@@ -184,8 +184,10 @@ def _run() -> int:
 
     ids = [a["id"] for a in AGENTS]
     _expect(ids == ["tresqu", "expenses", "wallbit", "analyst", "risk"], "roster ids + order")
-    _expect(get_agent("wallbit") is not None and get_agent("wallbit").get("real_money") is True, "wallbit flagged real money")
+    _expect(get_agent("wallbit") is not None and get_agent("wallbit").get("requires_wallbit") is True, "wallbit requires a connected account")
+    _expect(get_agent("wallbit").get("real_money") is None, "wallbit real-money flag removed")
     _expect(get_agent("analyst").get("data_sources") == ["Perfil de riesgo", "Portafolio de Wallbit"], "analyst data sources for honest viz")
+    _expect(get_agent("analyst").get("prefers_wallbit") is True, "analyst prefers (but doesn't require) wallbit")
     _expect(get_agent("risk").get("start_command") == "/perfil", "risk profiler start command exposed")
     _expect(get_agent("nope") is None, "unknown agent → None")
 

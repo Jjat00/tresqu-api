@@ -26,6 +26,15 @@ from .serializers import (
 logger = logging.getLogger(__name__)
 
 
+def _wallbit_connected(user) -> bool:
+    """True if the user has a Wallbit account in the connected state."""
+    from wallbit.models import WallbitAccount
+
+    return WallbitAccount.objects.filter(
+        user=user, status=WallbitAccount.CONNECTED
+    ).exists()
+
+
 class RiskProfileView(APIView):
     """GET/POST/DELETE /api/agents/risk-profile/ — manage the user's risk profile.
 
@@ -261,9 +270,21 @@ class AgentDirectChatStreamView(APIView):
     renderer_classes = [ServerSentEventRenderer]
 
     def post(self, request, agent_id):
-        if get_agent(agent_id) is None:
+        agent = get_agent(agent_id)
+        if agent is None:
             return JsonResponse(
                 {"detail": "unknown agent"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        # Agents that need Wallbit are locked behind a connect CTA in the UI;
+        # this guards the endpoint too in case it's reached directly.
+        if agent.get("requires_wallbit") and not _wallbit_connected(request.user):
+            return JsonResponse(
+                {
+                    "detail": "Conecta tu cuenta Wallbit para hablar con este agente.",
+                    "code": "wallbit_not_connected",
+                },
+                status=status.HTTP_409_CONFLICT,
             )
 
         message = (request.data.get("message") or "").strip()
