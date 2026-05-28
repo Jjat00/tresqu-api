@@ -31,6 +31,7 @@ urlpatterns = [
     path('whatsapp/', include('whatsappbot.urls'), name='whatsapp'),
     path('api/gmail/', include('gmailbot.urls'), name='gmail'),
     path('api/wallbit/', include('wallbit.urls'), name='wallbit'),
+    path('api/market/', include('marketdata.urls'), name='market'),
     path('api/agents/', include('agents.urls'), name='agents'),
     path('', include('composio_integration.urls'), name='composio-integration'),
     # JWT auth

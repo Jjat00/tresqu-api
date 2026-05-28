@@ -17,6 +17,7 @@ Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots intel
 - [Integración Wallbit](#integración-wallbit)
 - [Integración Gmail](#integración-gmail)
 - [Perfil de riesgo del usuario](#perfil-de-riesgo-del-usuario)
+- [Analista de mercado](#analista-de-mercado)
 - [Endpoints REST](#endpoints-rest)
 - [Celery & beat](#celery--beat)
 - [Documentación API](#documentación-api)
@@ -292,6 +293,9 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `OPENAI_API_KEY` | Agente LangChain + embeddings de pgvector |
 | `WALLBIT_API_BASE_URL` | Default `https://api.wallbit.io` |
 | `WALLBIT_ENCRYPTION_KEY` | Clave maestra para cifrar las API keys de los usuarios |
+| `TWELVE_DATA_API_KEY` | Proveedor de precios históricos del analista de mercado. **Sin ella, el gráfico/histórico no carga** (el resto sigue operando) |
+| `MARKETDATA_CACHE_URL` | Redis dedicado para cachear histórico (db 2). En dev/host: `redis://localhost:6379/2`. En prod, apuntar al Redis real. Degrada con gracia si no está disponible |
+| `AGENT_ANALYST_MODEL` | Modelo del subagente analista (default `gpt-4.1`) |
 | `CELERY_BROKER_URL` | Redis. En dev/host: `redis://localhost:6379/0`. En el worker dockerizado: `redis://redis:6379/0` (hardcoded en `docker-compose.dev.yml`) |
 | `CELERY_RESULT_BACKEND` | Redis DB distinta. Mismas reglas de host vs container |
 | `DATABASE_URL` | Postgres + pgvector |
@@ -319,7 +323,8 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `gmailbot/` | Parser de compras: recibe eventos del webhook de Composio, crea `ProcessedEmail` y `Expense`. La parte de OAuth/polling vive en `composio_integration/`. |
 | **`composio_integration/`** | **(nuevo)** Broker genérico Composio (composio.dev). Hosting del SDK client, state machine OAuth (connect → callback → active → disconnect), verificación HMAC del webhook, state-token JWT con nonce anti-replay y tareas Celery. Toolkits nuevos (Slack, Notion, …) implementan el protocolo `ToolkitHandler` y se enganchan vía `registry`. Detalle: [`docs/COMPOSIO_ARCHITECTURE.md`](docs/COMPOSIO_ARCHITECTURE.md), [`docs/COMPOSIO_GMAIL_SETUP.md`](docs/COMPOSIO_GMAIL_SETUP.md) |
 | **`wallbit/`** | Integración Wallbit: cliente HTTP, modelos, tools del agente, flujo de confirmación, sync periódico, RAG sobre transacciones |
-| **`agents/`** | **(nuevo)** Perfil de riesgo del usuario: cuestionario LangGraph + inferencia automática + combinador. Ver [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md) |
+| **`marketdata/`** | **(nuevo)** Capa de precios históricos intercambiable (Wallbit no expone histórico). Proveedor Twelve Data + servicio con caché y endpoint `/api/market/assets/{symbol}/history/`. Ver [`docs/MARKET_ANALYST.md`](docs/MARKET_ANALYST.md) |
+| **`agents/`** | Sistema multi-agente: supervisor que orquesta subagentes (`manage_expenses_and_income`, `manage_wallbit`, **`analyze_investment`** — analista de mercado read-only) + perfil de riesgo (cuestionario LangGraph + inferencia + combinador). Ver [`docs/AGENTS_RISK_PROFILE.md`](docs/AGENTS_RISK_PROFILE.md) y [`docs/MARKET_ANALYST.md`](docs/MARKET_ANALYST.md) |
 
 ### Estructura interna de `wallbit/`
 
@@ -494,6 +499,26 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 
 ---
 
+## Analista de mercado
+
+Subagente **read-only** (`agents/subagents/analyst.py`), expuesto al supervisor
+como `analyze_investment`. Ayuda a decidir dando **datos + contexto + educación**
+sobre activos — nunca asesoría ("compra/vende X") ni predicciones.
+
+Cruza tres fuentes para contextualizar: **mercado** (precio actual + serie
+histórica), **perfil de riesgo efectivo** y **portafolio Wallbit** (peso % por
+posición). Responde por WhatsApp/Telegram ("¿cómo va NVDA este mes?") y alimenta
+el gráfico de precios del dashboard.
+
+Como Wallbit no expone histórico, la serie viene de la capa `marketdata/`
+(proveedor **Twelve Data** intercambiable) vía
+`GET /api/market/assets/{symbol}/history/?range=`. Resultados cacheados por
+`(símbolo, rango)` para cuidar la cuota; 1 consulta = 1 crédito.
+
+Detalle completo: [`docs/MARKET_ANALYST.md`](docs/MARKET_ANALYST.md).
+
+---
+
 ## Endpoints REST
 
 | Endpoint | Descripción |
@@ -513,6 +538,8 @@ Detalle completo, diagramas y caveats: [`docs/AGENTS_RISK_PROFILE.md`](docs/AGEN
 | **`/api/wallbit/limits/`** | GET/POST de `AgentLimits` |
 | **`/api/wallbit/agent/decisions/`** | Audit log paginado |
 | **`/api/wallbit/agent/confirm/{id}/`** | Ejecuta una decisión pendiente |
+| **`/api/wallbit/assets/search/`** | **(nuevo)** Busca en el catálogo de Wallbit (cualquier acción/ETF invertible) |
+| **`/api/market/assets/{symbol}/history/`** | **(nuevo)** Serie histórica de precios para el gráfico (proveedor Twelve Data) |
 | **`/api/agents/risk-profile/`** | GET/POST/DELETE del perfil declarado (POST = manual override) |
 | **`/api/agents/risk-profile/effective/`** | Perfil **efectivo** combinando declarado + inferido (consume esto desde frontend y guardrails) |
 | **`/api/agents/risk-profile/history/`** | Audit log paginado de `RiskAssessment` |
