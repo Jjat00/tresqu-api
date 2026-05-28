@@ -414,7 +414,6 @@ def _normalize_asset(a: dict) -> dict:
         "asset_type": a.get("asset_type") or a.get("type") or "",
         "sector": a.get("sector") or "",
         "price": a.get("price"),
-        "market_cap_m": a.get("market_cap_m"),
         "logo_url": a.get("logo_url") or "",
         "country": a.get("country") or "",
     }
