@@ -13,7 +13,7 @@ from .client import (
     WallbitError,
     WallbitPermissionError,
 )
-from .crypto import encrypt_api_key
+from .crypto import decrypt_api_key, encrypt_api_key
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
 from .portfolio import get_holdings, get_summary, get_timeline
@@ -405,3 +405,63 @@ class PortfolioTimelineView(APIView):
                 "points": TimelinePointSerializer(points, many=True).data,
             }
         )
+
+
+def _normalize_asset(a: dict) -> dict:
+    return {
+        "symbol": (a.get("symbol") or "").upper(),
+        "name": a.get("name") or a.get("description") or "",
+        "asset_type": a.get("asset_type") or a.get("type") or "",
+        "sector": a.get("sector") or "",
+        "price": a.get("price"),
+        "logo_url": a.get("logo_url") or "",
+        "country": a.get("country") or "",
+    }
+
+
+class AssetSearchView(APIView):
+    """GET /api/wallbit/assets/search — browse the Wallbit asset catalog.
+
+    Lets the user explore any stock/ETF (not just what they hold) to then view
+    its price chart. Requires a connected Wallbit account (the catalog is read
+    with the user's key).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        query = request.query_params.get("q", "").strip()
+        category = request.query_params.get("category", "").strip().upper()
+        try:
+            limit = int(request.query_params.get("limit", 12))
+        except (TypeError, ValueError):
+            limit = 12
+        limit = max(1, min(limit, 50))
+
+        params = {"page": 1, "limit": limit}
+        if query:
+            params["search"] = query
+        if category:
+            params["category"] = category
+
+        try:
+            account = get_account_or_raise(request.user)
+            api_key = decrypt_api_key(account.encrypted_api_key)
+            with WallbitClient(api_key) as client:
+                response = client.get("/assets", params=params)
+        except AccountNotConnected:
+            return Response(
+                {"detail": "Wallbit not connected", "connected": False},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        except WallbitError as exc:
+            logger.warning("asset search upstream failure", exc_info=exc)
+            return Response(
+                {"detail": f"Wallbit upstream error: {exc}"},
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+
+        payload = response.data or {}
+        items = payload.get("data", payload if isinstance(payload, list) else [])
+        assets = [_normalize_asset(a) for a in items if isinstance(a, dict)]
+        return Response({"assets": assets})
