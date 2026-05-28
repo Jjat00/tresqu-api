@@ -87,18 +87,6 @@ def _test_provider():
         "401/api key → auth",
     )
 
-    print("\n[provider] _normalize_batch handles multi-symbol + per-symbol error")
-    batch_body = {
-        "AAPL": {"status": "ok", "values": [{"datetime": "2026-05-01", "close": "10"}]},
-        "MSFT": {"status": "ok", "values": [{"datetime": "2026-05-01", "close": "20"}]},
-        "BAD": {"status": "error", "code": 404, "message": "symbol not found"},
-    }
-    batch = p._normalize_batch(batch_body, ["AAPL", "MSFT", "BAD"])
-    _expect(set(batch) == {"AAPL", "MSFT"}, "ok symbols kept, error symbol dropped")
-    _expect(batch["AAPL"][0]["close"] == 10.0, "batch close coerced")
-    single = p._normalize_batch({"status": "ok", "values": [{"datetime": "2026-05-01", "close": "5"}]}, ["AAPL"])
-    _expect(single["AAPL"][0]["close"] == 5.0, "single-symbol flat shape handled")
-
     print("\n[provider] ok body passes through; missing key → config error")
     parsed = p._parse(httpx.Response(200, json={"status": "ok", "values": []}))
     _expect(parsed.get("status") == "ok", "ok body returned as dict")
@@ -119,7 +107,6 @@ class _FakeProvider:
         self._points = points or []
         self._exc = exc
         self.calls = 0
-        self.batch_calls = 0
         self.last_kwargs = None
 
     def fetch_series(self, symbol, *, interval, outputsize):
@@ -128,12 +115,6 @@ class _FakeProvider:
         if self._exc is not None:
             raise self._exc
         return list(self._points)
-
-    def fetch_series_batch(self, symbols, *, interval, outputsize):
-        self.batch_calls += 1
-        if self._exc is not None:
-            raise self._exc
-        return {s: list(self._points) for s in symbols}
 
 
 def _series(closes):
@@ -200,39 +181,9 @@ def _test_service():
     )
 
 
-def _test_sparklines():
-    from django.core.cache.backends.locmem import LocMemCache
-
-    from marketdata import service
-
-    shared = LocMemCache("md-spark-test", {})
-    shared.clear()
-    service._cache = lambda: shared  # type: ignore[assignment]
-
-    print("\n[sparklines] returns prices + change_pct per symbol, downsampled")
-    prov = _FakeProvider(points=_series(list(range(100, 140))))  # 40 points
-    out = service.get_sparklines(["nvda", "msft"], "1d", provider=prov)
-    _expect(set(out) == {"NVDA", "MSFT"}, "both symbols present (upper-cased)")
-    _expect(out["NVDA"] is not None and "prices" in out["NVDA"], "has prices")
-    _expect(len(out["NVDA"]["prices"]) <= service._SPARK_POINTS, "downsampled to <= cap")
-    _expect(out["NVDA"]["prices"][-1] == 139.0, "anchors latest price")
-    _expect(out["NVDA"]["change_pct"] == round((139 - 100) / 100 * 100, 2), "change_pct over window")
-
-    print("\n[sparklines] cache hit avoids a second batch call")
-    before = prov.batch_calls
-    service.get_sparklines(["NVDA", "MSFT"], "1d", provider=prov)
-    _expect(prov.batch_calls == before, "no new batch call on cached symbols")
-
-    print("\n[sparklines] provider failure → None, no raise")
-    failing = _FakeProvider(exc=__import__("marketdata.exceptions", fromlist=["MarketDataError"]).MarketDataError("boom"))
-    out2 = service.get_sparklines(["FAIL1", "FAIL2"], "1d", provider=failing)
-    _expect(out2["FAIL1"] is None and out2["FAIL2"] is None, "failed symbols → None")
-
-
 def _run() -> int:
     _test_provider()
     _test_service()
-    _test_sparklines()
     if failures:
         print(f"\nMARKETDATA SMOKE FAILED — {len(failures)} assertion(s):")
         for f in failures:

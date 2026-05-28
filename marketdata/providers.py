@@ -100,46 +100,6 @@ class TwelveDataProvider:
         payload = self._request("/time_series", params=params)
         return self._normalize(payload)
 
-    def fetch_series_batch(
-        self, symbols: list[str], *, interval: str, outputsize: int
-    ) -> dict[str, list[dict[str, Any]]]:
-        """Fetch several symbols in one request (Twelve Data comma-separated).
-
-        Returns ``{symbol: points}`` only for symbols that came back OK; a
-        per-symbol error (bad ticker) is silently skipped so one bad symbol
-        doesn't sink the whole table. Top-level errors (auth/quota) still raise.
-        """
-        if not self._api_key:
-            raise MarketDataConfigError(
-                "TWELVE_DATA_API_KEY no está configurada; no puedo obtener histórico de precios."
-            )
-        if not symbols:
-            return {}
-
-        params = {
-            "symbol": ",".join(symbols),
-            "interval": interval,
-            "outputsize": outputsize,
-            "order": "asc",
-            "apikey": self._api_key,
-        }
-        payload = self._request("/time_series", params=params)
-        return self._normalize_batch(payload, symbols)
-
-    def _normalize_batch(
-        self, payload: dict[str, Any], symbols: list[str]
-    ) -> dict[str, list[dict[str, Any]]]:
-        # Single symbol → Twelve Data returns the flat {meta, values} shape.
-        if "values" in payload and len(symbols) == 1:
-            return {symbols[0]: self._normalize(payload)}
-
-        out: dict[str, list[dict[str, Any]]] = {}
-        for sym in symbols:
-            entry = payload.get(sym) or payload.get(sym.upper())
-            if isinstance(entry, dict) and entry.get("status") != "error":
-                out[sym] = self._normalize(entry)
-        return out
-
     def _request(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}{path}"
         # Params logged WITHOUT the apikey.
