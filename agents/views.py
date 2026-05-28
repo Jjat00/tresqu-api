@@ -4,10 +4,11 @@ import logging
 import queue
 import threading
 
-from django.http import StreamingHttpResponse
+from django.http import JsonResponse, StreamingHttpResponse
 from langchain_core.messages import AIMessage, HumanMessage
 from rest_framework import permissions, status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
@@ -134,6 +135,22 @@ class RiskProfileEffectiveView(APIView):
         return Response(effective.to_dict(), status=status.HTTP_200_OK)
 
 
+class ServerSentEventRenderer(BaseRenderer):
+    """Lets DRF content negotiation accept ``text/event-stream`` requests.
+
+    The streaming view returns a raw ``StreamingHttpResponse``, so ``render`` is
+    never actually invoked — this renderer exists only so the negotiation step in
+    ``APIView.initial()`` doesn't reject the client's ``Accept: text/event-stream``.
+    """
+
+    media_type = "text/event-stream"
+    format = "txt"
+    charset = None
+
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
+
 _STREAM_SENTINEL = object()
 
 
@@ -196,12 +213,14 @@ class AgentChatStreamView(APIView):
     """
 
     permission_classes = [permissions.IsAuthenticated]
+    renderer_classes = [ServerSentEventRenderer]
 
     def post(self, request):
         message = (request.data.get("message") or "").strip()
         if not message:
-            return Response(
-                {"detail": "message is required"}, status=status.HTTP_400_BAD_REQUEST
+            return JsonResponse(
+                {"detail": "message is required"},
+                status=status.HTTP_400_BAD_REQUEST,
             )
 
         response = StreamingHttpResponse(
