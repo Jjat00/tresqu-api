@@ -161,6 +161,25 @@ def _run() -> int:
     _expect(spec_final["text"] == "Listo, confirma la compra.", "specialist final text")
     _expect(spec_final["pending_confirmation"] == spec_preview, "wallbit pending surfaced in direct chat")
 
+    print("\n[risk profile] direct chat reads the current profile (no supervisor)")
+    from types import SimpleNamespace
+
+    chat_stream.get_effective_profile = lambda user, refresh_inference=True: SimpleNamespace(  # type: ignore[assignment]
+        tolerance="moderate", source="inferred", warning=None
+    )
+    risk_events = _collect_single(chat_stream, user, "risk", "ya tengo perfil?")
+    risk_final = next(e for e in risk_events if e["type"] == "final")
+    _expect(not [e for e in risk_events if e["type"] == "step"], "risk readout has no agent steps")
+    _expect("moderado" in risk_final["text"], "risk readout names the tolerance in Spanish")
+    _expect(risk_final["pending_confirmation"] is None, "risk readout has no pending confirmation")
+
+    chat_stream.get_effective_profile = lambda user, refresh_inference=True: SimpleNamespace(  # type: ignore[assignment]
+        tolerance="moderate", source="default", warning=None
+    )
+    no_profile = _collect_single(chat_stream, user, "risk", "tengo perfil?")
+    no_profile_final = next(e for e in no_profile if e["type"] == "final")
+    _expect("Aún no tienes" in no_profile_final["text"], "no-profile readout invites to evaluate")
+
     print("\n[roster] team directory shape")
     from agents.agent_directory import AGENTS, get_agent
 

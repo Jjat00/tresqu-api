@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator
 
+from asgiref.sync import sync_to_async
 from langchain_core.messages import HumanMessage
 
 from telegrambot.config import (
@@ -35,6 +36,7 @@ from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
 from . import risk_profiler_service
 from .agent_directory import SPECIALIST_IDS, SUPERVISOR_ID, agent_meta_by_tool
+from .effective_profile import get_effective_profile
 from .services import (
     RISK_PROFILE_COMMAND,
     _load_categories,
@@ -246,8 +248,13 @@ async def stream_single_agent(
     """
 
     try:
-        if agent_id in (SUPERVISOR_ID, "risk"):
+        if agent_id == SUPERVISOR_ID:
             async for event in stream_agent_events(user, raw_text, channel, history):
+                yield event
+            return
+
+        if agent_id == "risk":
+            async for event in _stream_risk(user, channel, raw_text, history):
                 yield event
             return
 
@@ -262,6 +269,87 @@ async def stream_single_agent(
     except Exception as exc:  # noqa: BLE001 — never crash the stream
         logger.exception("stream_single_agent error (%s): %s", agent_id, exc)
         yield {"type": "error", "text": ERROR_MESSAGES["default"]}
+
+
+_TOLERANCE_ES = {
+    "conservative": "conservador",
+    "moderate": "moderado",
+    "aggressive": "agresivo",
+}
+
+
+def _format_risk_readout(eff) -> str:
+    """Plain-language description of the user's current effective risk profile."""
+
+    label = _TOLERANCE_ES.get(eff.tolerance, eff.tolerance)
+
+    if eff.source == "default":
+        return (
+            "Aún no tienes un perfil de riesgo definido. Toca *Iniciar evaluación* "
+            "para armarlo con el cuestionario, o registra más movimientos para que "
+            "se infiera automáticamente."
+        )
+
+    if eff.source == "inferred":
+        return (
+            f"De momento tu perfil es *{label}*, inferido automáticamente de tus "
+            "registros (todavía sin cuestionario). Para mayor precisión, toca "
+            "*Iniciar evaluación* y responde las 5 preguntas."
+        )
+
+    fuente = {
+        "declared": "según tu evaluación",
+        "agreement": "confirmado por tu evaluación y tus registros",
+        "safety_cap": "ajustado a un perfil más prudente por tu situación actual",
+    }.get(eff.source, "según tu evaluación")
+
+    text = f"Sí, ya tienes un perfil: *{label}* ({fuente})."
+    if eff.warning:
+        text += f"\n\n_{eff.warning}_"
+    text += "\n\n¿Quieres reevaluarlo? Toca *Iniciar evaluación*."
+    return text
+
+
+async def _stream_risk(
+    user: User,
+    channel: str,
+    raw_text: str,
+    history: list,
+) -> AsyncIterator[dict[str, Any]]:
+    """Handle the risk-profile agent directly (never falls back to the supervisor).
+
+    Starts the guided Q&A with ``RISK_PROFILE_COMMAND``, continues an active
+    session, and otherwise answers about the user's current profile from data.
+    """
+
+    normalized = raw_text.strip().lower()
+
+    if normalized == RISK_PROFILE_COMMAND:
+        resp = await _resume_or_start_profiler(
+            user, channel, start_fresh=True, user_message=raw_text, history=history
+        )
+        yield {"type": "final", "text": resp.text, "pending_confirmation": None}
+        return
+
+    if await risk_profiler_service.is_session_active(user.id):
+        resp = await _route_with_active_session(user, channel, raw_text, history)
+        yield {
+            "type": "final",
+            "text": resp.text,
+            "pending_confirmation": resp.pending_confirmation,
+        }
+        return
+
+    try:
+        eff = await sync_to_async(get_effective_profile)(user, refresh_inference=False)
+        text = _format_risk_readout(eff)
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("risk profile readout failed for user=%s: %s", user.id, exc)
+        text = (
+            "No pude leer tu perfil ahora mismo. Puedes evaluarlo tocando "
+            "*Iniciar evaluación*."
+        )
+    yield {"type": "final", "text": text, "pending_confirmation": None}
 
 
 async def _stream_specialist(
