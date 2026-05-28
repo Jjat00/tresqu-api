@@ -31,8 +31,10 @@ from telegrambot.config import (
     ERROR_MESSAGES,
 )
 from users.models import User
+from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
 from . import risk_profiler_service
+from .agent_directory import SPECIALIST_IDS, SUPERVISOR_ID, agent_meta_by_tool
 from .services import (
     RISK_PROFILE_COMMAND,
     _load_categories,
@@ -40,25 +42,58 @@ from .services import (
     _route_with_active_session,
     _user_today,
 )
+from .subagents.analyst import build_analyst_subagent
+from .subagents.expenses import build_expenses_subagent
+from .subagents.wallbit import build_wallbit_subagent
 from .supervisor import build_supervisor
 
 logger = logging.getLogger(__name__)
 
 _SUMMARY_MAX_CHARS = 600
 
-# Supervisor tool name → stable node id + human label for the agent graph.
-_AGENT_LABELS: dict[str, dict[str, str]] = {
-    "manage_expenses_and_income": {"id": "expenses", "label": "Gastos e ingresos"},
-    "manage_wallbit": {"id": "wallbit", "label": "Wallbit"},
-    "analyze_investment": {"id": "analyst", "label": "Analista"},
-    "start_risk_profiler": {"id": "risk", "label": "Perfil de riesgo"},
+# Friendly labels for the specialist subagents' own tools (shown in the direct
+# 1:1 chat trace). Unknown tools fall back to a generic humanizer.
+_TOOL_LABELS: dict[str, str] = {
+    "wallbit_get_balance_for_user": "Consultar saldo",
+    "wallbit_list_transactions_for_user": "Listar movimientos",
+    "wallbit_search_assets_for_user": "Buscar activos",
+    "wallbit_get_asset_for_user": "Ficha de activo",
+    "tresqu_query_history": "Búsqueda en tu historial",
+    "wallbit_place_trade": "Proponer operación",
+    "wallbit_move_funds": "Mover fondos",
+    "wallbit_deposit_chest": "Depósito Robo Advisor",
+    "wallbit_withdraw_chest": "Retiro Robo Advisor",
+    "wallbit_set_card_status": "Estado de tarjeta",
+    "get_asset_quote": "Cotización del activo",
+    "get_price_history": "Histórico de precios",
+    "get_user_risk_profile": "Leer perfil de riesgo",
+    "get_user_portfolio": "Leer portafolio",
 }
 
 
-def _agent_meta(tool_name: str) -> dict[str, str]:
-    return _AGENT_LABELS.get(
-        tool_name, {"id": tool_name or "unknown", "label": tool_name or "Agente"}
+def _humanize_tool(name: str) -> str:
+    if name in _TOOL_LABELS:
+        return _TOOL_LABELS[name]
+    cleaned = (
+        (name or "")
+        .replace("_for_user", "")
+        .replace("wallbit_", "")
+        .replace("tresqu_", "")
+        .replace("_", " ")
+        .strip()
     )
+    return cleaned.capitalize() or "Herramienta"
+
+
+def _tool_args_summary(args: Any) -> str:
+    if not isinstance(args, dict) or not args:
+        return ""
+    parts = [f"{k}: {v}" for k, v in args.items() if v not in (None, "")]
+    return ", ".join(parts)[:200]
+
+
+def _agent_meta(tool_name: str) -> dict[str, str]:
+    return agent_meta_by_tool(tool_name)
 
 
 def _as_text(content: Any) -> str:
@@ -191,4 +226,117 @@ async def _stream_supervisor(
         final_text = first_step.get("question") or final_text
 
     pending = pending_container.get("confirmation")
+    yield {"type": "final", "text": final_text, "pending_confirmation": pending}
+
+
+async def stream_single_agent(
+    user: User,
+    agent_id: str,
+    raw_text: str,
+    channel: str,
+    history: list,
+) -> AsyncIterator[dict[str, Any]]:
+    """Stream a turn addressed to one specific agent in the roster.
+
+    - ``tresqu`` and ``risk`` share the supervisor-path routing: Tresqu
+      orchestrates, and the risk profiler is started with ``RISK_PROFILE_COMMAND``
+      and continued via the active-session logic in ``stream_agent_events``.
+    - A specialist runs in isolation and streams its OWN tool calls so the user
+      sees that single agent work (no supervisor, no other agents).
+    """
+
+    try:
+        if agent_id in (SUPERVISOR_ID, "risk"):
+            async for event in stream_agent_events(user, raw_text, channel, history):
+                yield event
+            return
+
+        if agent_id in SPECIALIST_IDS:
+            async for event in _stream_specialist(
+                user, agent_id, channel, raw_text, history
+            ):
+                yield event
+            return
+
+        yield {"type": "error", "text": "Agente desconocido."}
+    except Exception as exc:  # noqa: BLE001 — never crash the stream
+        logger.exception("stream_single_agent error (%s): %s", agent_id, exc)
+        yield {"type": "error", "text": ERROR_MESSAGES["default"]}
+
+
+async def _stream_specialist(
+    user: User,
+    agent_id: str,
+    channel: str,
+    raw_text: str,
+    history: list,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run a single specialist subagent directly and stream its tool calls."""
+
+    try:
+        if agent_id == "expenses":
+            expense_categories_str, income_categories_str = await _load_categories(user)
+            agent = build_expenses_subagent(
+                user, expense_categories_str, income_categories_str, _user_today(user)
+            )
+        elif agent_id == "wallbit":
+            agent = build_wallbit_subagent(user, channel, raw_text)
+        elif agent_id == "analyst":
+            agent = build_analyst_subagent(user)
+        else:
+            yield {"type": "error", "text": "Agente desconocido."}
+            return
+
+        messages = list(history) + [HumanMessage(content=raw_text)]
+        final_text = ""
+        collected: list = []
+
+        async with asyncio.timeout(float(AGENT_EXECUTION_TIMEOUT)):
+            async for update in agent.astream(
+                {"messages": messages},
+                stream_mode="updates",
+                config={"recursion_limit": 20},
+            ):
+                for node_update in update.values():
+                    if not isinstance(node_update, dict):
+                        continue
+                    for msg in node_update.get("messages", []) or []:
+                        collected.append(msg)
+                        kind = msg.__class__.__name__
+                        if kind == "AIMessage":
+                            tool_calls = getattr(msg, "tool_calls", None) or []
+                            if tool_calls:
+                                for tc in tool_calls:
+                                    yield {
+                                        "type": "step",
+                                        "phase": "delegate",
+                                        "agent": agent_id,
+                                        "label": _humanize_tool(tc.get("name", "")),
+                                        "instruction": _tool_args_summary(tc.get("args")),
+                                    }
+                            else:
+                                text = _as_text(getattr(msg, "content", ""))
+                                if text.strip():
+                                    final_text = text
+                        elif kind == "ToolMessage":
+                            yield {
+                                "type": "step",
+                                "phase": "result",
+                                "agent": agent_id,
+                                "label": _humanize_tool(getattr(msg, "name", "") or ""),
+                                "summary": _as_text(getattr(msg, "content", ""))[
+                                    :_SUMMARY_MAX_CHARS
+                                ],
+                            }
+    except (asyncio.TimeoutError, TimeoutError):
+        logger.error("specialist %s stream timeout", agent_id)
+        yield {"type": "error", "text": ERROR_MESSAGES["timeout"]}
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("specialist %s stream failed: %s", agent_id, exc)
+        yield {"type": "error", "text": ERROR_MESSAGES["default"]}
+        return
+
+    # Only Wallbit can produce a real-money confirmation preview.
+    pending = extract_pending_confirmation(collected) if agent_id == "wallbit" else None
     yield {"type": "final", "text": final_text, "pending_confirmation": pending}

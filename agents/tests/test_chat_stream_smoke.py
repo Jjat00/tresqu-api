@@ -66,6 +66,16 @@ def _collect(chat_stream, user, text):
     return asyncio.run(_run_async())
 
 
+def _collect_single(chat_stream, user, agent_id, text):
+    async def _run_async():
+        return [
+            ev
+            async for ev in chat_stream.stream_single_agent(user, agent_id, text, "web", [])
+        ]
+
+    return asyncio.run(_run_async())
+
+
 def _run() -> int:
     from langchain_core.messages import AIMessage, ToolMessage
 
@@ -128,6 +138,38 @@ def _run() -> int:
     greet_events = _collect(chat_stream, user, "hola")
     _expect(not [e for e in greet_events if e["type"] == "step"], "no step events for a direct answer")
     _expect(greet_events[-1]["text"] == "¡Hola! ¿En qué te ayudo?", "final greeting text")
+
+    print("\n[direct specialist: wallbit] streams its OWN tool calls + pending")
+    specialist_updates = [
+        {"model": {"messages": [AIMessage(
+            content="",
+            tool_calls=[{"name": "wallbit_place_trade", "args": {"action": "BUY", "symbol": "AAPL", "amount_usd": 20}, "id": "9", "type": "tool_call"}],
+        )]}},
+        {"tools": {"messages": [ToolMessage(content="preview generado", name="wallbit_place_trade", tool_call_id="9")]}},
+        {"model": {"messages": [AIMessage(content="Listo, confirma la compra.")]}},
+    ]
+    spec_preview = {"requires_confirmation": True, "confirmation_id": 7, "preview": {"summary": "BUY AAPL 20 USD"}}
+    chat_stream.build_wallbit_subagent = lambda user, channel, msg: _FakeSupervisor(specialist_updates)  # type: ignore[assignment]
+    chat_stream.extract_pending_confirmation = lambda msgs: spec_preview  # type: ignore[assignment]
+    spec_events = _collect_single(chat_stream, user, "wallbit", "compra 20 de apple")
+    spec_steps = [e for e in spec_events if e["type"] == "step"]
+    spec_final = next(e for e in spec_events if e["type"] == "final")
+    _expect(bool(spec_steps) and spec_steps[0]["phase"] == "delegate" and spec_steps[0]["agent"] == "wallbit", "first step = the agent's own tool call")
+    _expect(spec_steps[0]["label"] == "Proponer operación", "tool name humanized")
+    _expect("action: BUY" in spec_steps[0]["instruction"], "tool args summarized")
+    _expect(any(e["phase"] == "result" for e in spec_steps), "tool result step present")
+    _expect(spec_final["text"] == "Listo, confirma la compra.", "specialist final text")
+    _expect(spec_final["pending_confirmation"] == spec_preview, "wallbit pending surfaced in direct chat")
+
+    print("\n[roster] team directory shape")
+    from agents.agent_directory import AGENTS, get_agent
+
+    ids = [a["id"] for a in AGENTS]
+    _expect(ids == ["tresqu", "expenses", "wallbit", "analyst", "risk"], "roster ids + order")
+    _expect(get_agent("wallbit") is not None and get_agent("wallbit").get("real_money") is True, "wallbit flagged real money")
+    _expect(get_agent("analyst").get("data_sources") == ["Perfil de riesgo", "Portafolio de Wallbit"], "analyst data sources for honest viz")
+    _expect(get_agent("risk").get("start_command") == "/perfil", "risk profiler start command exposed")
+    _expect(get_agent("nope") is None, "unknown agent → None")
 
     if failures:
         print(f"\nCHAT STREAM SMOKE FAILED — {len(failures)} assertion(s):")

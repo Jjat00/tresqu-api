@@ -2,6 +2,8 @@ from django.urls import path
 
 from .views import (
     AgentChatStreamView,
+    AgentDirectChatStreamView,
+    AgentRosterView,
     RiskAssessmentListView,
     RiskProfileEffectiveView,
     RiskProfileView,
@@ -9,6 +11,7 @@ from .views import (
 
 urlpatterns = [
     path("chat/stream/", AgentChatStreamView.as_view(), name="agents-chat-stream"),
+    path("roster/", AgentRosterView.as_view(), name="agents-roster"),
     path("risk-profile/", RiskProfileView.as_view(), name="agents-risk-profile"),
     path(
         "risk-profile/effective/",
@@ -19,5 +22,11 @@ urlpatterns = [
         "risk-profile/history/",
         RiskAssessmentListView.as_view(),
         name="agents-risk-profile-history",
+    ),
+    # Variable agent-id route last so it can't shadow the specific paths above.
+    path(
+        "<str:agent_id>/chat/stream/",
+        AgentDirectChatStreamView.as_view(),
+        name="agents-agent-chat-stream",
     ),
 ]

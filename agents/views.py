@@ -12,7 +12,8 @@ from rest_framework.renderers import BaseRenderer
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .chat_stream import stream_agent_events
+from .agent_directory import AGENTS, get_agent
+from .chat_stream import stream_agent_events, stream_single_agent
 from .effective_profile import get_effective_profile
 from .models import RiskAssessment, RiskProfile
 from .risk_inference import DEFAULT_MAX_AGE_DAYS
@@ -170,19 +171,24 @@ def _history_to_messages(history) -> list:
     return messages
 
 
-def _iter_agent_sse(user, message: str, history: list):
-    """Sync generator that bridges the async supervisor stream to SSE.
+def _iter_agent_sse(user, message: str, history: list, agent_id: str | None = None):
+    """Sync generator that bridges the async agent stream to SSE.
 
-    The supervisor is async; a WSGI worker is sync. We run ``stream_agent_events``
-    in a background thread (its own event loop) that pushes events onto a queue,
-    and this generator drains the queue, yielding ``text/event-stream`` frames as
-    they arrive — so the client sees each agent step live.
+    The agents are async; a WSGI worker is sync. We run the stream in a
+    background thread (its own event loop) that pushes events onto a queue, and
+    this generator drains the queue, yielding ``text/event-stream`` frames as
+    they arrive — so the client sees each step live. When ``agent_id`` is given,
+    the turn is addressed to that single agent; otherwise it goes to Tresqu.
     """
     events: "queue.Queue" = queue.Queue()
 
     def _worker():
         async def _pump():
-            async for event in stream_agent_events(user, message, "web", history):
+            if agent_id:
+                stream = stream_single_agent(user, agent_id, message, "web", history)
+            else:
+                stream = stream_agent_events(user, message, "web", history)
+            async for event in stream:
                 events.put(event)
 
         try:
@@ -226,6 +232,53 @@ class AgentChatStreamView(APIView):
         response = StreamingHttpResponse(
             _iter_agent_sse(
                 request.user, message, _history_to_messages(request.data.get("history"))
+            ),
+            content_type="text/event-stream",
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response
+
+
+class AgentRosterView(APIView):
+    """GET /api/agents/roster/ — the team of agents available in the web module."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        return Response({"agents": AGENTS}, status=status.HTTP_200_OK)
+
+
+class AgentDirectChatStreamView(APIView):
+    """POST /api/agents/<agent_id>/chat/stream/ — chat directly with one agent.
+
+    Same SSE contract as ``AgentChatStreamView``. For a specialist the stream
+    surfaces that agent's own tool calls; ``tresqu`` and ``risk`` reuse the
+    supervisor-path routing.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+    renderer_classes = [ServerSentEventRenderer]
+
+    def post(self, request, agent_id):
+        if get_agent(agent_id) is None:
+            return JsonResponse(
+                {"detail": "unknown agent"}, status=status.HTTP_404_NOT_FOUND
+            )
+
+        message = (request.data.get("message") or "").strip()
+        if not message:
+            return JsonResponse(
+                {"detail": "message is required"},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        response = StreamingHttpResponse(
+            _iter_agent_sse(
+                request.user,
+                message,
+                _history_to_messages(request.data.get("history")),
+                agent_id=agent_id,
             ),
             content_type="text/event-stream",
         )
