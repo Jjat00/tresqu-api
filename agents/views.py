@@ -1,10 +1,17 @@
+import asyncio
+import json
 import logging
+import queue
+import threading
 
+from django.http import StreamingHttpResponse
+from langchain_core.messages import AIMessage, HumanMessage
 from rest_framework import permissions, status
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from .chat_stream import stream_agent_events
 from .effective_profile import get_effective_profile
 from .models import RiskAssessment, RiskProfile
 from .risk_inference import DEFAULT_MAX_AGE_DAYS
@@ -125,3 +132,84 @@ class RiskProfileEffectiveView(APIView):
             refresh_inference=True,
         )
         return Response(effective.to_dict(), status=status.HTTP_200_OK)
+
+
+_STREAM_SENTINEL = object()
+
+
+def _history_to_messages(history) -> list:
+    """Convert the client-sent ``[{role, content}]`` list to LangChain messages."""
+    messages: list = []
+    for item in history or []:
+        if not isinstance(item, dict):
+            continue
+        content = (item.get("content") or "").strip()
+        if not content:
+            continue
+        if item.get("role") == "assistant":
+            messages.append(AIMessage(content=content))
+        else:
+            messages.append(HumanMessage(content=content))
+    return messages
+
+
+def _iter_agent_sse(user, message: str, history: list):
+    """Sync generator that bridges the async supervisor stream to SSE.
+
+    The supervisor is async; a WSGI worker is sync. We run ``stream_agent_events``
+    in a background thread (its own event loop) that pushes events onto a queue,
+    and this generator drains the queue, yielding ``text/event-stream`` frames as
+    they arrive — so the client sees each agent step live.
+    """
+    events: "queue.Queue" = queue.Queue()
+
+    def _worker():
+        async def _pump():
+            async for event in stream_agent_events(user, message, "web", history):
+                events.put(event)
+
+        try:
+            asyncio.run(_pump())
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("agent SSE worker crashed: %s", exc)
+            events.put({"type": "error", "text": "Lo siento, hubo un error inesperado."})
+        finally:
+            events.put(_STREAM_SENTINEL)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+    # Opening comment flushes headers and defeats some proxy buffering.
+    yield ": open\n\n"
+    while True:
+        event = events.get()
+        if event is _STREAM_SENTINEL:
+            break
+        yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+
+
+class AgentChatStreamView(APIView):
+    """POST /api/agents/chat/stream/ — run the supervisor and stream its trace.
+
+    Body: ``{"message": str, "history": [{"role": "user"|"assistant", "content": str}]}``.
+    Responds with Server-Sent Events: ``step`` (delegations + results), then a
+    single ``final`` (text + optional Wallbit ``pending_confirmation``), or ``error``.
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        message = (request.data.get("message") or "").strip()
+        if not message:
+            return Response(
+                {"detail": "message is required"}, status=status.HTTP_400_BAD_REQUEST
+            )
+
+        response = StreamingHttpResponse(
+            _iter_agent_sse(
+                request.user, message, _history_to_messages(request.data.get("history"))
+            ),
+            content_type="text/event-stream",
+        )
+        response["Cache-Control"] = "no-cache"
+        response["X-Accel-Buffering"] = "no"
+        return response

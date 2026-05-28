@@ -7,6 +7,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .agent_safety import AccountNotConnected, get_account_or_raise, get_pending_decision
+from .confirmation_actions import cancel_pending_decision
 from .client import (
     WallbitAuthError,
     WallbitClient,
@@ -257,6 +258,23 @@ class AgentConfirmView(APIView):
             },
             status=status.HTTP_200_OK if result.get("ok") else status.HTTP_502_BAD_GATEWAY,
         )
+
+
+class AgentCancelView(APIView):
+    """POST /api/wallbit/agent/cancel/{decision_id} — cancel a pending decision."""
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, decision_id: int):
+        try:
+            get_pending_decision(request.user, decision_id)
+        except AgentDecision.DoesNotExist:
+            return Response(
+                {"detail": "Decision not found or already resolved."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        message = cancel_pending_decision(request.user, decision_id)
+        return Response({"detail": message}, status=status.HTTP_200_OK)
 
 
 class AgentLimitsView(APIView):

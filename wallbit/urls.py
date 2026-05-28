@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    AgentCancelView,
     AgentConfirmView,
     AgentDecisionListView,
     AgentLimitsView,
@@ -29,6 +30,11 @@ urlpatterns = [
         "agent/confirm/<int:decision_id>/",
         AgentConfirmView.as_view(),
         name="wallbit-agent-confirm",
+    ),
+    path(
+        "agent/cancel/<int:decision_id>/",
+        AgentCancelView.as_view(),
+        name="wallbit-agent-cancel",
     ),
     path("limits/", AgentLimitsView.as_view(), name="wallbit-limits"),
     path("assets/search/", AssetSearchView.as_view(), name="wallbit-asset-search"),
