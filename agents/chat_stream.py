@@ -23,7 +23,6 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator
 
-from asgiref.sync import sync_to_async
 from langchain_core.messages import HumanMessage
 
 from telegrambot.config import (
@@ -36,7 +35,6 @@ from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
 from . import risk_profiler_service
 from .agent_directory import SPECIALIST_IDS, SUPERVISOR_ID, agent_meta_by_tool
-from .effective_profile import get_effective_profile
 from .services import (
     RISK_PROFILE_COMMAND,
     _load_categories,
@@ -46,6 +44,7 @@ from .services import (
 )
 from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
+from .subagents.risk import build_risk_subagent
 from .subagents.wallbit import build_wallbit_subagent
 from .supervisor import build_supervisor
 
@@ -70,6 +69,8 @@ _TOOL_LABELS: dict[str, str] = {
     "get_price_history": "Histórico de precios",
     "get_user_risk_profile": "Leer perfil de riesgo",
     "get_user_portfolio": "Leer portafolio",
+    "get_risk_profile_status": "Leer tu perfil",
+    "recompute_inference": "Recalcular inferencia",
 }
 
 
@@ -271,45 +272,6 @@ async def stream_single_agent(
         yield {"type": "error", "text": ERROR_MESSAGES["default"]}
 
 
-_TOLERANCE_ES = {
-    "conservative": "conservador",
-    "moderate": "moderado",
-    "aggressive": "agresivo",
-}
-
-
-def _format_risk_readout(eff) -> str:
-    """Plain-language description of the user's current effective risk profile."""
-
-    label = _TOLERANCE_ES.get(eff.tolerance, eff.tolerance)
-
-    if eff.source == "default":
-        return (
-            "Aún no tienes un perfil de riesgo definido. Toca *Iniciar evaluación* "
-            "para armarlo con el cuestionario, o registra más movimientos para que "
-            "se infiera automáticamente."
-        )
-
-    if eff.source == "inferred":
-        return (
-            f"De momento tu perfil es *{label}*, inferido automáticamente de tus "
-            "registros (todavía sin cuestionario). Para mayor precisión, toca "
-            "*Iniciar evaluación* y responde las 5 preguntas."
-        )
-
-    fuente = {
-        "declared": "según tu evaluación",
-        "agreement": "confirmado por tu evaluación y tus registros",
-        "safety_cap": "ajustado a un perfil más prudente por tu situación actual",
-    }.get(eff.source, "según tu evaluación")
-
-    text = f"Sí, ya tienes un perfil: *{label}* ({fuente})."
-    if eff.warning:
-        text += f"\n\n_{eff.warning}_"
-    text += "\n\n¿Quieres reevaluarlo? Toca *Iniciar evaluación*."
-    return text
-
-
 async def _stream_risk(
     user: User,
     channel: str,
@@ -318,8 +280,11 @@ async def _stream_risk(
 ) -> AsyncIterator[dict[str, Any]]:
     """Handle the risk-profile agent directly (never falls back to the supervisor).
 
-    Starts the guided Q&A with ``RISK_PROFILE_COMMAND``, continues an active
-    session, and otherwise answers about the user's current profile from data.
+    - ``RISK_PROFILE_COMMAND`` (the "Iniciar/Actualizar evaluación" button) starts
+      the guided Q&A; an active session continues it.
+    - Any other message runs the read-only conversational risk subagent, which
+      reads the declared + inferred profile and explains/guides — it never sets
+      the profile (that's only the audited Q&A).
     """
 
     normalized = raw_text.strip().lower()
@@ -340,16 +305,9 @@ async def _stream_risk(
         }
         return
 
-    try:
-        eff = await sync_to_async(get_effective_profile)(user, refresh_inference=False)
-        text = _format_risk_readout(eff)
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("risk profile readout failed for user=%s: %s", user.id, exc)
-        text = (
-            "No pude leer tu perfil ahora mismo. Puedes evaluarlo tocando "
-            "*Iniciar evaluación*."
-        )
-    yield {"type": "final", "text": text, "pending_confirmation": None}
+    agent = build_risk_subagent(user)
+    async for event in _stream_agent_run(agent, "risk", raw_text, history):
+        yield event
 
 
 async def _stream_specialist(
@@ -361,24 +319,45 @@ async def _stream_specialist(
 ) -> AsyncIterator[dict[str, Any]]:
     """Run a single specialist subagent directly and stream its tool calls."""
 
+    if agent_id == "expenses":
+        expense_categories_str, income_categories_str = await _load_categories(user)
+        agent = build_expenses_subagent(
+            user, expense_categories_str, income_categories_str, _user_today(user)
+        )
+    elif agent_id == "wallbit":
+        agent = build_wallbit_subagent(user, channel, raw_text)
+    elif agent_id == "analyst":
+        agent = build_analyst_subagent(user)
+    else:
+        yield {"type": "error", "text": "Agente desconocido."}
+        return
+
+    # Only Wallbit can produce a real-money confirmation preview.
+    async for event in _stream_agent_run(
+        agent, agent_id, raw_text, history, capture_pending=(agent_id == "wallbit")
+    ):
+        yield event
+
+
+async def _stream_agent_run(
+    agent,
+    agent_id: str,
+    raw_text: str,
+    history: list,
+    *,
+    capture_pending: bool = False,
+) -> AsyncIterator[dict[str, Any]]:
+    """Run a single agent with ``astream`` and emit its tool steps + final.
+
+    Shared by the specialist and risk conversational chats: each tool call the
+    agent makes becomes a step so the user sees that one agent work.
+    """
+
+    messages = list(history) + [HumanMessage(content=raw_text)]
+    final_text = ""
+    collected: list = []
+
     try:
-        if agent_id == "expenses":
-            expense_categories_str, income_categories_str = await _load_categories(user)
-            agent = build_expenses_subagent(
-                user, expense_categories_str, income_categories_str, _user_today(user)
-            )
-        elif agent_id == "wallbit":
-            agent = build_wallbit_subagent(user, channel, raw_text)
-        elif agent_id == "analyst":
-            agent = build_analyst_subagent(user)
-        else:
-            yield {"type": "error", "text": "Agente desconocido."}
-            return
-
-        messages = list(history) + [HumanMessage(content=raw_text)]
-        final_text = ""
-        collected: list = []
-
         async with asyncio.timeout(float(AGENT_EXECUTION_TIMEOUT)):
             async for update in agent.astream(
                 {"messages": messages},
@@ -417,14 +396,13 @@ async def _stream_specialist(
                                 ],
                             }
     except (asyncio.TimeoutError, TimeoutError):
-        logger.error("specialist %s stream timeout", agent_id)
+        logger.error("%s stream timeout", agent_id)
         yield {"type": "error", "text": ERROR_MESSAGES["timeout"]}
         return
     except Exception as exc:  # noqa: BLE001
-        logger.exception("specialist %s stream failed: %s", agent_id, exc)
+        logger.exception("%s stream failed: %s", agent_id, exc)
         yield {"type": "error", "text": ERROR_MESSAGES["default"]}
         return
 
-    # Only Wallbit can produce a real-money confirmation preview.
-    pending = extract_pending_confirmation(collected) if agent_id == "wallbit" else None
+    pending = extract_pending_confirmation(collected) if capture_pending else None
     yield {"type": "final", "text": final_text, "pending_confirmation": pending}
