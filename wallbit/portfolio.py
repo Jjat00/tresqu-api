@@ -306,7 +306,12 @@ _PERIOD_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "all": 3650}
 
 
 def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
-    """Daily series of cumulative net invested capital.
+    """Daily series of cumulative net invested capital in stocks/ETFs.
+
+    Counts ONLY BUY/SELL — Robo Advisor deposits/withdrawals are excluded so
+    this curve matches the "Capital invertido" hero KPI (``net_invested_usd``,
+    also BUY/SELL only). Mixing the robo in would inflate the line against a
+    hero card that doesn't, showing two different "capital invertido" numbers.
 
     Groups by the real trade date (``executed_at``, falling back to
     ``created_at`` for rows that pre-date the field). One cumulative point
@@ -316,7 +321,7 @@ def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
     since = timezone.now() - timedelta(days=days)
 
     qs = (
-        Investment.objects.filter(user=user)
+        Investment.objects.filter(user=user, action__in=[Investment.BUY, Investment.SELL])
         .annotate(effective_at=Coalesce("executed_at", "created_at"))
         .filter(effective_at__gte=since)
         .order_by("effective_at")
@@ -325,7 +330,7 @@ def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
 
     daily_delta: dict[date, Decimal] = defaultdict(lambda: Decimal(0))
     for effective_at, action, amount in qs:
-        sign = 1 if action in (Investment.BUY, Investment.DEPOSIT) else -1
+        sign = 1 if action == Investment.BUY else -1
         daily_delta[effective_at.date()] += Decimal(sign) * Decimal(amount)
 
     # Seed cumulative with historical sum before `since` so the series starts
@@ -335,8 +340,8 @@ def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
         .annotate(effective_at=Coalesce("executed_at", "created_at"))
         .filter(effective_at__lt=since)
         .aggregate(
-            buys=Sum("amount_usd", filter=_action_filter(Investment.BUY, Investment.DEPOSIT)),
-            sells=Sum("amount_usd", filter=_action_filter(Investment.SELL, Investment.WITHDRAW)),
+            buys=Sum("amount_usd", filter=_action_filter(Investment.BUY)),
+            sells=Sum("amount_usd", filter=_action_filter(Investment.SELL)),
         )
     )
     cumulative = Decimal(seed.get("buys") or 0) - Decimal(seed.get("sells") or 0)
