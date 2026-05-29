@@ -113,6 +113,10 @@ class PortfolioSummary:
     holdings_count: int
     cash: list[CashBalance] = field(default_factory=list)
     robo_net_contributed_usd: Decimal = Decimal(0)
+    # Uninvested USD sitting inside the investment account (Wallbit returns it
+    # as a USD pseudo-position in /balance/stocks) — "libre para invertir".
+    # Distinct from ``cash`` (/balance/checking), the main/non-investment account.
+    investment_cash_usd: Decimal = Decimal(0)
     last_sync_at: datetime | None = None
 
 
@@ -246,6 +250,7 @@ def get_summary(user: User) -> PortfolioSummary:
     current_value = Decimal(0)
     cash: list[CashBalance] = []
     holdings_count = 0
+    investment_cash = Decimal(0)
 
     with WallbitClient(api_key) as client:
         cash = _cash_balances(client)
@@ -262,7 +267,13 @@ def get_summary(user: User) -> PortfolioSummary:
             for pos in positions:
                 symbol = (pos.get("symbol") or "").upper()
                 shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
-                if not symbol or symbol in _CASH_SYMBOLS or shares <= 0:
+                if not symbol or shares <= 0:
+                    continue
+                if symbol in _CASH_SYMBOLS:
+                    # Uninvested cash inside the investment account: for USD the
+                    # "shares" value IS the dollar amount free to invest.
+                    if symbol == "USD":
+                        investment_cash += shares
                     continue
                 asset = _cached_asset(client, symbol) or {}
                 price = _to_decimal(asset.get("price") or asset.get("current_price"))
@@ -286,6 +297,7 @@ def get_summary(user: User) -> PortfolioSummary:
         holdings_count=holdings_count,
         cash=cash,
         robo_net_contributed_usd=robo["net_contributed_usd"],
+        investment_cash_usd=investment_cash,
         last_sync_at=account.last_sync_at,
     )
 

@@ -99,11 +99,17 @@ def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
     - ``current_value_usd``: lo que vale hoy.
     - ``pnl_usd`` / ``pnl_pct``: ganancia (+) o pérdida (−) en USD y en %.
 
-    Incluye ``stocks_total`` (suma de acciones/ETFs), ``cash`` (efectivo por
-    moneda) y ``robo_advisor``. OJO con el Robo Advisor: Wallbit NO expone su
-    valor actual ni su P&L, así que solo devolvemos ``net_contributed_usd``
-    (lo aportado neto) con ``live_valuation_available=false``. NUNCA lo
-    presentes como ganancia/pérdida ni inventes su valor.
+    Incluye ``stocks_total`` (suma de acciones/ETFs), ``cash`` y
+    ``robo_advisor``. Hay DOS bolsas de efectivo distintas en ``cash``:
+    - ``investment_account_free_usd``: efectivo SIN invertir dentro de la
+      cuenta de inversiones — "libre para invertir".
+    - ``main_account_usd``: efectivo en la cuenta principal, fuera de la cuenta
+      de inversiones.
+    No los mezcles ni los confundas con el Robo Advisor. OJO con el Robo
+    Advisor: Wallbit NO expone su valor actual ni su P&L, así que solo
+    devolvemos ``net_contributed_usd`` (lo aportado neto) con
+    ``live_valuation_available=false``. NUNCA lo presentes como
+    ganancia/pérdida ni inventes su valor.
     """
     try:
         user = User.objects.get(external_id=user_external_id)
@@ -111,7 +117,7 @@ def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
         return {"ok": False, "error": "user_not_found"}
 
     from .agent_safety import AccountNotConnected
-    from .portfolio import get_holdings, get_robo_advisor_position
+    from .portfolio import get_holdings, get_robo_advisor_position, safe_get_summary
 
     try:
         holdings = get_holdings(user)
@@ -146,6 +152,15 @@ def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
 
     robo = get_robo_advisor_position(user)
 
+    summary = safe_get_summary(user)
+    main_account_usd = Decimal(0)
+    investment_free_usd = Decimal(0)
+    if summary is not None:
+        for c in summary.cash:
+            if c.currency == "USD":
+                main_account_usd += c.amount
+        investment_free_usd = summary.investment_cash_usd
+
     return {
         "ok": True,
         "connected": True,
@@ -155,6 +170,15 @@ def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
             "current_value_usd": _money_str(stocks_value),
             "pnl_usd": _money_str(stocks_pnl),
             "pnl_pct": stocks_pnl_pct,
+        },
+        "cash": {
+            "investment_account_free_usd": _money_str(investment_free_usd),
+            "main_account_usd": _money_str(main_account_usd),
+            "note": (
+                "investment_account_free_usd = efectivo sin invertir DENTRO de "
+                "la cuenta de inversiones (libre para invertir). main_account_usd "
+                "= efectivo en la cuenta principal, fuera de inversiones."
+            ),
         },
         "robo_advisor": {
             "net_contributed_usd": _money_str(robo["net_contributed_usd"]),

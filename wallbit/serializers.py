@@ -96,6 +96,7 @@ class PortfolioSummarySerializer(serializers.Serializer):
     holdings_count = serializers.IntegerField()
     cash = CashBalanceSerializer(many=True)
     robo_net_contributed_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    investment_cash_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     last_sync_at = serializers.DateTimeField(allow_null=True)
 
 
