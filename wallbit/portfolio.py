@@ -112,6 +112,7 @@ class PortfolioSummary:
     pnl_pct: float
     holdings_count: int
     cash: list[CashBalance] = field(default_factory=list)
+    robo_net_contributed_usd: Decimal = Decimal(0)
     last_sync_at: datetime | None = None
 
 
@@ -223,15 +224,20 @@ def get_summary(user: User) -> PortfolioSummary:
     account = get_account_or_raise(user)
     api_key = decrypt_api_key(account.encrypted_api_key)
 
+    # Capital invertido en ACCIONES/ETFs únicamente (BUY/SELL). Los depósitos
+    # al Robo Advisor (DEPOSIT/WITHDRAW) NO se suman aquí: su valor actual no
+    # se puede medir (Wallbit no lo expone) y mezclarlo inflaba el "invertido"
+    # contra un "valor actual" que solo cuenta acciones, mostrando una pérdida
+    # falsa. El Robo Advisor se reporta aparte (robo_net_contributed_usd).
     invested_total = (
         Investment.objects.filter(
-            user=user, action__in=[Investment.BUY, Investment.DEPOSIT]
+            user=user, action=Investment.BUY
         ).aggregate(s=Sum("amount_usd"))["s"]
         or Decimal(0)
     )
     withdrawn_total = (
         Investment.objects.filter(
-            user=user, action__in=[Investment.SELL, Investment.WITHDRAW]
+            user=user, action=Investment.SELL
         ).aggregate(s=Sum("amount_usd"))["s"]
         or Decimal(0)
     )
@@ -268,6 +274,8 @@ def get_summary(user: User) -> PortfolioSummary:
         float(pnl / net_invested * 100) if net_invested > 0 else 0.0
     )
 
+    robo = get_robo_advisor_position(user)
+
     return PortfolioSummary(
         total_invested_usd=Decimal(invested_total),
         total_withdrawn_usd=Decimal(withdrawn_total),
@@ -277,6 +285,7 @@ def get_summary(user: User) -> PortfolioSummary:
         pnl_pct=pnl_pct,
         holdings_count=holdings_count,
         cash=cash,
+        robo_net_contributed_usd=robo["net_contributed_usd"],
         last_sync_at=account.last_sync_at,
     )
 
