@@ -116,14 +116,19 @@ def make_analyst_tools(user_external_id: str, *, user: User | None = None) -> li
 
     @tool
     def get_user_portfolio() -> dict[str, Any]:
-        """Portafolio Wallbit del usuario con el peso (%) de cada posición.
+        """Portafolio Wallbit del usuario: peso (%) y ganancia/pérdida por posición.
 
-        Úsalo para contextualizar ("esta acción ya pesa X% de tu portafolio").
+        Úsalo para contextualizar ("esta acción ya pesa X% de tu portafolio",
+        "vas +Y% en NVDA"). Trae por símbolo el número EXACTO de acciones (con
+        todos los decimales), precio promedio, valor actual, invertido y P&L en
+        USD y %, todo calculado en el backend — NO lo recalcules ni redondees.
         Devuelve connected=false si el usuario no tiene Wallbit conectado.
         """
         resolved = user or _resolve_user(user_external_id)
         if resolved is None:
             return {"ok": False, "error": "user_not_found"}
+
+        from decimal import Decimal
 
         from wallbit.portfolio import safe_get_holdings, safe_get_summary
 
@@ -132,22 +137,27 @@ def make_analyst_tools(user_external_id: str, *, user: User | None = None) -> li
             return {"ok": True, "connected": False}
 
         holdings = safe_get_holdings(resolved)
-        total = float(summary.current_value_usd)
+        total = sum((h.market_value for h in holdings), Decimal(0))
         positions = []
         for h in holdings:
-            mv = float(h.market_value)
+            weight = float(h.market_value / total * 100) if total > 0 else 0.0
             positions.append({
                 "symbol": h.symbol,
                 "name": h.name,
                 "kind": h.kind,
-                "market_value_usd": round(mv, 2),
-                "weight_pct": round(mv / total * 100, 2) if total > 0 else 0.0,
+                "shares": format(h.shares, "f"),
+                "avg_cost_usd": str(h.avg_cost.quantize(Decimal("0.01"))),
+                "current_price_usd": str(h.current_price.quantize(Decimal("0.01"))),
+                "invested_usd": str(h.cost_basis.quantize(Decimal("0.01"))),
+                "current_value_usd": str(h.market_value.quantize(Decimal("0.01"))),
+                "pnl_usd": str(h.pnl_usd.quantize(Decimal("0.01"))),
                 "pnl_pct": round(h.pnl_pct, 2),
+                "weight_pct": round(weight, 2),
             })
         return {
             "ok": True,
             "connected": True,
-            "total_value_usd": round(total, 2),
+            "total_value_usd": str(total.quantize(Decimal("0.01"))),
             "holdings_count": summary.holdings_count,
             "holdings": positions,
         }
