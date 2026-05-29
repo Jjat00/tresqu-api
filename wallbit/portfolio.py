@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 _CACHE_TTL_SECONDS = 60
 _asset_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+# Wallbit's /balance/stocks returns cash balances as pseudo-positions whose
+# "symbol" is the currency code (e.g. USD). Those are NOT holdings — they are
+# the checking balance, already reported via /balance/checking — so we skip
+# them when building positions/P&L (otherwise the agent confuses cash with a
+# stock or with the Robo Advisor).
+_CASH_SYMBOLS = {
+    "USD", "EUR", "GBP", "ARS", "BRL", "MXN", "COP",
+    "CLP", "UYU", "PEN", "USDT", "USDC",
+}
+
 
 def _cached_asset(client: WallbitClient, symbol: str) -> dict[str, Any] | None:
     now = time.time()
@@ -147,7 +157,7 @@ def get_holdings(user: User) -> list[Holding]:
         for pos in positions:
             symbol = (pos.get("symbol") or "").upper()
             shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
-            if not symbol or shares <= 0:
+            if not symbol or symbol in _CASH_SYMBOLS or shares <= 0:
                 continue
 
             asset = _cached_asset(client, symbol) or {}
@@ -158,12 +168,17 @@ def get_holdings(user: User) -> list[Holding]:
             net_shares, net_cost = _cost_basis_for_symbol(user, symbol)
             # Prefer Wallbit's reported shares; fall back to what we computed
             effective_shares = shares if shares > 0 else max(net_shares, Decimal(0))
+            # Cost basis = the real USD put into the position (net_cost). We use
+            # it directly instead of avg_cost * shares: amount_usd is recorded
+            # exactly, while the stored share counts may have been rounded, and
+            # multiplying an inflated avg_cost by the precise Wallbit share count
+            # would amplify that rounding into a wrong P&L.
+            cost_basis = net_cost if net_cost > 0 else Decimal(0)
             avg_cost = (
-                net_cost / net_shares
-                if net_shares > 0
+                cost_basis / effective_shares
+                if effective_shares > 0 and cost_basis > 0
                 else Decimal(0)
             )
-            cost_basis = avg_cost * effective_shares
             market_value = current_price * effective_shares
             pnl_usd = market_value - cost_basis
             pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
@@ -241,7 +256,7 @@ def get_summary(user: User) -> PortfolioSummary:
             for pos in positions:
                 symbol = (pos.get("symbol") or "").upper()
                 shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
-                if not symbol or shares <= 0:
+                if not symbol or symbol in _CASH_SYMBOLS or shares <= 0:
                     continue
                 asset = _cached_asset(client, symbol) or {}
                 price = _to_decimal(asset.get("price") or asset.get("current_price"))
