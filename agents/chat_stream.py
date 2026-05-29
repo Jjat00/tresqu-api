@@ -112,6 +112,29 @@ def _as_text(content: Any) -> str:
     return str(content or "")
 
 
+def _answer_token(chunk: Any) -> str | None:
+    """Extract the answer-token text from a ``messages``-mode chunk, or None.
+
+    We token-stream only the *user-facing* answer: chunks emitted by the
+    outermost graph's ``model`` node that carry content and aren't a tool call.
+    The delegation (tool-call) chunk has ``tool_calls`` set, tool results live on
+    the ``tools`` node, and nested subagents run via ``ainvoke`` so their tokens
+    never reach this stream — but we still require depth-0 (no ``|`` in the
+    LangGraph checkpoint namespace) so a future nested model can't leak in.
+    """
+    try:
+        msg, meta = chunk
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(meta, dict) or meta.get("langgraph_node") != "model":
+        return None
+    if "|" in (meta.get("langgraph_checkpoint_ns") or ""):
+        return None
+    if getattr(msg, "tool_calls", None):
+        return None
+    return _as_text(getattr(msg, "content", "")) or None
+
+
 async def stream_agent_events(
     user: User,
     raw_text: str,
@@ -168,12 +191,18 @@ async def _stream_supervisor(
 
     try:
         async with asyncio.timeout(float(AGENT_EXECUTION_TIMEOUT)):
-            async for update in supervisor.astream(
+            async for mode, data in supervisor.astream(
                 {"messages": messages},
-                stream_mode="updates",
+                stream_mode=["updates", "messages"],
                 config={"recursion_limit": AGENT_MAX_ITERATIONS},
             ):
-                for node_update in update.values():
+                if mode == "messages":
+                    token = _answer_token(data)
+                    if token:
+                        yield {"type": "token", "text": token}
+                    continue
+                # mode == "updates": one entry per graph node that just ran.
+                for node_update in data.values():
                     if not isinstance(node_update, dict):
                         continue
                     for msg in node_update.get("messages", []) or []:
@@ -359,12 +388,18 @@ async def _stream_agent_run(
 
     try:
         async with asyncio.timeout(float(AGENT_EXECUTION_TIMEOUT)):
-            async for update in agent.astream(
+            async for mode, data in agent.astream(
                 {"messages": messages},
-                stream_mode="updates",
+                stream_mode=["updates", "messages"],
                 config={"recursion_limit": 20},
             ):
-                for node_update in update.values():
+                if mode == "messages":
+                    token = _answer_token(data)
+                    if token:
+                        yield {"type": "token", "text": token}
+                    continue
+                # mode == "updates": one entry per graph node that just ran.
+                for node_update in data.values():
                     if not isinstance(node_update, dict):
                         continue
                     for msg in node_update.get("messages", []) or []:

@@ -36,15 +36,33 @@ class _StubUser:
     id: int = 1
 
 
-class _FakeSupervisor:
-    """Yields synthetic ``stream_mode='updates'`` chunks like create_agent does."""
+def _token_chunk(text, ns="model:1"):
+    """Build a ``messages``-mode tuple like create_agent emits per answer token."""
+    from langchain_core.messages import AIMessageChunk
 
-    def __init__(self, updates):
+    return (
+        "messages",
+        (
+            AIMessageChunk(content=text),
+            {"langgraph_node": "model", "langgraph_checkpoint_ns": ns},
+        ),
+    )
+
+
+class _FakeSupervisor:
+    """Yields synthetic ``stream_mode=['updates','messages']`` output like
+    create_agent does: each update as ``('updates', update)``, plus any scripted
+    answer tokens as ``('messages', (chunk, meta))``."""
+
+    def __init__(self, updates, tokens=None):
         self._updates = updates
+        self._tokens = tokens or []
 
     async def astream(self, _input, *, stream_mode=None, config=None):
         for update in self._updates:
-            yield update
+            yield ("updates", update)
+        for tok in self._tokens:
+            yield _token_chunk(tok)
 
 
 def _patch_common(chat_stream):
@@ -93,18 +111,28 @@ def _run() -> int:
         {"tools": {"messages": [ToolMessage(content="Saldo: 100 USD", name="manage_wallbit", tool_call_id="1")]}},
         {"model": {"messages": [AIMessage(content="Tienes 100 USD disponibles.")]}},
     ]
-    chat_stream.build_supervisor = lambda **kw: (_FakeSupervisor(updates), {"confirmation": None}, {"first_step": None})  # type: ignore[assignment]
+    answer_tokens = ["Tienes ", "100 USD ", "disponibles."]
+    chat_stream.build_supervisor = lambda **kw: (_FakeSupervisor(updates, tokens=answer_tokens), {"confirmation": None}, {"first_step": None})  # type: ignore[assignment]
     events = _collect(chat_stream, user, "cuánto tengo en wallbit")
 
     steps = [e for e in events if e["type"] == "step"]
     finals = [e for e in events if e["type"] == "final"]
+    tokens = [e for e in events if e["type"] == "token"]
     _expect(len(finals) == 1, "exactly one final event")
     _expect(steps and steps[0]["phase"] == "delegate" and steps[0]["agent"] == "wallbit", "first step = delegate to wallbit")
     _expect(steps[0]["instruction"] == "dame mi saldo", "delegate carries the instruction")
     _expect(steps[0]["label"] == "Wallbit", "agent label resolved")
     _expect(any(e["phase"] == "result" and e["agent"] == "wallbit" for e in steps), "result step for wallbit")
+    _expect([t["text"] for t in tokens] == answer_tokens, "answer streamed token-by-token")
+    _expect("".join(t["text"] for t in tokens) == finals[0]["text"], "tokens concatenate to the final text")
     _expect(finals[0]["text"] == "Tienes 100 USD disponibles.", "final text = last AIMessage content")
     _expect(finals[0]["pending_confirmation"] is None, "no pending confirmation")
+
+    # The token filter must ignore tool-call chunks and nested-subagent tokens.
+    from langchain_core.messages import AIMessageChunk
+    _expect(chat_stream._answer_token((AIMessageChunk(content="hola"), {"langgraph_node": "model", "langgraph_checkpoint_ns": "model:1"})) == "hola", "_answer_token accepts a depth-0 model token")
+    _expect(chat_stream._answer_token((AIMessageChunk(content="leak"), {"langgraph_node": "model", "langgraph_checkpoint_ns": "tools:1|model:2"})) is None, "_answer_token rejects a nested-subagent token")
+    _expect(chat_stream._answer_token((AIMessageChunk(content="x", tool_calls=[{"name": "t", "args": {}, "id": "1", "type": "tool_call"}]), {"langgraph_node": "model", "langgraph_checkpoint_ns": "model:1"})) is None, "_answer_token rejects a tool-call chunk")
 
     print("\n[wallbit buy] pending_confirmation surfaced in final")
     pending = {"confirmation": None}
@@ -125,7 +153,7 @@ def _run() -> int:
             for i, update in enumerate(self._updates):
                 if i == 1:
                     pending["confirmation"] = preview
-                yield update
+                yield ("updates", update)
 
     chat_stream.build_supervisor = lambda **kw: (_MutatingSupervisor(buy_updates), pending, {"first_step": None})  # type: ignore[assignment]
     buy_events = _collect(chat_stream, user, "compra 20 de apple")
