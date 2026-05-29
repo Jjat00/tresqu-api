@@ -13,6 +13,7 @@ and require the confirmation flow described in
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
 from typing import Any
 
 from langchain_core.tools import tool
@@ -24,6 +25,21 @@ from .crypto import decrypt_api_key
 from .models import WallbitAccount
 
 logger = logging.getLogger(__name__)
+
+
+def _shares_str(value: Decimal) -> str:
+    """Full-precision share count as a plain (non-scientific) string.
+
+    Fractional shares matter to the last decimal: 0.02598 is NOT 0.02. We
+    serialize the exact value so the LLM reports it verbatim instead of
+    truncating it during arithmetic.
+    """
+    return format(value, "f")
+
+
+def _money_str(value: Decimal) -> str:
+    """USD amount rounded to cents, as a string (avoids float drift)."""
+    return str(value.quantize(Decimal("0.01")))
 
 
 def _load_client(user_external_id: str) -> WallbitClient:
@@ -63,6 +79,92 @@ def wallbit_get_balance(user_external_id: str) -> dict[str, Any]:
         "ok": True,
         "checking": checking.get("data", checking) if isinstance(checking, dict) else checking,
         "stocks": stocks.get("data", stocks) if isinstance(stocks, dict) else stocks,
+    }
+
+
+@tool
+def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
+    """Portafolio Wallbit con la ganancia/pérdida YA CALCULADA por el backend.
+
+    ÚSALA SIEMPRE para "¿cuánto gané/perdí?", "¿cuánto valen mis
+    inversiones?", "resumen de mis inversiones", "¿cuánto tengo en NVDA en
+    USD?". Devuelve, por cada acción/ETF, números ya calculados con precisión
+    decimal — NO los recalcules ni redondees:
+
+    - ``shares``: número EXACTO de acciones, con todos los decimales
+      (0.02598 NO es 0.02).
+    - ``avg_cost_usd``: precio promedio al que compraste.
+    - ``current_price_usd``: precio actual.
+    - ``invested_usd``: lo que pusiste (costo).
+    - ``current_value_usd``: lo que vale hoy.
+    - ``pnl_usd`` / ``pnl_pct``: ganancia (+) o pérdida (−) en USD y en %.
+
+    Incluye ``stocks_total`` (suma de acciones/ETFs), ``cash`` (efectivo por
+    moneda) y ``robo_advisor``. OJO con el Robo Advisor: Wallbit NO expone su
+    valor actual ni su P&L, así que solo devolvemos ``net_contributed_usd``
+    (lo aportado neto) con ``live_valuation_available=false``. NUNCA lo
+    presentes como ganancia/pérdida ni inventes su valor.
+    """
+    try:
+        user = User.objects.get(external_id=user_external_id)
+    except User.DoesNotExist:
+        return {"ok": False, "error": "user_not_found"}
+
+    from .agent_safety import AccountNotConnected
+    from .portfolio import get_holdings, get_robo_advisor_position
+
+    try:
+        holdings = get_holdings(user)
+    except AccountNotConnected:
+        return {"ok": True, "connected": False}
+    except WallbitError as exc:
+        logger.warning("wallbit_get_portfolio failed", exc_info=exc)
+        return _error_payload(exc)
+
+    positions = [
+        {
+            "symbol": h.symbol,
+            "name": h.name,
+            "kind": h.kind,
+            "shares": _shares_str(h.shares),
+            "avg_cost_usd": _money_str(h.avg_cost),
+            "current_price_usd": _money_str(h.current_price),
+            "invested_usd": _money_str(h.cost_basis),
+            "current_value_usd": _money_str(h.market_value),
+            "pnl_usd": _money_str(h.pnl_usd),
+            "pnl_pct": round(h.pnl_pct, 2),
+        }
+        for h in holdings
+    ]
+
+    stocks_value = sum((h.market_value for h in holdings), Decimal(0))
+    stocks_cost = sum((h.cost_basis for h in holdings), Decimal(0))
+    stocks_pnl = stocks_value - stocks_cost
+    stocks_pnl_pct = (
+        round(float(stocks_pnl / stocks_cost * 100), 2) if stocks_cost > 0 else 0.0
+    )
+
+    robo = get_robo_advisor_position(user)
+
+    return {
+        "ok": True,
+        "connected": True,
+        "holdings": positions,
+        "stocks_total": {
+            "invested_usd": _money_str(stocks_cost),
+            "current_value_usd": _money_str(stocks_value),
+            "pnl_usd": _money_str(stocks_pnl),
+            "pnl_pct": stocks_pnl_pct,
+        },
+        "robo_advisor": {
+            "net_contributed_usd": _money_str(robo["net_contributed_usd"]),
+            "live_valuation_available": robo["live_valuation_available"],
+            "has_activity": robo["has_activity"],
+            "note": (
+                "Wallbit no expone el valor actual ni la ganancia/pérdida del "
+                "Robo Advisor; solo se conoce el neto aportado."
+            ),
+        },
     }
 
 
@@ -183,6 +285,7 @@ def wallbit_get_asset(user_external_id: str, symbol: str) -> dict[str, Any]:
 
 WALLBIT_TOOLS = [
     wallbit_get_balance,
+    wallbit_get_portfolio,
     wallbit_list_transactions,
     wallbit_search_assets,
     wallbit_get_asset,
@@ -210,6 +313,20 @@ def make_wallbit_tools(
     def wallbit_get_balance_for_user() -> dict[str, Any]:
         """Devuelve el saldo Wallbit del usuario actual: efectivo por moneda y acciones por símbolo."""
         return wallbit_get_balance.invoke({"user_external_id": user_external_id})
+
+    @tool
+    def wallbit_get_portfolio_for_user() -> dict[str, Any]:
+        """Portafolio Wallbit del usuario actual con ganancia/pérdida YA CALCULADA.
+
+        ÚSALA SIEMPRE para "¿cuánto gané/perdí?", "¿cuánto valen mis
+        inversiones?", "resumen de inversiones", "¿cuánto tengo en X en USD?".
+        Trae por símbolo: shares (todos los decimales), avg_cost_usd,
+        current_price_usd, invested_usd, current_value_usd, pnl_usd, pnl_pct,
+        más stocks_total, cash y robo_advisor. NUNCA recalcules ni redondees
+        estos números. El Robo Advisor solo trae el neto aportado (Wallbit no
+        expone su valor ni su P&L).
+        """
+        return wallbit_get_portfolio.invoke({"user_external_id": user_external_id})
 
     @tool
     def wallbit_list_transactions_for_user(
@@ -279,6 +396,7 @@ def make_wallbit_tools(
 
     bound = [
         wallbit_get_balance_for_user,
+        wallbit_get_portfolio_for_user,
         wallbit_list_transactions_for_user,
         wallbit_search_assets_for_user,
         wallbit_get_asset_for_user,

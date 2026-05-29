@@ -320,6 +320,43 @@ def _action_filter(*actions: str):
     return q
 
 
+def get_robo_advisor_position(user: User) -> dict[str, Any]:
+    """Net amount the user has put into Robo Advisors / Chests.
+
+    Wallbit's public API exposes **no** endpoint for a robo advisor's current
+    value (only ``POST /roboadvisor/deposit`` and ``/withdraw``), so we cannot
+    know its live valuation or P&L. We only report the net contributed
+    (deposits − withdrawals) from the Investment history we mirror locally.
+    Callers must surface ``live_valuation_available=False`` and never present
+    the net as a gain/loss.
+    """
+    deposited = (
+        Investment.objects.filter(
+            user=user,
+            kind__in=[Investment.ROBO, Investment.CHEST],
+            action=Investment.DEPOSIT,
+        ).aggregate(s=Sum("amount_usd"))["s"]
+        or Decimal(0)
+    )
+    withdrawn = (
+        Investment.objects.filter(
+            user=user,
+            kind__in=[Investment.ROBO, Investment.CHEST],
+            action=Investment.WITHDRAW,
+        ).aggregate(s=Sum("amount_usd"))["s"]
+        or Decimal(0)
+    )
+    deposited = Decimal(deposited)
+    withdrawn = Decimal(withdrawn)
+    return {
+        "has_activity": bool(deposited or withdrawn),
+        "net_contributed_usd": deposited - withdrawn,
+        "deposited_usd": deposited,
+        "withdrawn_usd": withdrawn,
+        "live_valuation_available": False,
+    }
+
+
 def safe_get_summary(user: User) -> PortfolioSummary | None:
     try:
         return get_summary(user)
