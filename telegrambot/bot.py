@@ -1072,8 +1072,9 @@ async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TY
             f"- \"Gasté 50k en comida\"\n"
             f"- \"Compré café por 35000\"\n"
             f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+            f"💹 ¿Inviertes? Conecta Wallbit para ver y operar tus acciones y ETFs de EE. UU. desde el chat: https://tresqu.com/dashboard/account?tab=integraciones\n\n"
             f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda\n"
-            f"Puedes ver tu dashboard en https://tresqu.com/ para ver tus gastos e ingresos."
+            f"Puedes ver tu dashboard en https://tresqu.com/dashboard/home para revisar tus gastos, ingresos e inversiones."
         )
 
         await update.message.reply_text(success_message)
