@@ -144,3 +144,11 @@ class HoldingSerializer(serializers.Serializer):
 class TimelinePointSerializer(serializers.Serializer):
     date = serializers.DateField()
     invested_total_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+
+
+class PnLTimelinePointSerializer(serializers.Serializer):
+    date = serializers.DateField()
+    pnl_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    pnl_pct = serializers.FloatField()
+    market_value_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
+    invested_total_usd = serializers.DecimalField(max_digits=18, decimal_places=2)

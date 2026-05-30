@@ -10,6 +10,7 @@ holdings) only hit Wallbit once per symbol.
 """
 from __future__ import annotations
 
+import bisect
 import logging
 import time
 from collections import defaultdict
@@ -140,6 +141,21 @@ class PortfolioSummary:
 @dataclass
 class TimelinePoint:
     date: date
+    invested_total_usd: Decimal
+
+
+@dataclass
+class PnLTimelinePoint:
+    """A point on the gains/losses-over-time curve.
+
+    ``pnl_usd`` = reconstructed market value − net invested at that date. The
+    line crosses zero (above = gain, below = loss). ``invested_total_usd`` and
+    ``market_value_usd`` are carried for the tooltip/context.
+    """
+    date: date
+    pnl_usd: Decimal
+    pnl_pct: float
+    market_value_usd: Decimal
     invested_total_usd: Decimal
 
 
@@ -412,6 +428,201 @@ def _action_filter(*actions: str):
     for action in actions:
         q |= Q(action=action)
     return q
+
+
+# Maps the chart's period to (start date, market-data range to fetch). The
+# market-data range only controls price granularity/density — the sample dates
+# are derived from the prices actually returned, clipped to the start date.
+def _pnl_window(period: str, first_date: date | None, today: date) -> tuple[date, str]:
+    p = (period or "1m").lower()
+    if p == "1w":
+        return today - timedelta(days=7), "1m"
+    if p == "1m":
+        return today - timedelta(days=30), "1m"
+    if p == "1y":
+        return today - timedelta(days=365), "1y"
+    if p == "ytd":
+        return date(today.year, 1, 1), "1y"
+    if p == "all":
+        start = first_date or (today - timedelta(days=30))
+        span = (today - start).days
+        if span <= 330:
+            md = "1y"
+        elif span <= 5 * 365:
+            md = "5y"
+        else:
+            md = "max"
+        return start, md
+    return today - timedelta(days=30), "1m"
+
+
+def _price_series(symbol: str, md_range: str) -> tuple[list[date], list[Decimal], bool] | None:
+    """Return (sorted_dates, prices, stale) for ``symbol`` or None if unavailable.
+
+    Collapses the market-data points to one close per calendar day. ``stale`` is
+    True when the provider failed and a cached last-good payload was served.
+    """
+    from marketdata.service import get_price_history
+
+    try:
+        payload = get_price_history(symbol, md_range)
+    except Exception as exc:  # ValueError (bad range) or MarketDataError
+        logger.warning("pnl timeline: price history failed for %s (%s): %s", symbol, md_range, exc)
+        return None
+
+    by_date: dict[date, Decimal] = {}
+    for p in payload.get("points") or []:
+        t = p.get("t")
+        price = p.get("price")
+        if not t or price is None:
+            continue
+        try:
+            d = datetime.strptime(str(t)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        by_date[d] = _to_decimal(price)  # points are ascending → last wins per day
+    if not by_date:
+        return None
+    dates = sorted(by_date)
+    return dates, [by_date[d] for d in dates], bool(payload.get("stale"))
+
+
+def _price_on_or_before(series: tuple[list[date], list[Decimal], bool] | None, d: date) -> Decimal | None:
+    if series is None:
+        return None
+    dates, prices, _ = series
+    idx = bisect.bisect_right(dates, d) - 1
+    if idx < 0:
+        return None
+    return prices[idx]
+
+
+def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePoint], bool]:
+    """Reconstruct the gains/losses (P&L) of the stock/ETF portfolio over time.
+
+    There is no stored history of portfolio *value* — only the transaction
+    ledger (``Investment``) and historical *prices* (``marketdata``). So for
+    each sample date we rebuild the holdings as of that date (signed shares of
+    settled BUY/SELL) and value them with the historical close on/just-before
+    that date, then subtract the net invested at that date to get P&L.
+
+    Caveats (returned via the ``stale`` flag so the UI can note approximation):
+    - ``Investment.shares`` is stored truncated, so past points can be slightly
+      off. To avoid contradicting the hero cards, the LAST point is anchored to
+      the LIVE ``get_summary`` value/P&L.
+    - If a symbol's price history is unavailable, that symbol falls back to its
+      cost (neutral P&L contribution) and ``stale`` is set.
+    - Robo Advisor / Chest movements are excluded (no live valuation), matching
+      ``get_summary``'s invested/P&L scope.
+    """
+    today = timezone.now().date()
+
+    # Settled stock/ETF/BOND trades only (same scope as the invested timeline).
+    txns = list(
+        Investment.objects.filter(user=user, action__in=[Investment.BUY, Investment.SELL])
+        .filter(_settled_q())
+        .annotate(effective_at=Coalesce("executed_at", "created_at"))
+        .order_by("effective_at")
+        .values_list("effective_at", "symbol", "action", "shares", "amount_usd")
+    )
+    if not txns:
+        return [], False
+
+    first_date = txns[0][0].date()
+    since, md_range = _pnl_window(period, first_date, today)
+    start_date = max(since, first_date)
+
+    # Normalize transactions and collect symbols.
+    norm: list[tuple[date, str, int, Decimal | None, Decimal]] = []
+    symbols: set[str] = set()
+    shares_unknown = False
+    for effective_at, symbol, action, shares, amount in txns:
+        sym = (symbol or "").upper()
+        if not sym:
+            continue
+        sign = 1 if action == Investment.BUY else -1
+        norm.append((effective_at.date(), sym, sign, shares, _to_decimal(amount)))
+        symbols.add(sym)
+        if shares is None:
+            shares_unknown = True
+
+    # Fetch one historical price series per symbol.
+    price_series: dict[str, tuple[list[date], list[Decimal], bool] | None] = {}
+    stale = shares_unknown
+    for sym in symbols:
+        series = _price_series(sym, md_range)
+        price_series[sym] = series
+        if series is None or series[2]:
+            stale = True
+
+    # Sample dates = union of price dates in [start_date, today]; ensure today.
+    sample_set: set[date] = set()
+    for series in price_series.values():
+        if series is None:
+            continue
+        for d in series[0]:
+            if start_date <= d <= today:
+                sample_set.add(d)
+    sample_set.add(today)
+    sample_dates = sorted(sample_set)
+
+    # Walk sample dates and the (sorted) ledger together, accumulating positions.
+    running_shares: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    running_cost: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    net_invested = Decimal(0)
+    ti = 0
+    points: list[PnLTimelinePoint] = []
+    for d in sample_dates:
+        while ti < len(norm) and norm[ti][0] <= d:
+            _, sym, sign, shares, amount = norm[ti]
+            if shares is not None:
+                running_shares[sym] += Decimal(sign) * shares
+            running_cost[sym] += Decimal(sign) * amount
+            net_invested += Decimal(sign) * amount
+            ti += 1
+
+        market_value = Decimal(0)
+        for sym, sh in running_shares.items():
+            cost = running_cost[sym]
+            if sh > 0:
+                price = _price_on_or_before(price_series.get(sym), d)
+                # No price for a held symbol → neutral (value = its cost).
+                market_value += (price * sh) if price is not None else max(cost, Decimal(0))
+            elif cost > 0:
+                # Held but shares unknown (legacy NULL) → neutral contribution.
+                market_value += cost
+
+        pnl = market_value - net_invested
+        pnl_pct = float(pnl / net_invested * 100) if net_invested > 0 else 0.0
+        points.append(
+            PnLTimelinePoint(
+                date=d,
+                pnl_usd=pnl,
+                pnl_pct=pnl_pct,
+                market_value_usd=market_value,
+                invested_total_usd=net_invested,
+            )
+        )
+
+    # Anchor the final point to the LIVE summary so the curve's endpoint matches
+    # the hero cards exactly (avoids two contradicting "today" P&L numbers).
+    try:
+        summary = get_summary(user)
+        anchor = PnLTimelinePoint(
+            date=today,
+            pnl_usd=summary.pnl_usd,
+            pnl_pct=summary.pnl_pct,
+            market_value_usd=summary.current_value_usd,
+            invested_total_usd=summary.net_invested_usd,
+        )
+        if points and points[-1].date == today:
+            points[-1] = anchor
+        else:
+            points.append(anchor)
+    except Exception as exc:
+        logger.warning("pnl timeline: live anchor failed for user %s: %s", user.id, exc)
+
+    return points, stale
 
 
 def get_robo_advisor_position(user: User) -> dict[str, Any]:

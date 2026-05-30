@@ -17,12 +17,13 @@ from .client import (
 from .crypto import decrypt_api_key, encrypt_api_key
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
-from .portfolio import get_holdings, get_summary, get_timeline
+from .portfolio import get_holdings, get_pnl_timeline, get_summary, get_timeline
 from .serializers import (
     AgentDecisionSerializer,
     AgentLimitsSerializer,
     HoldingSerializer,
     InvestmentSerializer,
+    PnLTimelinePointSerializer,
     PortfolioSummarySerializer,
     TimelinePointSerializer,
     WallbitConnectSerializer,
@@ -421,6 +422,34 @@ class PortfolioTimelineView(APIView):
             {
                 "period": period,
                 "points": TimelinePointSerializer(points, many=True).data,
+            }
+        )
+
+
+class PortfolioPnLTimelineView(APIView):
+    """GET /api/wallbit/portfolio/pnl-timeline — gains/losses (P&L) over time.
+
+    Periods: 1w, 1m, 1y, ytd, all. The last point is anchored to the live
+    summary so it matches the hero P&L. ``stale`` flags an approximated series
+    (missing price history or legacy rows without precise share counts).
+    """
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        period = request.query_params.get("period", "1m").lower()
+        try:
+            points, stale = get_pnl_timeline(request.user, period=period)
+        except AccountNotConnected:
+            return Response(
+                {"detail": "Wallbit not connected", "connected": False},
+                status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        return Response(
+            {
+                "period": period,
+                "points": PnLTimelinePointSerializer(points, many=True).data,
+                "stale": stale,
             }
         )
 
