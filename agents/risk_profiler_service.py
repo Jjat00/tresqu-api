@@ -18,13 +18,16 @@ from __future__ import annotations
 import json
 import logging
 import os
-from typing import Any, Literal
+from contextlib import asynccontextmanager
+from typing import Any, AsyncIterator, Literal
 
 from django.conf import settings
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 from langgraph.types import Command
+from psycopg import AsyncConnection
+from psycopg.rows import dict_row
 
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 
@@ -62,6 +65,29 @@ def _db_uri() -> str:
     return uri
 
 
+@asynccontextmanager
+async def _open_checkpointer() -> AsyncIterator[AsyncPostgresSaver]:
+    """Open an ``AsyncPostgresSaver`` with server-side prepared statements OFF.
+
+    ``AsyncPostgresSaver.from_conn_string`` hardcodes ``prepare_threshold=0``,
+    which makes psycopg prepare every statement on the server. That breaks
+    against Supabase's transaction-mode connection pooler (pgbouncer), which
+    rotates physical connections and surfaces ``DuplicatePreparedStatement:
+    prepared statement "_pg3_0" already exists``. Building the connection
+    ourselves with ``prepare_threshold=None`` disables prepared statements so
+    every checkpointer query works through the pooler. ``row_factory=dict_row``
+    matches what the saver expects.
+    """
+
+    async with await AsyncConnection.connect(
+        _db_uri(),
+        autocommit=True,
+        prepare_threshold=None,
+        row_factory=dict_row,
+    ) as conn:
+        yield AsyncPostgresSaver(conn)
+
+
 async def _ensure_setup(checkpointer: AsyncPostgresSaver) -> None:
     """Run checkpointer migrations once per process (idempotent on subsequent calls)."""
 
@@ -81,7 +107,7 @@ async def is_session_active(user_id: int) -> bool:
 
     config = {"configurable": {"thread_id": thread_id_for(user_id)}}
     try:
-        async with AsyncPostgresSaver.from_conn_string(_db_uri()) as cp:
+        async with _open_checkpointer() as cp:
             await _ensure_setup(cp)
             snapshot = await cp.aget_tuple(config)
     except Exception as exc:
@@ -128,7 +154,7 @@ async def start_session(user_id: int, channel: str) -> dict[str, Any]:
         "answers": {},
     }
 
-    async with AsyncPostgresSaver.from_conn_string(_db_uri()) as cp:
+    async with _open_checkpointer() as cp:
         await _ensure_setup(cp)
         graph = compile_risk_profiler_graph(cp)
         # Clear any previous thread state for this user before starting fresh.
@@ -147,7 +173,7 @@ async def resume_session(user_id: int, user_message: str) -> dict[str, Any]:
 
     config = {"configurable": {"thread_id": thread_id_for(user_id)}}
 
-    async with AsyncPostgresSaver.from_conn_string(_db_uri()) as cp:
+    async with _open_checkpointer() as cp:
         await _ensure_setup(cp)
         graph = compile_risk_profiler_graph(cp)
         result = await graph.ainvoke(Command(resume=user_message), config=config)
@@ -164,7 +190,7 @@ async def get_pending_question(user_id: int) -> str | None:
 
     config = {"configurable": {"thread_id": thread_id_for(user_id)}}
     try:
-        async with AsyncPostgresSaver.from_conn_string(_db_uri()) as cp:
+        async with _open_checkpointer() as cp:
             await _ensure_setup(cp)
             snapshot = await cp.aget_tuple(config)
     except Exception as exc:
@@ -243,7 +269,7 @@ async def classify_message(question: str, message: str) -> dict[str, Any]:
 async def abandon_session(user_id: int) -> None:
     """Drop the user's thread state — used when /perfil is invoked again or stale."""
 
-    async with AsyncPostgresSaver.from_conn_string(_db_uri()) as cp:
+    async with _open_checkpointer() as cp:
         await _ensure_setup(cp)
         try:
             await cp.adelete_thread(thread_id_for(user_id))
