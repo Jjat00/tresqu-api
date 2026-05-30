@@ -2,7 +2,7 @@
 
 **Backend de gestión financiera personal con IA + integración Wallbit**
 
-Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots inteligentes (Telegram + WhatsApp), detección automática de compras vía Gmail, RAG con pgvector y — desde la última release — un **agente conversacional que opera sobre Wallbit** (saldos, transacciones, trading, Robo Advisor, tarjetas) con flujo de confirmación, auditoría y kill switch.
+Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots inteligentes (Telegram, WhatsApp y **chat web** vía streaming), detección automática de compras vía Gmail, RAG con pgvector y — desde la última release — un **agente conversacional que opera sobre Wallbit** (saldos, transacciones, trading, Robo Advisor, tarjetas) con flujo de confirmación, auditoría y kill switch.
 
 ---
 
@@ -543,6 +543,9 @@ Detalle completo: [`docs/MARKET_ANALYST.md`](docs/MARKET_ANALYST.md).
 | **`/api/agents/risk-profile/`** | GET/POST/DELETE del perfil declarado (POST = manual override) |
 | **`/api/agents/risk-profile/effective/`** | Perfil **efectivo** combinando declarado + inferido (consume esto desde frontend y guardrails) |
 | **`/api/agents/risk-profile/history/`** | Audit log paginado de `RiskAssessment` |
+| **`/api/agents/chat/stream/`** | Chat web con el supervisor (respuesta en streaming) — alimenta la sección Agentes del dashboard |
+| **`/api/agents/{agent_id}/chat/stream/`** | Chat web con un especialista concreto del roster |
+| **`/api/agents/roster/`** | Roster del equipo de agentes (para la UI web) |
 | `/telegram/` | Webhook Telegram |
 | `/whatsapp/` | Webhook WhatsApp (Meta) |
 | `/schema/swagger-ui/` · `/schema/redoc/` | Documentación interactiva |
