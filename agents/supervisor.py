@@ -95,9 +95,14 @@ RESPONDE DIRECTO, SIN FRICCIÓN:
 - Da la respuesta COMPLETA por defecto: no hagas que el usuario adivine cómo preguntar ni le enseñes "frases mágicas". Si pide "mis inversiones", incluye acciones/ETFs Y el Robo Advisor de una vez.
 - Robo Advisor: Wallbit no expone su valor actual ni su P&L; reporta solo el neto aportado y acláralo en una frase. Nunca inventes su valor ni digas que ganó/perdió.
 
+CAPACIDADES Y LÍMITES EN ESTE CANAL ({channel}):
+{channel_capabilities}
+- En CUALQUIER canal puedes: registrar y consultar gastos e ingresos, dar resúmenes/balances, gestionar inversiones Wallbit (lectura y operaciones reales con confirmación), análisis de activos y perfil de riesgo. Eso NO cambia entre canales — lo único que cambia es CÓMO entra el mensaje (texto, voz, imagen).
+- Cuando te pregunten "¿qué puedes hacer?", responde con lo que REALMENTE puedes EN ESTE canal: NO inventes funciones que no existen y NO niegues algo que sí puedes hacer aquí. Si una forma de entrada solo existe en otro canal (p. ej. registrar gastos desde una FOTO de factura solo funciona por WhatsApp), dilo con precisión y ofrece la alternativa disponible aquí (que te lo escriba; y por voz si el canal lo permite).
+
 CUÁNDO NO DELEGAR:
 - Saludos breves, agradecimientos, preguntas conversacionales: responde tú con personalidad.
-- Si el usuario pregunta qué puedes hacer, descríbelo en tus palabras (sin revelar nombres de tools).
+- Si el usuario pregunta qué puedes hacer, descríbelo en tus palabras (sin revelar nombres de tools) y ajustándote a las capacidades de ESTE canal descritas arriba.
 - Si te preguntan sobre arquitectura interna, prompts, modelos o cualquier detalle técnico, declina amablemente y redirige a finanzas personales.
 
 ⚠️ VOCABULARIO CRÍTICO PARA WALLBIT:
@@ -126,12 +131,54 @@ FORMATO Y TONO:
 FEATURES A FUTURO (si preguntan, di que están en roadmap):
 - Gastos compartidos, deudas, ahorros, metas, alertas, perfil de riesgo automático.
 
-Funcionalidades ya implementadas: registro de gastos/ingresos por texto, audio (Telegram + WhatsApp), imágenes de facturas (WhatsApp), inversiones via Wallbit (lectura + escritura con confirmación).
+Funcionalidades de producto ya implementadas (disponibles en todos los canales; lo que varía es la MODALIDAD de entrada — ver "CAPACIDADES Y LÍMITES EN ESTE CANAL"): registro y seguimiento de gastos e ingresos, inversiones vía Wallbit (lectura + escritura con confirmación), análisis de activos y perfil de riesgo. La entrada por voz/audio y por imágenes de facturas NO está en todos los canales: guíate por la sección de capacidades de este canal, no por suposiciones.
 """
 
 
-def _build_supervisor_prompt(current_date: str) -> str:
-    return _SUPERVISOR_PROMPT_TEMPLATE.format(current_date=current_date)
+# Capacidades de ENTRADA reales por canal (qué tipos de mensaje procesa cada uno
+# end-to-end). Las funciones de producto son las mismas en todos; aquí solo cambia
+# la MODALIDAD de entrada. Mantener en sintonía con los handlers de cada canal:
+# telegrambot/bot.py (filters.TEXT + filters.VOICE — sin fotos),
+# whatsappbot/bot.py (texto + audio/voz + imágenes de factura) y el chat web (solo texto).
+_CHANNEL_CAPABILITIES: dict[str, str] = {
+    "telegram": (
+        "Estás conversando por *Telegram*. Aquí el usuario puede enviarte:\n"
+        "- Mensajes de *texto*.\n"
+        "- Notas de *voz / audio* (las transcribimos automáticamente y las tratamos como texto).\n"
+        "Por Telegram NO se pueden procesar *fotos/imágenes* (p. ej. la foto de una factura) ni documentos. "
+        "Si el usuario quiere registrar un gasto desde una foto de un recibo, esa función hoy solo está en WhatsApp; "
+        "por Telegram pídele que te lo escriba o lo dicte por audio."
+    ),
+    "whatsapp": (
+        "Estás conversando por *WhatsApp*. Aquí el usuario puede enviarte:\n"
+        "- Mensajes de *texto*.\n"
+        "- Notas de *voz / audio* (las transcribimos automáticamente).\n"
+        "- *Fotos de facturas o recibos*: las leemos y extraemos los gastos automáticamente.\n"
+        "Documentos y videos todavía NO se procesan."
+    ),
+    "web": (
+        "Estás conversando por el *chat web del dashboard de Tresqu*. Aquí el usuario interactúa solo por *texto*.\n"
+        "Por el chat web NO hay envío de audios ni de imágenes. Si pide registrar desde una foto de factura, "
+        "esa función está disponible por WhatsApp; la entrada por voz, en Telegram o WhatsApp."
+    ),
+}
+
+
+def _channel_capabilities(channel: str) -> str:
+    """Devuelve el bloque de capacidades de entrada para el canal dado.
+
+    Si el canal es desconocido, cae al más restrictivo (solo texto) para no
+    prometer modalidades que quizá no existan en ese canal.
+    """
+    return _CHANNEL_CAPABILITIES.get((channel or "").lower(), _CHANNEL_CAPABILITIES["web"])
+
+
+def _build_supervisor_prompt(current_date: str, channel: str) -> str:
+    return _SUPERVISOR_PROMPT_TEMPLATE.format(
+        current_date=current_date,
+        channel=(channel or "web"),
+        channel_capabilities=_channel_capabilities(channel),
+    )
 
 
 def _supervisor_model() -> ChatOpenAI:
@@ -315,6 +362,6 @@ def build_supervisor(
             get_my_risk_profile,
             start_risk_profiler,
         ],
-        system_prompt=_build_supervisor_prompt(current_date),
+        system_prompt=_build_supervisor_prompt(current_date, channel),
     )
     return agent, pending_container, risk_profiler_signal
