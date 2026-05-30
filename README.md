@@ -1,8 +1,8 @@
 # Tresqu API
 
-**Backend de gestión financiera personal con IA + integración Wallbit**
+**Backend de Tresqu: un equipo de agentes de IA que gestiona tus finanzas e inversiones por chat**
 
-Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots inteligentes (Telegram, WhatsApp y **chat web** vía streaming), detección automática de compras vía Gmail, RAG con pgvector y — desde la última release — un **agente conversacional que opera sobre Wallbit** (saldos, transacciones, trading, Robo Advisor, tarjetas) con flujo de confirmación, auditoría y kill switch.
+Django REST API para Tresqu. En el centro hay un **equipo de agentes**: un supervisor (Tresqu) entiende al usuario y orquesta a cuatro especialistas — **gastos e ingresos**, **Wallbit** (inversiones), **analista de mercado** y **perfil de riesgo**. El usuario habla por **WhatsApp, Telegram o el chat web**; el supervisor enruta, los especialistas ejecutan con sus tools, y todo lo que toca dinero pasa por **confirmación, auditoría y kill switch**. Suma además detección automática de compras vía Gmail (Composio) y RAG con pgvector.
 
 ---
 
@@ -27,14 +27,25 @@ Django REST API para Tresqu. Combina gestión de gastos/ingresos, chatbots intel
 
 ## ¿Qué hace Tresqu?
 
-Tresqu es un copiloto financiero conversacional. El usuario habla con él por **WhatsApp, Telegram o la web** y el agente:
+**Tresqu es un equipo de agentes de IA para tus finanzas.** El usuario habla por **WhatsApp, Telegram o el chat web**, y un supervisor (Tresqu) entiende la intención y delega al especialista correcto:
 
-- Registra gastos/ingresos en lenguaje natural ("gasté 30k en almuerzo")
-- Categoriza automáticamente con IA
+```mermaid
+flowchart TD
+    U["Usuario<br/>WhatsApp · Telegram · Web"] --> SUP["Supervisor — Tresqu<br/>entiende y orquesta"]
+    SUP --> A1["Gastos e ingresos<br/>registra · categoriza · analiza"]
+    SUP --> A2["Wallbit<br/>compra/vende · mueve fondos · confirmación"]
+    SUP --> A3["Analista de mercado<br/>precio + contexto · read-only"]
+    SUP --> A4["Perfil de riesgo<br/>cuestionario + inferencia"]
+```
+
+Con ese equipo, Tresqu:
+
+- Registra gastos/ingresos en lenguaje natural ("gasté 30k en almuerzo") y los categoriza solo
 - Detecta compras en correos de Gmail (polling vía Composio, ~2 min de latencia)
-- Genera reportes y responde preguntas analíticas
-- **(nuevo)** Consulta saldos y transacciones de **Wallbit**
-- **(nuevo)** Propone órdenes de compra/venta de activos, movimientos entre cuentas DEFAULT/INVESTMENT, depósitos/retiros de Robo Advisor y bloqueo de tarjetas — todo bajo un flujo de **preview → confirmación explícita → ejecución** con límites por usuario y audit log
+- Genera reportes y responde preguntas analíticas (RAG con pgvector)
+- Consulta saldos y transacciones de **Wallbit**
+- **Propone operaciones** en Wallbit (compra/venta, movimientos DEFAULT/INVESTMENT, Robo Advisor, tarjetas) bajo **preview → confirmación explícita → ejecución**, con límites por usuario, audit log y kill switch
+- Arma tu **perfil de riesgo** (declarado + inferido) y mete fricción en las compras que no encajan con tu tolerancia
 
 ---
 
@@ -108,7 +119,7 @@ flowchart TB
     subgraph Safety["wallbit/agent_safety.py"]
         K{Kill switch?}
         L{AgentLimits?}
-        R{Risk gate<br/>(solo BUY)}
+        R{"Risk gate<br/>(solo BUY)"}
         D[create_pending_decision]
     end
 
