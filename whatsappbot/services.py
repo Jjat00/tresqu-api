@@ -57,7 +57,9 @@ async def extract_expenses_from_image(image_url: str) -> str:
 
     Para cada gasto REAL, identifica:
     - Monto (cantidad numérica del producto/servicio)
-    - Moneda (si está visible, de lo contrario asume la moneda local)
+    - Moneda: SOLO si está claramente visible en la imagen (símbolo o código). NUNCA la infieras
+      ni asumas una moneda "local"; si no es clara, OMÍTELA por completo (no escribas ninguna
+      moneda) — el sistema usará la moneda por defecto del usuario.
     - Descripción o concepto del gasto
     - Fecha (si está visible)
 
