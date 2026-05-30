@@ -57,11 +57,17 @@ CUÁNDO USAR `analyze_investment`:
 - Es de SOLO LECTURA y educativo: nunca ejecuta nada. Si tras el análisis el usuario quiere COMPRAR o VENDER, eso va a `manage_wallbit` (operación real con confirmación).
 - El analista NUNCA recomienda "comprá/vendé X" — presenta datos y contexto. Respeta ese tono al recapitular.
 
+CUÁNDO USAR `get_my_risk_profile` (LECTURA del perfil):
+- El usuario pregunta si YA tiene perfil, cuál es su perfil, qué tan arriesgado es: "¿tengo perfil?", "¿cuál es mi perfil de riesgo?", "¿qué tipo de inversionista soy?".
+- El usuario pide algo "de acuerdo a mi perfil" SIN nombrar un activo concreto: "¿qué acción me recomiendas según mi perfil?".
+- SIEMPRE consulta esta tool ANTES de ofrecer iniciar el cuestionario. El usuario puede tener un perfil INFERIDO de su actividad aunque nunca haya hecho el Q&A — `source="inferred"` es un perfil válido. Solo si `has_profile=false` (source="default") realmente no hay nada y recién ahí ofreces `start_risk_profiler`.
+- Cuando la tool trae un `warning`, transmítelo con tacto (p. ej. que es inferido y que puede afinarlo con el cuestionario), pero igual dale su perfil.
+- Si el usuario nombra un activo concreto y pregunta si encaja ("¿AAPL va con mi perfil?"), usa `analyze_investment` en su lugar (cruza el activo con el perfil).
+
 CUÁNDO USAR `start_risk_profiler`:
-- El usuario pide armar su perfil de riesgo / inversión / tolerancia a pérdidas.
-- Frases como "quiero saber qué tan arriesgado soy invirtiendo", "haz mi perfil de inversión", "evalúa mi tolerancia al riesgo", "qué tipo de inversionista soy".
-- Cuando recomendaste una inversión y el usuario te pregunta si encaja con su perfil pero aún no hay perfil registrado.
-- NO la uses si el usuario solo pide ver / consultar su perfil actual (eso es lectura). Solo úsala para INICIAR una nueva evaluación.
+- El usuario pide armar / rehacer / actualizar su perfil de riesgo: "haz mi perfil de inversión", "evalúa mi tolerancia al riesgo", "quiero hacer el cuestionario".
+- O cuando consultaste `get_my_risk_profile` y `has_profile=false` y el usuario quiere uno.
+- NO la uses para consultar el perfil actual (eso es `get_my_risk_profile`). Solo úsala para INICIAR una nueva evaluación.
 
 REGLA DE MONTOS Y SÍMBOLOS:
 - Cuando delegues una operación con dinero, pasa los montos, símbolos y porcentajes EXACTOS que dio el usuario. NUNCA los redondees, recortes ni "ajustes" por tu cuenta. Si el usuario dice "compra 50 USD de AAPL", la instrucción al subagente debe contener "50 USD" y "AAPL" textualmente.
@@ -230,6 +236,43 @@ def build_supervisor(
             logger.exception(f"analyst subagent failed: {exc}")
             return f"(error en subagente analista: {exc})"
 
+    @tool("get_my_risk_profile")
+    async def get_my_risk_profile() -> dict[str, Any]:
+        """Lee el perfil de riesgo EFECTIVO actual del usuario (declarado o inferido).
+
+        Úsala para responder "¿tengo perfil?", "¿cuál es mi perfil?" o cuando el
+        usuario pide algo "según mi perfil" sin nombrar un activo. NO inicia el
+        cuestionario — solo consulta lo que ya existe. El perfil inferido
+        (source="inferred") es válido aunque el usuario no haya hecho el Q&A.
+        Devuelve {has_profile, tolerance, tolerance_es, source, warning}.
+        """
+        from asgiref.sync import sync_to_async
+
+        from .effective_profile import get_effective_profile
+
+        _TOLERANCE_ES = {
+            "conservative": "conservador",
+            "moderate": "moderado",
+            "aggressive": "agresivo",
+        }
+        try:
+            eff = await sync_to_async(get_effective_profile)(
+                user, refresh_inference=False
+            )
+        except Exception as exc:
+            logger.exception(f"get_my_risk_profile failed: {exc}")
+            return {"ok": False, "error": "profile_unavailable"}
+
+        return {
+            "ok": True,
+            # source="default" => no hay ni declarado ni inferido todavía.
+            "has_profile": eff.source != "default",
+            "tolerance": eff.tolerance,
+            "tolerance_es": _TOLERANCE_ES.get(eff.tolerance, eff.tolerance),
+            "source": eff.source,
+            "warning": eff.warning,
+        }
+
     @tool("start_risk_profiler")
     async def start_risk_profiler() -> str:
         """Inicia un Q&A multi-turno para construir el perfil de riesgo / inversión del usuario.
@@ -258,6 +301,7 @@ def build_supervisor(
             call_expenses_subagent,
             call_wallbit_subagent,
             call_analyst_subagent,
+            get_my_risk_profile,
             start_risk_profiler,
         ],
         system_prompt=_build_supervisor_prompt(current_date),
