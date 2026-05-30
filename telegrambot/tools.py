@@ -179,6 +179,13 @@ async def parse_expense(text: str) -> dict:
         en el mismo idioma en que fueron proporcionados por el usuario.
         Nunca traduzcas los nombres de categorías o notas a otro idioma.
 
+        IMPORTANTE — MONEDA: NUNCA infieras ni adivines la moneda. Solo asigna `currency`
+        si el usuario menciona una moneda EXPLÍCITA e inequívoca (código ISO como USD/EUR/ARS,
+        o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
+        "pesos argentinos"→ARS). Si solo dice "pesos" a secas, "lucas", "varos" u otra palabra
+        ambigua, o no menciona moneda, deja `currency` en null — el sistema usará la moneda por
+        defecto del usuario.
+
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
@@ -217,6 +224,12 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
         en el mismo idioma en que fueron proporcionados por el usuario.
         Nunca traduzcas los nombres de categorías o notas a otro idioma.
+
+        IMPORTANTE — MONEDA: NUNCA infieras ni adivines la moneda. Solo asigna `currency`
+        de un gasto si el usuario menciona una moneda EXPLÍCITA e inequívoca (código ISO como
+        USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
+        "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
+        menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(
@@ -714,14 +727,22 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
 
 @tool
 def delete_expense(expense_id: str):
-    """Elimina un gasto de la base de datos."""
+    """Elimina un gasto por su ID. Informa exactamente qué se eliminó o si no se encontró nada."""
     try:
-        expense = Expense.objects.get(id=expense_id)
+        expense = Expense.objects.filter(id=expense_id).first()
+        if not expense:
+            return f"No se encontró ningún gasto con ID {expense_id}; no se eliminó nada."
+
+        category_name = (
+            expense.user_expense_category.name if expense.user_expense_category
+            else (expense.category.name if expense.category else (expense.category_str or "Sin categoría"))
+        )
+        details = f"{expense.amount} {expense.currency} en {category_name} ({expense.spent_at})"
         expense.delete()
-        return f"✅ ¡Gasto eliminado!\n"
+        return f"Gasto eliminado: {details}"
     except Exception as e:
         logger.error(f"Error al eliminar gasto: {e}")
-        return f"❌ Error al eliminar el gasto: {str(e)}"
+        return f"❌ Error al eliminar el gasto: {str(e)}. No se eliminó nada."
 
 
 @tool
@@ -893,7 +914,13 @@ async def parse_income(text: str) -> dict:
         IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
         en el mismo idioma en que fueron proporcionados por el usuario.
         Nunca traduzcas los nombres de categorías o notas a otro idioma.
-        
+
+        IMPORTANTE — MONEDA: NUNCA infieras ni adivines la moneda. Solo asigna `currency`
+        si el usuario menciona una moneda EXPLÍCITA e inequívoca (código ISO como USD/EUR/ARS,
+        o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
+        "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
+        menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
+
         Por ejemplo:
         - "ayer recibí un pago a 20K" debe registrarse con la fecha de ayer
         - "el sábado me pagaron 100k" debe registrarse con la fecha del sábado más reciente
@@ -925,13 +952,19 @@ async def parse_incomes(text: str) -> Dict[str, Any]:
         "la semana pasada", etc., debes identificarlas correctamente para establecer
         la fecha del ingreso. Usa la fecha actual como referencia.
         
-        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje, 
-        NO debes generar una fecha arbitraria. Deja el campo received_at como NULL 
+        IMPORTANTE: Si no se menciona ninguna fecha específica en el mensaje,
+        NO debes generar una fecha arbitraria. Deja el campo received_at como NULL
         y el sistema usará automáticamente la fecha actual.
 
         IMPORTANTE: Todos los datos extraídos (categoría, nota) deben mantenerse
         en el mismo idioma en que fueron proporcionados por el usuario.
         Nunca traduzcas los nombres de categorías o notas a otro idioma.
+
+        IMPORTANTE — MONEDA: NUNCA infieras ni adivines la moneda. Solo asigna `currency`
+        de un ingreso si el usuario menciona una moneda EXPLÍCITA e inequívoca (código ISO como
+        USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
+        "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
+        menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
         """),
         ("human", "{text}")
     ]) | llm.with_structured_output(

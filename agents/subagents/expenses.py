@@ -92,12 +92,13 @@ def build_expenses_tools(user: User) -> list:
     @tool
     def create_expense_for_user(
         amount: float,
-        currency: str,
         category: str,
+        currency: str = "",
         spent_at: str | None = None,
         note: str | None = "",
     ) -> str:
-        """Registra un gasto del usuario en la base de datos."""
+        """Registra un gasto del usuario. Deja `currency` vacío si el usuario no la dijo
+        explícitamente (NO la infieras): la tool usará la moneda por defecto del usuario."""
         return create_expense.invoke({
             "user_external_id": external_id,
             "amount": amount,
@@ -110,15 +111,17 @@ def build_expenses_tools(user: User) -> list:
     @tool
     def create_income_for_user(
         amount: float,
-        currency: str,
         category: str,
+        currency: str = "",
         received_at: str | None = None,
         note: str | None = "",
         category_description: str | None = None,
         category_example: str | None = None,
         category_color: str | None = None,
     ) -> str:
-        """Registra un ingreso del usuario. Si la categoría no existe, la crea."""
+        """Registra un ingreso del usuario. Si la categoría no existe, la crea. Deja `currency`
+        vacío si el usuario no la dijo explícitamente (NO la infieras): la tool usará la moneda
+        por defecto del usuario."""
         get_or_create_income_category.invoke({
             "name": category,
             "description": category_description,
@@ -304,7 +307,7 @@ REGLAS DE OPERACIÓN:
 - Mismo patrón para INGRESOS con parse_income/parse_incomes/create_income_for_user.
 - Si hay referencias temporales (ayer, el sábado, hace una semana), usa parse_relative_date_for_user. Para días de semana, asume el más reciente en el pasado.
 - Si falta fecha, usa get_current_date_for_user.
-- Si falta moneda, las tools asignan la del usuario por defecto.
+- MONEDA: NUNCA infieras ni adivines la moneda. Solo pásala a las tools si el usuario la dijo de forma EXPLÍCITA e inequívoca (USD, EUR, "dólares", "euros", "pesos colombianos", "pesos argentinos"...). Palabras ambiguas como "pesos" a secas NO cuentan: deja la moneda vacía y la tool usará la moneda por defecto del usuario. Si el usuario SÍ nombró una moneda, respétala aunque difiera de la suya por defecto.
 
 CLASIFICACIÓN:
 - PRIMERO intenta usar una categoría existente de la lista.
@@ -316,6 +319,12 @@ EDICIÓN / ELIMINACIÓN:
 - Si hay ID, verifica con get_expense_by_id / get_income_by_id.
 - Si no hay ID pero describe el movimiento, usa search_expenses / search_incomes.
 - Luego update_expense/update_income o delete_expense/delete_income.
+
+VERACIDAD DE ACCIONES (CRÍTICO):
+- Reporta EXACTAMENTE lo que las tools confirmaron. Si creaste, editaste o eliminaste algo, di solo lo que la tool devolvió como hecho — ni más ni menos.
+- Si una tool devolvió "no encontrado", un error o "no se eliminó nada", NO digas que la acción se realizó.
+- Si te pidieron crear/editar/eliminar VARIOS y solo algunos funcionaron, di la cantidad EXACTA confirmada por las tools (p. ej. "eliminé 1 de los 2 gastos; el otro no se encontró"). NUNCA infles ni redondees la cantidad.
+- NUNCA afirmes una acción ni una cantidad que las tools no confirmaron. Ante la duda, di lo que realmente pasó.
 
 CONSULTAS:
 - Por categoría + período: get_category_expenses / get_category_incomes.
@@ -346,6 +355,8 @@ QUÉ NO HACER:
 - ❌ Inventar promedios, días pico o patrones sin llamar get_user_monthly_insights.
 - ❌ Sumar categorías a ojo.
 - ❌ Crear categoría nueva si hay una existente que encaje.
+- ❌ Inferir o adivinar la moneda de un gasto/ingreso cuando el usuario no la dijo explícitamente.
+- ❌ Decir que eliminaste/creaste/editaste algo (o cuántos) sin que la tool lo haya confirmado.
 """
 
 
