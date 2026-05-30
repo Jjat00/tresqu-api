@@ -143,6 +143,31 @@ def _backfill_investment(mirror: WallbitTxMirror, tx: dict[str, Any], account: W
         # ROBOADVISOR_* uses source_amount as the USD delta
         amount_usd = mirror.source_amount or mirror.dest_amount or Decimal(0)
 
+    # Reconcile with an optimistic row the agent executor created at trade time
+    # (wallbit_tx still NULL because the mirror didn't exist yet). Adopt it —
+    # link the mirror and fill the fields it couldn't know (shares, executed_at)
+    # — instead of creating a second row. This is what prevents the agent path
+    # and this sync path from duplicating one real Wallbit transaction.
+    amount_2dp = (amount_usd or Decimal(0)).quantize(Decimal("0.01"))
+    adopt_qs = Investment.objects.filter(
+        user=account.user,
+        kind=kind,
+        action=action,
+        amount_usd=amount_2dp,
+        wallbit_tx__isnull=True,
+    )
+    if symbol:
+        adopt_qs = adopt_qs.filter(symbol__iexact=symbol)
+    optimistic = adopt_qs.order_by("created_at").first()
+    if optimistic is not None:
+        optimistic.symbol = symbol[:16] or optimistic.symbol
+        if shares is not None:
+            optimistic.shares = shares
+        optimistic.wallbit_tx = mirror
+        optimistic.executed_at = mirror.created_at_wallbit
+        optimistic.save(update_fields=["symbol", "shares", "wallbit_tx", "executed_at"])
+        return False
+
     Investment.objects.create(
         user=account.user,
         kind=kind,

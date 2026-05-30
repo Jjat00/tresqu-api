@@ -84,14 +84,19 @@ def execute_place_trade(
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
-    _record_investment(
-        user_id=decision.user_id,
-        kind=Investment.STOCK,
-        action=Investment.BUY if direction == "BUY" else Investment.SELL,
-        symbol=symbol,
-        amount_usd=amount_usd,
-        wallbit_tx_uuid=tx_uuid,
-    )
+    # Don't create an optimistic Investment here. A freshly placed trade is
+    # often still PENDING upstream (and Wallbit may not return its uuid on the
+    # POST, so we couldn't link it). An unlinked, pre-settlement row both
+    # duplicates the row the sync later creates AND inflates "capital invertido"
+    # against a live value that excludes pending trades → false loss. Instead,
+    # let the sync be the single source of truth and trigger it immediately so
+    # the trade shows up (with real shares + status) within seconds.
+    try:
+        from .tasks import sync_wallbit_transactions
+
+        sync_wallbit_transactions.delay(account.id)
+    except Exception as exc:  # noqa: BLE001 — never fail the trade on a dispatch hiccup
+        logger.warning("post-trade wallbit sync dispatch failed: %s", exc)
     return {"ok": True, "wallbit_tx_uuid": tx_uuid, "data": response.data}
 
 

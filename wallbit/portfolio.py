@@ -18,7 +18,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
 
@@ -27,7 +27,7 @@ from users.models import User
 from .agent_safety import AccountNotConnected, get_account_or_raise
 from .client import WallbitClient, WallbitError
 from .crypto import decrypt_api_key
-from .models import Investment, WallbitAccount
+from .models import PENDING_TX_STATUSES, Investment, WallbitAccount
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,18 @@ _CASH_SYMBOLS = {
     "USD", "EUR", "GBP", "ARS", "BRL", "MXN", "COP",
     "CLP", "UYU", "PEN", "USDT", "USDC",
 }
+
+
+def _settled_q() -> Q:
+    """Match only Investments whose underlying trade has settled.
+
+    A row with no linked mirror (legacy data, or an optimistic row before the
+    sync adopts it) has no upstream status → counted. A row linked to a mirror
+    whose status is one of ``PENDING_TX_STATUSES`` is a not-yet-executed trade
+    → excluded from invested capital / P&L until it settles. Built as an
+    explicit OR with ``isnull`` so NULL-mirror rows survive the join cleanly.
+    """
+    return Q(wallbit_tx__isnull=True) | ~Q(wallbit_tx__status__in=PENDING_TX_STATUSES)
 
 
 def _cached_asset(client: WallbitClient, symbol: str) -> dict[str, Any] | None:
@@ -118,6 +130,11 @@ class PortfolioSummary:
     # Distinct from ``cash`` (/balance/checking), the main/non-investment account.
     investment_cash_usd: Decimal = Decimal(0)
     last_sync_at: datetime | None = None
+    # Trades placed but not yet settled upstream (Wallbit status PENDING…).
+    # Surfaced separately so the user sees the purchase without it counting as
+    # invested capital or P&L. Each item: symbol, action, amount_usd, shares,
+    # executed_at, status.
+    pending_trades: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -132,9 +149,9 @@ def _cost_basis_for_symbol(user: User, symbol: str) -> tuple[Decimal, Decimal]:
     BUY contributes +shares / +amount_usd; SELL contributes -shares / -amount_usd.
     Average cost = net_cost / net_shares (when shares > 0).
     """
-    qs = Investment.objects.filter(user=user, symbol__iexact=symbol).only(
-        "action", "amount_usd", "shares"
-    )
+    qs = Investment.objects.filter(user=user, symbol__iexact=symbol).filter(
+        _settled_q()
+    ).only("action", "amount_usd", "shares")
     net_shares = Decimal(0)
     net_cost = Decimal(0)
     for inv in qs:
@@ -233,19 +250,24 @@ def get_summary(user: User) -> PortfolioSummary:
     # se puede medir (Wallbit no lo expone) y mezclarlo inflaba el "invertido"
     # contra un "valor actual" que solo cuenta acciones, mostrando una pérdida
     # falsa. El Robo Advisor se reporta aparte (robo_net_contributed_usd).
+    # Only SETTLED trades count toward invested/withdrawn — a PENDING buy hasn't
+    # debited cash nor become a live holding, so counting it would inflate the
+    # cost against a current value that excludes it (false loss).
     invested_total = (
-        Investment.objects.filter(
-            user=user, action=Investment.BUY
-        ).aggregate(s=Sum("amount_usd"))["s"]
+        Investment.objects.filter(user=user, action=Investment.BUY)
+        .filter(_settled_q())
+        .aggregate(s=Sum("amount_usd"))["s"]
         or Decimal(0)
     )
     withdrawn_total = (
-        Investment.objects.filter(
-            user=user, action=Investment.SELL
-        ).aggregate(s=Sum("amount_usd"))["s"]
+        Investment.objects.filter(user=user, action=Investment.SELL)
+        .filter(_settled_q())
+        .aggregate(s=Sum("amount_usd"))["s"]
         or Decimal(0)
     )
     net_invested = Decimal(invested_total) - Decimal(withdrawn_total)
+
+    pending_trades = _pending_trades(user)
 
     current_value = Decimal(0)
     cash: list[CashBalance] = []
@@ -299,7 +321,36 @@ def get_summary(user: User) -> PortfolioSummary:
         robo_net_contributed_usd=robo["net_contributed_usd"],
         investment_cash_usd=investment_cash,
         last_sync_at=account.last_sync_at,
+        pending_trades=pending_trades,
     )
+
+
+def _pending_trades(user: User) -> list[dict[str, Any]]:
+    """Not-yet-settled trades (Wallbit status PENDING…), newest first.
+
+    Read from the mirrored Investment rows linked to a pending tx. Kept out of
+    invested/P&L; the dashboard shows them in a separate "Pendientes" section.
+    """
+    qs = (
+        Investment.objects.filter(
+            user=user,
+            action__in=[Investment.BUY, Investment.SELL],
+            wallbit_tx__status__in=PENDING_TX_STATUSES,
+        )
+        .select_related("wallbit_tx")
+        .order_by("-wallbit_tx__created_at_wallbit")
+    )
+    out: list[dict[str, Any]] = []
+    for inv in qs:
+        out.append({
+            "symbol": inv.symbol,
+            "action": inv.action,
+            "amount_usd": inv.amount_usd,
+            "shares": inv.shares,
+            "executed_at": inv.executed_at or (inv.wallbit_tx.created_at_wallbit if inv.wallbit_tx else None),
+            "status": (inv.wallbit_tx.status if inv.wallbit_tx else "PENDING"),
+        })
+    return out
 
 
 _PERIOD_DAYS = {"1m": 30, "3m": 90, "6m": 180, "1y": 365, "all": 3650}
@@ -322,6 +373,7 @@ def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
 
     qs = (
         Investment.objects.filter(user=user, action__in=[Investment.BUY, Investment.SELL])
+        .filter(_settled_q())
         .annotate(effective_at=Coalesce("executed_at", "created_at"))
         .filter(effective_at__gte=since)
         .order_by("effective_at")
@@ -337,6 +389,7 @@ def get_timeline(user: User, period: str = "3m") -> list[TimelinePoint]:
     # at the user's real net-invested position, not zero.
     seed = (
         Investment.objects.filter(user=user)
+        .filter(_settled_q())
         .annotate(effective_at=Coalesce("executed_at", "created_at"))
         .filter(effective_at__lt=since)
         .aggregate(

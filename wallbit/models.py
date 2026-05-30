@@ -3,6 +3,15 @@ from pgvector.django import VectorField
 
 from users.models import User
 
+# Wallbit transaction statuses that mean "not yet settled". A trade in one of
+# these states has NOT debited cash nor become a live holding, so it must be
+# excluded from "capital invertido"/P&L (otherwise it inflates the cost against
+# a live value that doesn't include it → false loss) and surfaced separately as
+# a pending transaction. Compared case-insensitively against ``WallbitTxMirror.status``.
+PENDING_TX_STATUSES = frozenset(
+    {"PENDING", "PROCESSING", "OPEN", "CREATED", "WAITING", "QUEUED", "IN_PROGRESS", "SUBMITTED"}
+)
+
 
 class WallbitAccount(models.Model):
     CONNECTED = "connected"

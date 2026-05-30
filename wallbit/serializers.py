@@ -1,6 +1,12 @@
 from rest_framework import serializers
 
-from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
+from .models import (
+    PENDING_TX_STATUSES,
+    AgentDecision,
+    AgentLimits,
+    Investment,
+    WallbitAccount,
+)
 
 
 class WallbitConnectSerializer(serializers.Serializer):
@@ -61,6 +67,7 @@ class AgentLimitsSerializer(serializers.ModelSerializer):
 
 class InvestmentSerializer(serializers.ModelSerializer):
     wallbit_tx_uuid = serializers.SerializerMethodField()
+    status = serializers.SerializerMethodField()
 
     class Meta:
         model = Investment
@@ -73,12 +80,32 @@ class InvestmentSerializer(serializers.ModelSerializer):
             "amount_usd",
             "shares",
             "wallbit_tx_uuid",
+            "status",
+            "executed_at",
             "created_at",
         )
         read_only_fields = fields
 
     def get_wallbit_tx_uuid(self, obj: Investment) -> str | None:
         return obj.wallbit_tx.wallbit_uuid if obj.wallbit_tx_id else None
+
+    def get_status(self, obj: Investment) -> str:
+        """'pending' if the linked Wallbit tx hasn't settled yet, else 'executed'."""
+        mirror = obj.wallbit_tx
+        if mirror and (mirror.status or "").upper() in PENDING_TX_STATUSES:
+            return "pending"
+        return "executed"
+
+
+class PendingTradeSerializer(serializers.Serializer):
+    symbol = serializers.CharField()
+    action = serializers.CharField()
+    amount_usd = serializers.DecimalField(max_digits=14, decimal_places=2)
+    shares = serializers.DecimalField(
+        max_digits=18, decimal_places=8, allow_null=True
+    )
+    executed_at = serializers.DateTimeField(allow_null=True)
+    status = serializers.CharField()
 
 
 class CashBalanceSerializer(serializers.Serializer):
@@ -98,6 +125,7 @@ class PortfolioSummarySerializer(serializers.Serializer):
     robo_net_contributed_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     investment_cash_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     last_sync_at = serializers.DateTimeField(allow_null=True)
+    pending_trades = PendingTradeSerializer(many=True, read_only=True)
 
 
 class HoldingSerializer(serializers.Serializer):
