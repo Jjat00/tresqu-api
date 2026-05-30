@@ -51,6 +51,14 @@ class PriceProvider(Protocol):
         """Return a chronological-ascending list of canonical raw points."""
         ...
 
+    def fetch_quote(self, symbol: str) -> dict[str, Any]:
+        """Return a canonical current-quote dict (price, change, 52w range…)."""
+        ...
+
+    # Fundamentals are optional: providers that can't supply them simply omit
+    # these methods, and ``service.get_asset_snapshot`` treats them as missing
+    # (best-effort) rather than failing the whole snapshot.
+
 
 def _to_float(value: Any) -> float | None:
     if value is None or value == "":
@@ -99,6 +107,61 @@ class TwelveDataProvider:
         }
         payload = self._request("/time_series", params=params)
         return self._normalize(payload)
+
+    def fetch_quote(self, symbol: str) -> dict[str, Any]:
+        """Current quote for ``symbol`` from Twelve Data ``/quote``."""
+        if not self._api_key:
+            raise MarketDataConfigError(
+                "TWELVE_DATA_API_KEY no está configurada; no puedo obtener la cotización."
+            )
+        payload = self._request("/quote", params={"symbol": symbol, "apikey": self._api_key})
+        fw = payload.get("fifty_two_week") if isinstance(payload, dict) else None
+        return {
+            "symbol": payload.get("symbol"),
+            "name": payload.get("name"),
+            "exchange": payload.get("exchange"),
+            "currency": payload.get("currency"),
+            "price": _to_float(payload.get("close")),
+            "open": _to_float(payload.get("open")),
+            "high": _to_float(payload.get("high")),
+            "low": _to_float(payload.get("low")),
+            "previous_close": _to_float(payload.get("previous_close")),
+            "change": _to_float(payload.get("change")),
+            "percent_change": _to_float(payload.get("percent_change")),
+            "volume": _to_float(payload.get("volume")),
+            "is_market_open": payload.get("is_market_open"),
+            "fifty_two_week_low": _to_float(fw.get("low")) if isinstance(fw, dict) else None,
+            "fifty_two_week_high": _to_float(fw.get("high")) if isinstance(fw, dict) else None,
+            "datetime": payload.get("datetime"),
+        }
+
+    def fetch_profile(self, symbol: str) -> dict[str, Any]:
+        """Company/asset fundamentals from Twelve Data ``/profile`` (best-effort)."""
+        if not self._api_key:
+            return {}
+        payload = self._request("/profile", params={"symbol": symbol, "apikey": self._api_key})
+        description = payload.get("description") or ""
+        if len(description) > 600:  # keep the agent context compact
+            description = description[:600].rstrip() + "…"
+        return {
+            "sector": payload.get("sector") or None,
+            "industry": payload.get("industry") or None,
+            "website": payload.get("website") or None,
+            "description": description or None,
+        }
+
+    def fetch_latest_dividend(self, symbol: str) -> dict[str, Any] | None:
+        """Most recent dividend (ex-date + amount) from ``/dividends`` (best-effort)."""
+        if not self._api_key:
+            return None
+        payload = self._request("/dividends", params={"symbol": symbol, "apikey": self._api_key})
+        rows = payload.get("dividends") if isinstance(payload, dict) else None
+        if not isinstance(rows, list) or not rows:
+            return None
+        latest = rows[0] if isinstance(rows[0], dict) else None
+        if not latest:
+            return None
+        return {"ex_date": latest.get("ex_date"), "amount": _to_float(latest.get("amount"))}
 
     def _request(self, path: str, *, params: dict[str, Any]) -> dict[str, Any]:
         url = f"{self._base_url}{path}"

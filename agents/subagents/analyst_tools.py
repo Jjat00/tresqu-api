@@ -45,15 +45,35 @@ def make_analyst_tools(user_external_id: str, *, user: User | None = None) -> li
 
     @tool
     def get_asset_quote(symbol: str) -> dict[str, Any]:
-        """Ficha actual de un activo: precio actual, tipo, sector, dividendos y descripción.
+        """Ficha actual de un activo: precio actual, cambio, rango 52 semanas, sector, descripción y dividendos.
 
-        Úsala para el precio "ahora mismo" y los fundamentales. Para la
-        evolución en el tiempo usa get_price_history.
+        Si el usuario tiene Wallbit conectado, la ficha sale de Wallbit (su
+        fuente operativa real); si no, se obtiene de una fuente de mercado
+        neutral que NO requiere cuenta. En ambos casos son datos REALES: nunca
+        inventes un campo que venga vacío — dilo. ``source`` indica el origen.
+        Para la evolución en el tiempo usa get_price_history.
         """
-        return wallbit_get_asset.invoke({
+        wb = wallbit_get_asset.invoke({
             "user_external_id": user_external_id,
             "symbol": symbol,
         })
+        if isinstance(wb, dict) and wb.get("ok"):
+            return {"ok": True, "source": "wallbit", "asset": wb.get("asset")}
+
+        # Sin cuenta Wallbit (o Wallbit no disponible): fuente de mercado neutral.
+        from marketdata.exceptions import MarketDataError, MarketDataNotFoundError
+        from marketdata.service import get_asset_snapshot
+
+        try:
+            snap = get_asset_snapshot(symbol)
+        except MarketDataNotFoundError:
+            return {"ok": False, "error": "symbol_not_found"}
+        except ValueError:
+            return {"ok": False, "error": "symbol_required"}
+        except MarketDataError as exc:
+            logger.warning("analyst get_asset_quote fallback failed", exc_info=exc)
+            return {"ok": False, "error": "market_data_unavailable", "detail": str(exc)}
+        return {"ok": True, "source": "marketdata", **snap}
 
     @tool
     def get_price_history(symbol: str, range: str = "1m") -> dict[str, Any]:

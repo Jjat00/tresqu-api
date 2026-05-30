@@ -78,6 +78,20 @@ def _lastgood_key(symbol: str, range_: str) -> str:
     return f"md:hist:lastgood:{symbol}:{range_}"
 
 
+# Asset snapshot (quote + fundamentals) caching. The quote moves intraday, so
+# the live TTL is short; last-good is kept long to ride out a quota outage.
+_ASSET_TTL = 600  # 10 min
+_ASSET_LASTGOOD_TTL = _LASTGOOD_TTL
+
+
+def _asset_key(symbol: str) -> str:
+    return f"md:asset:{symbol}"
+
+
+def _asset_lastgood_key(symbol: str) -> str:
+    return f"md:asset:lastgood:{symbol}"
+
+
 def _trend(change_pct: float) -> str:
     if change_pct > _TREND_THRESHOLD_PCT:
         return "alcista"
@@ -169,4 +183,68 @@ def get_price_history(
         raise MarketDataNotFoundError(f"Sin datos de precio para '{symbol}' ({range_}).")
     _cache_set(_live_key(symbol, range_), payload, ttl)
     _cache_set(_lastgood_key(symbol, range_), payload, _LASTGOOD_TTL)
+    return payload
+
+
+def get_asset_snapshot(
+    symbol: str,
+    *,
+    provider: PriceProvider | None = None,
+) -> dict[str, Any]:
+    """Return a neutral asset snapshot: current quote + fundamentals.
+
+    This is the no-Wallbit-needed source for the analyst's asset card. The
+    quote is required; fundamentals (profile, dividend) are best-effort — a
+    failure there never sinks the snapshot, it just leaves those fields null
+    (so the agent reports what it has and never invents the rest). On a quote
+    failure, falls back to the last-good cached snapshot (``stale=True``).
+    """
+    symbol = (symbol or "").strip().upper()
+    if not symbol:
+        raise ValueError("symbol_required")
+
+    cached = _cache_get(_asset_key(symbol))
+    if cached is not None:
+        return cached
+
+    active = provider or get_provider()
+    try:
+        quote = active.fetch_quote(symbol)
+    except MarketDataError as exc:
+        last_good = _cache_get(_asset_lastgood_key(symbol))
+        if last_good is not None:
+            logger.warning(
+                "marketdata: quote failed, serving last-good asset snapshot (stale)",
+                extra={"symbol": symbol, "error": str(exc)},
+            )
+            return {**last_good, "stale": True}
+        raise
+
+    if quote.get("price") is None:
+        raise MarketDataNotFoundError(f"Sin cotización para '{symbol}'.")
+
+    profile: dict[str, Any] = {}
+    dividend = None
+    try:
+        profile = active.fetch_profile(symbol) or {}
+    except MarketDataError as exc:
+        logger.info("marketdata: profile unavailable for %s (%s)", symbol, exc)
+    try:
+        dividend = active.fetch_latest_dividend(symbol)
+    except MarketDataError as exc:
+        logger.info("marketdata: dividend unavailable for %s (%s)", symbol, exc)
+
+    payload = {
+        "symbol": quote.get("symbol") or symbol,
+        "name": quote.get("name"),
+        "exchange": quote.get("exchange"),
+        "currency": quote.get("currency"),
+        "quote": quote,
+        "fundamentals": profile,
+        "latest_dividend": dividend,
+        "stale": False,
+        "source": active.name,
+    }
+    _cache_set(_asset_key(symbol), payload, _ASSET_TTL)
+    _cache_set(_asset_lastgood_key(symbol), payload, _ASSET_LASTGOOD_TTL)
     return payload
