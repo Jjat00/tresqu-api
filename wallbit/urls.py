@@ -8,6 +8,7 @@ from .views import (
     AssetSearchView,
     InvestmentListView,
     PortfolioHoldingsView,
+    PortfolioPnLTimelineView,
     PortfolioSummaryView,
     PortfolioTimelineView,
     WallbitConnectView,
@@ -42,4 +43,5 @@ urlpatterns = [
     path("portfolio/summary/", PortfolioSummaryView.as_view(), name="wallbit-portfolio-summary"),
     path("portfolio/holdings/", PortfolioHoldingsView.as_view(), name="wallbit-portfolio-holdings"),
     path("portfolio/timeline/", PortfolioTimelineView.as_view(), name="wallbit-portfolio-timeline"),
+    path("portfolio/pnl-timeline/", PortfolioPnLTimelineView.as_view(), name="wallbit-portfolio-pnl-timeline"),
 ]
