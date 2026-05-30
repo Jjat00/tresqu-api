@@ -430,30 +430,36 @@ def _action_filter(*actions: str):
     return q
 
 
-# Maps the chart's period to (start date, market-data range to fetch). The
-# market-data range only controls price granularity/density — the sample dates
-# are derived from the prices actually returned, clipped to the start date.
-def _pnl_window(period: str, first_date: date | None, today: date) -> tuple[date, str]:
+# Left edge of the chart for each period, never older than the first investment
+# (the user had no portfolio before that — nothing to plot).
+def _pnl_window_start(period: str, first_date: date, today: date) -> date:
     p = (period or "1m").lower()
     if p == "1w":
-        return today - timedelta(days=7), "1m"
-    if p == "1m":
-        return today - timedelta(days=30), "1m"
-    if p == "1y":
-        return today - timedelta(days=365), "1y"
-    if p == "ytd":
-        return date(today.year, 1, 1), "1y"
-    if p == "all":
-        start = first_date or (today - timedelta(days=30))
-        span = (today - start).days
-        if span <= 330:
-            md = "1y"
-        elif span <= 5 * 365:
-            md = "5y"
-        else:
-            md = "max"
-        return start, md
-    return today - timedelta(days=30), "1m"
+        s = today - timedelta(days=7)
+    elif p == "1m":
+        s = today - timedelta(days=30)
+    elif p == "1y":
+        s = today - timedelta(days=365)
+    elif p == "ytd":
+        s = date(today.year, 1, 1)
+    elif p == "all":
+        s = first_date
+    else:
+        s = today - timedelta(days=30)
+    return max(s, first_date)
+
+
+# The market-data range is chosen from the FULL history span (first trade →
+# today), NOT the requested window, so we always have prices at every trade
+# date — needed to derive accurate share counts (see get_pnl_timeline). The
+# window only decides which sample dates we emit.
+def _md_range_for_span(first_date: date, today: date) -> str:
+    span = (today - first_date).days
+    if span <= 360:
+        return "1y"  # daily closes
+    if span <= 5 * 365:
+        return "5y"  # weekly closes
+    return "max"  # monthly closes
 
 
 def _price_series(symbol: str, md_range: str) -> tuple[list[date], list[Decimal], bool] | None:
@@ -502,18 +508,22 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
 
     There is no stored history of portfolio *value* — only the transaction
     ledger (``Investment``) and historical *prices* (``marketdata``). So for
-    each sample date we rebuild the holdings as of that date (signed shares of
-    settled BUY/SELL) and value them with the historical close on/just-before
-    that date, then subtract the net invested at that date to get P&L.
+    each sample date we rebuild the holdings as of that date and value them with
+    the historical close on/just-before that date, then subtract the net
+    invested at that date to get P&L.
 
-    Caveats (returned via the ``stale`` flag so the UI can note approximation):
-    - ``Investment.shares`` is stored truncated, so past points can be slightly
-      off. To avoid contradicting the hero cards, the LAST point is anchored to
-      the LIVE ``get_summary`` value/P&L.
-    - If a symbol's price history is unavailable, that symbol falls back to its
-      cost (neutral P&L contribution) and ``stale`` is set.
-    - Robo Advisor / Chest movements are excluded (no live valuation), matching
-      ``get_summary``'s invested/P&L scope.
+    Shares are NOT taken from ``Investment.shares`` (stored truncated, which
+    distorts the whole curve — e.g. a $20 META buy at 0.02 shares implies a
+    $1000 price). Instead each trade's share count is derived from
+    ``amount_usd / historical_price_on_the_trade_date``. This makes the value on
+    the trade date equal the cost (P&L ≈ 0 that day) and keeps the series
+    internally consistent. The LAST point is still anchored to the LIVE
+    ``get_summary`` so the endpoint matches the hero cards exactly.
+
+    The left edge is never older than the first investment. ``stale`` is set
+    when any price (a trade-date or a symbol series) is missing, in which case
+    that piece falls back to the truncated shares / cost. Robo Advisor / Chest
+    movements are excluded (no live valuation), matching ``get_summary``.
     """
     today = timezone.now().date()
 
@@ -529,13 +539,13 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
         return [], False
 
     first_date = txns[0][0].date()
-    since, md_range = _pnl_window(period, first_date, today)
-    start_date = max(since, first_date)
+    start_date = _pnl_window_start(period, first_date, today)
+    # Range chosen from the full history so we have a price at every trade date.
+    md_range = _md_range_for_span(first_date, today)
 
     # Normalize transactions and collect symbols.
     norm: list[tuple[date, str, int, Decimal | None, Decimal]] = []
     symbols: set[str] = set()
-    shares_unknown = False
     for effective_at, symbol, action, shares, amount in txns:
         sym = (symbol or "").upper()
         if not sym:
@@ -543,12 +553,10 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
         sign = 1 if action == Investment.BUY else -1
         norm.append((effective_at.date(), sym, sign, shares, _to_decimal(amount)))
         symbols.add(sym)
-        if shares is None:
-            shares_unknown = True
 
-    # Fetch one historical price series per symbol.
+    # Fetch one historical price series per symbol (covers the full span).
     price_series: dict[str, tuple[list[date], list[Decimal], bool] | None] = {}
-    stale = shares_unknown
+    stale = False
     for sym in symbols:
         series = _price_series(sym, md_range)
         price_series[sym] = series
@@ -567,6 +575,7 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
     sample_dates = sorted(sample_set)
 
     # Walk sample dates and the (sorted) ledger together, accumulating positions.
+    # running_shares holds price-derived shares; running_cost holds exact USD.
     running_shares: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     running_cost: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
     net_invested = Decimal(0)
@@ -574,9 +583,16 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
     points: list[PnLTimelinePoint] = []
     for d in sample_dates:
         while ti < len(norm) and norm[ti][0] <= d:
-            _, sym, sign, shares, amount = norm[ti]
-            if shares is not None:
-                running_shares[sym] += Decimal(sign) * shares
+            tx_date, sym, sign, shares, amount = norm[ti]
+            # Derive shares from the price on the trade date — NOT the stored
+            # (truncated) share count. Fall back to stored shares if no price.
+            tx_price = _price_on_or_before(price_series.get(sym), tx_date)
+            if tx_price is not None and tx_price > 0:
+                derived = amount / tx_price
+            else:
+                derived = shares if shares is not None else Decimal(0)
+                stale = True
+            running_shares[sym] += Decimal(sign) * derived
             running_cost[sym] += Decimal(sign) * amount
             net_invested += Decimal(sign) * amount
             ti += 1
@@ -584,12 +600,12 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
         market_value = Decimal(0)
         for sym, sh in running_shares.items():
             cost = running_cost[sym]
-            if sh > 0:
+            if sh > Decimal("0.00000001"):
                 price = _price_on_or_before(price_series.get(sym), d)
                 # No price for a held symbol → neutral (value = its cost).
                 market_value += (price * sh) if price is not None else max(cost, Decimal(0))
             elif cost > 0:
-                # Held but shares unknown (legacy NULL) → neutral contribution.
+                # Held but shares couldn't be derived → neutral contribution.
                 market_value += cost
 
         pnl = market_value - net_invested
