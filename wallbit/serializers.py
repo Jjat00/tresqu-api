@@ -147,7 +147,8 @@ class TimelinePointSerializer(serializers.Serializer):
 
 
 class PnLTimelinePointSerializer(serializers.Serializer):
-    date = serializers.DateField()
+    # "YYYY-MM-DD" for daily periods, full ISO timestamp for the intraday "1d".
+    date = serializers.CharField()
     pnl_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     pnl_pct = serializers.FloatField()
     market_value_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
