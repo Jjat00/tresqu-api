@@ -151,8 +151,11 @@ class PnLTimelinePoint:
     ``pnl_usd`` = reconstructed market value − net invested at that date. The
     line crosses zero (above = gain, below = loss). ``invested_total_usd`` and
     ``market_value_usd`` are carried for the tooltip/context.
+
+    ``date`` is a ``date`` for daily periods and a full ISO datetime string for
+    the intraday "1d" period — serialized as a plain string either way.
     """
-    date: date
+    date: Any
     pnl_usd: Decimal
     pnl_pct: float
     market_value_usd: Decimal
@@ -493,14 +496,187 @@ def _price_series(symbol: str, md_range: str) -> tuple[list[date], list[Decimal]
     return dates, [by_date[d] for d in dates], bool(payload.get("stale"))
 
 
-def _price_on_or_before(series: tuple[list[date], list[Decimal], bool] | None, d: date) -> Decimal | None:
+def _price_on_or_before(series, d) -> Decimal | None:
+    """Most recent price at/before ``d``. Works for daily (``date``) and
+    intraday (``datetime``) series — bisect only needs the keys comparable to d.
+    """
     if series is None:
         return None
-    dates, prices, _ = series
-    idx = bisect.bisect_right(dates, d) - 1
+    keys, prices, _ = series
+    idx = bisect.bisect_right(keys, d) - 1
     if idx < 0:
         return None
     return prices[idx]
+
+
+# Wallbit trades US stocks/ETFs → intraday timestamps from Twelve Data come in
+# US Eastern (exchange) time as naive strings; localize them so they compare
+# correctly with the UTC-aware ``executed_at``.
+_EXCHANGE_TZ_NAME = "America/New_York"
+
+
+def _parse_intraday_dt(value: Any, tz) -> datetime | None:
+    s = str(value).strip().replace("Z", "").replace("T", " ")
+    try:
+        dt = datetime.strptime(s[:19], "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None  # daily "YYYY-MM-DD" has no time → not an intraday point
+    return dt.replace(tzinfo=tz)
+
+
+def _intraday_series(symbol: str, tz) -> tuple[list[datetime], list[Decimal], bool] | None:
+    """Today's intraday (5-min) closes for ``symbol`` as tz-aware datetimes."""
+    from marketdata.service import get_price_history
+
+    try:
+        payload = get_price_history(symbol, "1d")
+    except Exception as exc:
+        logger.warning("pnl intraday: price history failed for %s: %s", symbol, exc)
+        return None
+    by_dt: dict[datetime, Decimal] = {}
+    for p in payload.get("points") or []:
+        t = p.get("t")
+        price = p.get("price")
+        if not t or price is None:
+            continue
+        dt = _parse_intraday_dt(t, tz)
+        if dt is not None:
+            by_dt[dt] = _to_decimal(price)
+    if not by_dt:
+        return None
+    dts = sorted(by_dt)
+    return dts, [by_dt[d] for d in dts], bool(payload.get("stale"))
+
+
+def _pnl_intraday(user: User) -> tuple[list[PnLTimelinePoint], bool]:
+    """P&L through TODAY's intraday prices (the "1D" view).
+
+    Values the holdings at each 5-min mark of the latest trading day. Trades are
+    applied at their real ``executed_at`` time, so a brand-new user who bought
+    today sees a flat 0 until the purchase and the live curve afterwards — no
+    phantom gain/loss before they owned anything. Last point anchored to the
+    live summary. Returns points whose ``date`` is a full ISO timestamp.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(_EXCHANGE_TZ_NAME)
+    except Exception:
+        from datetime import timezone as _tz
+        tz = _tz.utc
+
+    txns = list(
+        Investment.objects.filter(user=user, action__in=[Investment.BUY, Investment.SELL])
+        .filter(_settled_q())
+        .annotate(effective_at=Coalesce("executed_at", "created_at"))
+        .order_by("effective_at")
+        .values_list("effective_at", "symbol", "action", "shares", "amount_usd")
+    )
+    if not txns:
+        return [], False
+
+    first_date = txns[0][0].date()
+    today = timezone.now().date()
+    daily_range = _md_range_for_span(first_date, today)
+    symbols = {(s or "").upper() for _, s, _, _, _ in txns if s}
+
+    daily = {sym: _price_series(sym, daily_range) for sym in symbols}
+    intraday = {sym: _intraday_series(sym, tz) for sym in symbols}
+    stale = any(intraday[s] is None or intraday[s][2] for s in symbols)
+
+    all_dts = [dt for s in intraday.values() if s for dt in s[0]]
+
+    def _live_anchor(ts: str) -> list[PnLTimelinePoint]:
+        try:
+            summary = get_summary(user)
+            return [PnLTimelinePoint(
+                date=ts,
+                pnl_usd=summary.pnl_usd,
+                pnl_pct=summary.pnl_pct,
+                market_value_usd=summary.current_value_usd,
+                invested_total_usd=summary.net_invested_usd,
+            )]
+        except Exception as exc:
+            logger.warning("pnl intraday: live anchor failed for user %s: %s", user.id, exc)
+            return []
+
+    if not all_dts:
+        # No intraday data (e.g. provider down) → just the live point.
+        return _live_anchor(timezone.now().isoformat()), True
+
+    trading_day = max(all_dts).date()  # in exchange tz
+
+    # Build start-of-day holdings (trades before the trading day) and the list of
+    # trades that happened DURING the trading day (applied at their timestamp).
+    start_shares: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    start_cost: dict[str, Decimal] = defaultdict(lambda: Decimal(0))
+    start_ninv = Decimal(0)
+    today_trades: list[tuple[datetime, str, Decimal, Decimal]] = []
+    for effective_at, symbol, action, shares, amount in txns:
+        sym = (symbol or "").upper()
+        if not sym:
+            continue
+        sign = 1 if action == Investment.BUY else -1
+        amt = _to_decimal(amount)
+        et_date = effective_at.astimezone(tz).date()
+        if et_date < trading_day:
+            price = _price_on_or_before(daily.get(sym), effective_at.date())
+        elif et_date == trading_day:
+            price = _price_on_or_before(intraday.get(sym), effective_at) or _price_on_or_before(
+                daily.get(sym), effective_at.date()
+            )
+        else:
+            continue  # future-dated, ignore
+        if price is not None and price > 0:
+            derived = amt / price
+        else:
+            derived = shares if shares is not None else Decimal(0)
+            stale = True
+        if et_date < trading_day:
+            start_shares[sym] += Decimal(sign) * derived
+            start_cost[sym] += Decimal(sign) * amt
+            start_ninv += Decimal(sign) * amt
+        else:
+            today_trades.append((effective_at, sym, Decimal(sign) * derived, Decimal(sign) * amt))
+    today_trades.sort(key=lambda x: x[0])
+
+    sample_dts = sorted({dt for s in intraday.values() if s for dt in s[0] if dt.date() == trading_day})
+
+    cur_shares = dict(start_shares)
+    cur_cost = dict(start_cost)
+    ninv = start_ninv
+    ti = 0
+    points: list[PnLTimelinePoint] = []
+    for dt in sample_dts:
+        while ti < len(today_trades) and today_trades[ti][0] <= dt:
+            _, sym, dsh, damt = today_trades[ti]
+            cur_shares[sym] = cur_shares.get(sym, Decimal(0)) + dsh
+            cur_cost[sym] = cur_cost.get(sym, Decimal(0)) + damt
+            ninv += damt
+            ti += 1
+        market_value = Decimal(0)
+        for sym, sh in cur_shares.items():
+            if sh > Decimal("0.00000001"):
+                price = _price_on_or_before(intraday.get(sym), dt)
+                market_value += (price * sh) if price is not None else max(cur_cost.get(sym, Decimal(0)), Decimal(0))
+        pnl = market_value - ninv
+        pnl_pct = float(pnl / ninv * 100) if ninv > 0 else 0.0
+        points.append(PnLTimelinePoint(
+            date=dt.isoformat(),
+            pnl_usd=pnl,
+            pnl_pct=pnl_pct,
+            market_value_usd=market_value,
+            invested_total_usd=ninv,
+        ))
+
+    # Anchor the last point to the live summary (keep its timestamp so the
+    # intraday x-axis stays tidy even on weekends/after close).
+    anchor = _live_anchor(points[-1].date if points else timezone.now().isoformat())
+    if anchor:
+        if points:
+            points[-1] = anchor[0]
+        else:
+            points = anchor
+    return points, stale
 
 
 def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePoint], bool]:
@@ -524,7 +700,12 @@ def get_pnl_timeline(user: User, period: str = "1m") -> tuple[list[PnLTimelinePo
     when any price (a trade-date or a symbol series) is missing, in which case
     that piece falls back to the truncated shares / cost. Robo Advisor / Chest
     movements are excluded (no live valuation), matching ``get_summary``.
+
+    The "1d" period is intraday (today's price movement) and handled separately.
     """
+    if (period or "").lower() == "1d":
+        return _pnl_intraday(user)
+
     today = timezone.now().date()
 
     # Settled stock/ETF/BOND trades only (same scope as the invested timeline).
