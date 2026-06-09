@@ -663,6 +663,9 @@ class ExpenseViewSet(viewsets.ModelViewSet):
                 }],
                 'filter_summary': "Sin datos",
                 'total_amount': 0,
+                'totals_by_currency': {},
+                'total_count': 0,
+                'recent_expenses': [],
                 'categories_info': []
             })
 
@@ -731,6 +734,17 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             many=True
         ).data
 
+        # Totales reales sobre TODO el rango filtrado (no solo los 10
+        # recientes), separados por moneda para no mezclar/convertir divisas.
+        # Los KPIs del frontend consumen esto en vez de sumar recent_expenses.
+        totals_by_currency = {
+            row['currency']: float(row['total'])
+            for row in queryset.values('currency')
+            .annotate(total=Sum('amount'))
+            .order_by('-total')
+        }
+        total_count = queryset.count()
+
         # Resumen del filtro aplicado
         filter_summary = "Todos los gastos"
         if date_filter != 'all' and start_date and end_date:
@@ -746,6 +760,8 @@ class ExpenseViewSet(viewsets.ModelViewSet):
             }],
             'filter_summary': filter_summary,
             'total_amount': sum(data),
+            'totals_by_currency': totals_by_currency,
+            'total_count': total_count,
             'recent_expenses': expenses,  # Incluir algunos gastos recientes para detalles
             # Incluir información detallada de las categorías
             'categories_info': categories_info

@@ -252,6 +252,9 @@ class IncomeViewSet(viewsets.ModelViewSet):
         """Obtiene un resumen de ingresos por período usando categorías por usuario"""
         user = request.user
         period = request.query_params.get('period', 'month')
+        date_filter = request.query_params.get('date_filter')
+        start_date_param = request.query_params.get('start_date')
+        end_date_param = request.query_params.get('end_date')
 
         # Obtener zona horaria del usuario
         user_timezone = self._get_user_timezone(request)
@@ -259,23 +262,50 @@ class IncomeViewSet(viewsets.ModelViewSet):
         local_now = self._get_local_datetime(request)
         today = local_now.date()
 
-        # Determinar fecha de inicio según el período
-        if period == 'week':
-            start_date = today - timedelta(days=today.weekday())
-        elif period == 'month':
-            start_date = today.replace(day=1)
-        elif period == 'year':
-            start_date = today.replace(month=1, day=1)
-        else:  # 'all' o cualquier otro valor
-            start_date = None
-
-        # Filtrar ingresos por período
         queryset = Income.objects.filter(user=user)
-        if start_date:
-            # Convertir a UTC para filtrar correctamente
+
+        # Rango personalizado del calendario global: tiene prioridad sobre
+        # `period`. Así los KPIs de ingresos siguen el filtro de fecha global,
+        # igual que las gráficas. La tabla usa su propio `period` por separado.
+        custom_start = None
+        custom_end = None
+        if date_filter == 'custom' and start_date_param and end_date_param:
+            try:
+                custom_start = datetime.strptime(
+                    start_date_param, '%Y-%m-%d').date()
+                custom_end = datetime.strptime(
+                    end_date_param, '%Y-%m-%d').date()
+            except (ValueError, TypeError):
+                custom_start = None
+                custom_end = None
+
+        if custom_start and custom_end:
             start_datetime = self._convert_to_utc(
-                start_date, False, user_timezone)
-            queryset = queryset.filter(timestamp__gte=start_datetime)
+                custom_start, False, user_timezone)
+            end_datetime = self._convert_to_utc(
+                custom_end, True, user_timezone)
+            queryset = queryset.filter(
+                timestamp__gte=start_datetime, timestamp__lte=end_datetime)
+            resp_start = custom_start
+            resp_end = custom_end
+        else:
+            # Fallback por período cuando no hay rango personalizado
+            if period == 'week':
+                start_date = today - timedelta(days=today.weekday())
+            elif period == 'month':
+                start_date = today.replace(day=1)
+            elif period == 'year':
+                start_date = today.replace(month=1, day=1)
+            else:  # 'all' o cualquier otro valor
+                start_date = None
+
+            if start_date:
+                # Convertir a UTC para filtrar correctamente
+                start_datetime = self._convert_to_utc(
+                    start_date, False, user_timezone)
+                queryset = queryset.filter(timestamp__gte=start_datetime)
+            resp_start = start_date
+            resp_end = today
 
         # Calcular totales por categoría incluyendo el ID, priorizando categorías por usuario
         summary = queryset.values(
@@ -304,8 +334,8 @@ class IncomeViewSet(viewsets.ModelViewSet):
 
         return Response({
             'period': period,
-            'start_date': start_date,
-            'end_date': today,
+            'start_date': resp_start,
+            'end_date': resp_end,
             'summary': transformed_summary,
             'total': total
         })
