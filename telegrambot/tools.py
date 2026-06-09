@@ -813,6 +813,35 @@ def search_expenses_by_text(user_external_id: str, search_text: str) -> List[Dic
 
 
 @tool
+def search_expenses_by_amount(user_external_id: str, amount: float, currency: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Busca gastos por monto exacto, los más recientes primero. Útil cuando el
+    usuario referencia un gasto por su valor ("el gasto de 14000").
+    """
+    try:
+        from decimal import Decimal
+
+        user = User.objects.get(external_id=user_external_id)
+        query = Expense.objects.filter(user=user, amount=Decimal(str(amount)))
+        if currency:
+            query = query.filter(currency__iexact=currency)
+
+        return [{
+            'id': str(expense.id),
+            'amount': float(expense.amount),
+            'currency': expense.currency,
+            'description': expense.description,
+            'category': expense.user_expense_category.name if expense.user_expense_category else (expense.category.name if expense.category else expense.category_str),
+            'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+            'note': expense.note,
+            'raw_message': expense.raw_message
+        } for expense in query.order_by('-spent_at')[:10]]
+    except Exception as e:
+        logger.error(f"Error buscando gastos por monto: {e}")
+        return []
+
+
+@tool
 def get_expenses_by_category(user_external_id: str, category: str, start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
     """
     Obtiene los gastos de una categoría específica en un rango de fechas.
@@ -1319,6 +1348,36 @@ def search_incomes_by_text(user_external_id: str, search_text: str) -> List[Dict
         ]
     except Exception as e:
         logger.error(f"Error buscando ingresos por texto: {e}")
+        return []
+
+
+@tool
+def search_incomes_by_amount(user_external_id: str, amount: float, currency: str | None = None) -> List[Dict[str, Any]]:
+    """
+    Busca ingresos por monto exacto, los más recientes primero. Útil cuando el
+    usuario referencia un ingreso por su valor ("el ingreso de 500000").
+    """
+    try:
+        from decimal import Decimal
+
+        user = User.objects.filter(external_id=user_external_id).first()
+        if not user:
+            return []
+        query = Income.objects.filter(user=user, amount=Decimal(str(amount)))
+        if currency:
+            query = query.filter(currency__iexact=currency)
+
+        return [{
+            'id': str(income.id),
+            'amount': float(income.amount),
+            'currency': income.currency,
+            'description': income.description,
+            'category': income.user_income_category.name if income.user_income_category else (income.category.name if income.category else income.category_str),
+            'received_at': income.received_at.strftime('%Y-%m-%d') if income.received_at else None,
+            'note': income.note
+        } for income in query.order_by('-received_at')[:10]]
+    except Exception as e:
+        logger.error(f"Error buscando ingresos por monto: {e}")
         return []
 
 
