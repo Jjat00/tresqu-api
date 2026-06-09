@@ -423,14 +423,15 @@ def _llm_intent_is_categorization(text: str) -> bool:
         )
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Decide si el mensaje del usuario es la CATEGORÍA de un gasto pendiente
+            ("system", """Decide si el mensaje del usuario es una respuesta de CATEGORIZACIÓN de un gasto pendiente
 o es un MENSAJE NUEVO (registrar otro gasto/ingreso, pregunta, saludo, etc.).
 
-Contexto: el usuario recibió antes una notificación pidiéndole clasificar un gasto.
+Contexto: el usuario recibió antes una notificación de una compra detectada en su correo,
+pidiéndole clasificarla o corregir la categoría.
 
 Responde ÚNICAMENTE con una sola palabra en minúscula:
-- "categoria" si el mensaje es el nombre de una categoría (ej: "alimentación", "transporte", "ocio", "comida", "streaming", "salud", "mercado").
-- "otro" en cualquier otro caso: si menciona montos, verbos de registrar ("gasté", "pagué", "compré", "gané"), preguntas, saludos, agradecimientos, o texto no relacionado."""),
+- "categoria" si el mensaje es el nombre de una categoría (ej: "alimentación", "transporte", "ocio", "comida", "streaming", "salud", "mercado") O si describe QUÉ fue esa compra SIN mencionar monto (ej: "fue la compra de unos cereales", "eso fue del mercado", "es el pago del gimnasio").
+- "otro" en cualquier otro caso: si menciona montos o cantidades de dinero, si registra un movimiento nuevo con monto ("gasté 20k en pan", "me pagaron 500"), preguntas, saludos, agradecimientos, o texto no relacionado."""),
             ("human", "{text}"),
         ])
 
