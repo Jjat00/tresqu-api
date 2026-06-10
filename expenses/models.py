@@ -26,6 +26,17 @@ class Expense(models.Model):
         help_text='Categoría de gasto personalizada por usuario'
     )
 
+    # Mensaje saliente (confirmación del bot) que registró este gasto;
+    # permite resolverlo de forma determinista al citar (swipe to reply)
+    # o reaccionar a ese mensaje.
+    source_message = models.ForeignKey(
+        'users.Message',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_expenses',
+    )
+
     description = models.TextField(blank=True)
     timestamp = models.DateTimeField()
     spent_at = models.DateField(null=True, blank=True)

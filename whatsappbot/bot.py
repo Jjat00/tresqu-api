@@ -8,6 +8,7 @@ from django.conf import settings
 from asgiref.sync import sync_to_async
 
 from users.models import User, Chat, Message, TrackingLink
+from agents.run_context import start_transaction_tracking
 from .services import process_message
 from .utils import normalize_phone_number
 import re
@@ -401,6 +402,79 @@ def _get_quoted_message_text(chat, platform_message_id: str) -> str | None:
     except Exception as e:
         logger.error(f"Error obteniendo mensaje citado {platform_message_id}: {e}")
         return None
+
+
+def _get_quoted_message_context(chat, platform_message_id: str) -> tuple[str, list[str]] | None:
+    """
+    Versión enriquecida de _get_quoted_message_text: además del texto del
+    mensaje citado, devuelve los registros (gastos/ingresos) que ese mensaje
+    creó, con sus IDs exactos. Así el agente puede eliminarlos o editarlos
+    de forma determinista sin depender de búsquedas por monto o semánticas.
+
+    Returns:
+        (texto_citado_truncado, [líneas describiendo registros vinculados])
+        o None si el mensaje no existe.
+    """
+    if not platform_message_id:
+        return None
+    try:
+        msg = Message.objects.filter(
+            chat=chat, platform_message_id=platform_message_id
+        ).first()
+        if not msg or not msg.text:
+            return None
+        text = msg.text.strip()
+        quoted = text[:500] + ("…" if len(text) > 500 else "")
+
+        linked_lines = []
+        try:
+            for exp in msg.created_expenses.all():
+                category = exp.user_expense_category.name if exp.user_expense_category else exp.category_str
+                linked_lines.append(
+                    f"gasto id={exp.id}: {exp.amount} {exp.currency} "
+                    f"en {category or 'sin categoría'} ({exp.spent_at or exp.timestamp.date()})"
+                )
+            for inc in msg.created_incomes.all():
+                category = inc.user_income_category.name if inc.user_income_category else inc.category_str
+                linked_lines.append(
+                    f"ingreso id={inc.id}: {inc.amount} {inc.currency} "
+                    f"en {category or 'sin categoría'} ({inc.received_at or inc.timestamp.date()})"
+                )
+        except Exception as e:
+            logger.error(
+                f"Error obteniendo registros vinculados al mensaje citado "
+                f"{platform_message_id}: {e}"
+            )
+
+        return quoted, linked_lines
+    except Exception as e:
+        logger.error(f"Error obteniendo mensaje citado {platform_message_id}: {e}")
+        return None
+
+
+def _link_transactions_to_message(tracked: list, message: Message) -> None:
+    """
+    Vincula los Expense/Income creados durante un run del agente al mensaje
+    de confirmación saliente. El vínculo (source_message) es lo que permite
+    resolver después esos registros de forma determinista cuando el usuario
+    cita el mensaje (swipe to reply) o reacciona a él.
+    """
+    try:
+        from expenses.models import Expense
+        from income.models import Income
+
+        expense_ids = [t["id"] for t in tracked if t["kind"] == "expense"]
+        income_ids = [t["id"] for t in tracked if t["kind"] == "income"]
+        if expense_ids:
+            Expense.objects.filter(id__in=expense_ids).update(source_message=message)
+        if income_ids:
+            Income.objects.filter(id__in=income_ids).update(source_message=message)
+        logger.info(
+            f"Vinculados {len(expense_ids)} gastos y {len(income_ids)} ingresos "
+            f"al mensaje saliente {message.id}"
+        )
+    except Exception as e:
+        logger.error(f"Error vinculando transacciones al mensaje saliente: {e}")
 
 
 def _llm_intent_is_categorization(text: str) -> bool:
@@ -1011,16 +1085,28 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         # Si el usuario respondió (swipe) a un mensaje anterior, darle al agente
         # el texto del mensaje citado como contexto para que pueda responder
         # sobre él (ej: "¿qué gasto era este?" respondiendo a una notificación).
+        # Si el mensaje citado fue una confirmación del bot con registros
+        # vinculados (source_message), inyectar también sus IDs exactos para
+        # que eliminar/editar sea determinista (sin búsquedas ambiguas).
         effective_message_text = message_text
         if replied_to_message_id:
-            quoted = await sync_to_async(_get_quoted_message_text)(
+            quoted_context = await sync_to_async(_get_quoted_message_context)(
                 chat, replied_to_message_id
             )
-            if quoted:
-                effective_message_text = (
-                    f"[Respondiendo al mensaje anterior: \"{quoted}\"]\n"
-                    f"{message_text}"
-                )
+            if quoted_context:
+                quoted, linked_lines = quoted_context
+                context_parts = [f"[Respondiendo al mensaje anterior: \"{quoted}\"]"]
+                if linked_lines:
+                    context_parts.append(
+                        "[Registros creados por ese mensaje — si el usuario pide "
+                        "eliminarlos o editarlos, usa EXACTAMENTE estos IDs, sin "
+                        "buscar por monto ni texto: " + "; ".join(linked_lines) + "]"
+                    )
+                effective_message_text = "\n".join(context_parts) + f"\n{message_text}"
+
+        # Activar rastreo de transacciones creadas por las tools durante este
+        # run, para vincularlas luego al mensaje de confirmación saliente.
+        tracked_transactions = start_transaction_tracking()
 
         response_text = await process_message(user, effective_message_text, sender_phone=sender_number)
 
@@ -1028,6 +1114,12 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         outgoing_msg = await sync_to_async(create_message)(
             chat, f"response_{message_id}", "outgoing", response_text
         )
+
+        # 9b. Vincular los registros creados en este run al mensaje saliente
+        if tracked_transactions and outgoing_msg:
+            await sync_to_async(_link_transactions_to_message)(
+                tracked_transactions, outgoing_msg
+            )
 
         # 10. Enviar la respuesta usando Meta API
         success = await send_whatsapp_response(
