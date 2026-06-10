@@ -23,6 +23,7 @@ import asyncio
 import logging
 from typing import Any, AsyncIterator
 
+from asgiref.sync import sync_to_async
 from langchain_core.messages import HumanMessage
 
 from telegrambot.config import (
@@ -35,6 +36,7 @@ from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
 from . import risk_profiler_service
 from .agent_directory import SPECIALIST_IDS, SUPERVISOR_ID, agent_meta_by_tool
+from .conversation_memory import get_semantic_context
 from .services import (
     RISK_PROFILE_COMMAND,
     _load_categories,
@@ -177,6 +179,10 @@ async def _stream_supervisor(
     expense_categories_str, income_categories_str = await _load_categories(user)
     current_date = _user_today(user)
 
+    # Memoria semántica sobre los mensajes persistidos (WhatsApp/Telegram):
+    # el chat web es efímero, pero así puede recordar lo hablado en otros canales.
+    semantic_context = await sync_to_async(get_semantic_context)(user, raw_text)
+
     supervisor, pending_container, risk_profiler_signal = build_supervisor(
         user=user,
         channel=channel,
@@ -184,6 +190,7 @@ async def _stream_supervisor(
         expense_categories_str=expense_categories_str,
         income_categories_str=income_categories_str,
         current_date=current_date,
+        semantic_context=semantic_context,
     )
 
     messages = list(history) + [HumanMessage(content=raw_text)]
