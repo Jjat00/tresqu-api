@@ -188,6 +188,30 @@ Respuesta del usuario: {category_text}"""),
             txn.description = new_description
             txn_update_fields.append('description')
 
+        # Regenerar el embedding: el original se creó con el comercio y el
+        # asunto del correo, pero tras categorizar el movimiento tiene
+        # categoría (y a veces nueva descripción), y la búsqueda semántica
+        # debe poder encontrarlo por esos términos.
+        try:
+            from telegrambot.tools import embeddings
+            date_value = (
+                getattr(txn, 'received_at', None) if is_income
+                else getattr(txn, 'spent_at', None)
+            )
+            embedding_text = (
+                f"{txn.description}. {txn_noun.capitalize()} de {txn.amount} "
+                f"{txn.currency} en {category_name}"
+            )
+            if date_value:
+                embedding_text += f" el {date_value}"
+            txn.embedding = embeddings.embed_query(embedding_text)
+            txn_update_fields.append('embedding')
+        except Exception as e:
+            logger.error(
+                f"Error regenerando embedding tras categorizar {txn_noun} "
+                f"{txn.id}: {e}"
+            )
+
         if is_income:
             category, was_created = get_or_create_user_income_category(
                 user, category_name, **kwargs
