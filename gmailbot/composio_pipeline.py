@@ -39,6 +39,43 @@ from .models import ProcessedEmail
 
 logger = logging.getLogger(__name__)
 
+# Distancia coseno maxima (text-embedding-3-small) para considerar que una
+# transaccion pasada es "el mismo comercio recurrente" y heredar su categoria.
+# Mas estricto que el umbral de busqueda semantica general: aqui una falsa
+# coincidencia auto-asigna una categoria equivocada.
+SEMANTIC_CATEGORY_MAX_DISTANCE = 0.40
+
+
+def _semantic_category_fallback(user, embedding, is_income: bool) -> str | None:
+    """
+    Devuelve el nombre de la categoria mas frecuente entre las transacciones
+    pasadas del usuario muy similares al embedding (mismo comercio), o None
+    si no hay vecinos suficientemente cercanos ya categorizados.
+    """
+    try:
+        model = Income if is_income else Expense
+        category_attr = (
+            "user_income_category" if is_income else "user_expense_category"
+        )
+        similar = model.find_similar(user, embedding, limit=5)
+        votes: dict[str, int] = {}
+        for txn in similar:
+            if txn.distance > SEMANTIC_CATEGORY_MAX_DISTANCE:
+                continue
+            category = getattr(txn, category_attr)
+            if not category or category.name == "Sin Categorizar":
+                continue
+            votes[category.name] = votes.get(category.name, 0) + 1
+        if not votes:
+            return None
+        return max(votes, key=votes.get)
+    except Exception as exc:
+        logger.error(
+            f"Error en fallback semantico de categoria para usuario "
+            f"{user.id}: {exc}"
+        )
+        return None
+
 
 def process_composio_email(pe: ProcessedEmail) -> None:
     """Pipeline AI + creacion de transaccion + WhatsApp para un ``ProcessedEmail``.
@@ -178,8 +215,24 @@ def process_composio_email(pe: ProcessedEmail) -> None:
     else:
         txn_date = timezone.now().date()
 
-    # 7. Categorizacion automatica si el LLM esta seguro Y la categoria
-    # existe en el set del usuario; si no, fallback a "Sin Categorizar".
+    # 7. Embedding de la transaccion (se necesita aqui tanto para la busqueda
+    # semantica posterior como para el fallback de categoria del paso 8).
+    embedding = None
+    try:
+        from gmailbot.email_processor import embeddings as _embeddings
+
+        embedding = _embeddings.embed_query(f"{merchant} {subject}")
+    except Exception as exc:
+        logger.error(
+            f"Error generando embedding para transaccion Gmail: {exc}",
+            extra={"processed_email_id": pe.id, "user_id": user.id},
+        )
+
+    # 8. Categorizacion automatica si el LLM esta seguro Y la categoria
+    # existe en el set del usuario. Si el LLM no esta seguro, segundo
+    # intento: la categoria que el usuario ya uso en transacciones
+    # semanticamente similares (mismo comercio recurrente). Si tampoco,
+    # fallback a "Sin Categorizar".
     suggested_category_name = ai_result.get("suggested_category")
     category_confidence = float(ai_result.get("category_confidence") or 0.0)
     relevant_categories = (
@@ -191,6 +244,18 @@ def process_composio_email(pe: ProcessedEmail) -> None:
         and suggested_category_name.lower() in existing_lower
         and category_confidence >= AUTO_CATEGORIZATION_CONFIDENCE_THRESHOLD
     )
+
+    if not auto_categorized and embedding is not None:
+        semantic_category = _semantic_category_fallback(user, embedding, is_income)
+        if semantic_category:
+            suggested_category_name = semantic_category
+            auto_categorized = True
+            ai_result["semantic_category_fallback"] = semantic_category
+            logger.info(
+                f"Categoria asignada por similitud semantica: "
+                f"'{semantic_category}' para '{merchant}'",
+                extra={"processed_email_id": pe.id, "user_id": user.id},
+            )
 
     if is_income:
         if auto_categorized:
@@ -224,18 +289,6 @@ def process_composio_email(pe: ProcessedEmail) -> None:
                     "Compras por email, pagos detectados automaticamente"
                 ),
             )
-
-    # 8. Embedding para busqueda semantica posterior.
-    embedding = None
-    try:
-        from gmailbot.email_processor import embeddings as _embeddings
-
-        embedding = _embeddings.embed_query(f"{merchant} {subject}")
-    except Exception as exc:
-        logger.error(
-            f"Error generando embedding para transaccion Gmail: {exc}",
-            extra={"processed_email_id": pe.id, "user_id": user.id},
-        )
 
     # 9. Crear Expense o Income segun el tipo detectado.
     expense_obj: Expense | None = None

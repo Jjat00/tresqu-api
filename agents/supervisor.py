@@ -71,6 +71,11 @@ CUÁNDO USAR `get_my_risk_profile` (LECTURA del perfil):
 - Cuando la tool trae un `warning`, transmítelo con tacto (p. ej. que es inferido y que puede afinarlo con el cuestionario), pero igual dale su perfil.
 - Si el usuario nombra un activo concreto y pregunta si encaja ("¿AAPL va con mi perfil?"), usa `analyze_investment` en su lugar (cruza el activo con el perfil).
 
+CUÁNDO USAR `search_conversation_history` (memoria de conversaciones):
+- El usuario referencia algo dicho antes que NO aparece en los mensajes recientes de esta conversación: "¿qué te dije sobre el viaje?", "lo que hablamos del carro", "¿cuándo te mencioné lo del gimnasio?".
+- Devuelve mensajes pasados (con fecha y quién lo dijo) relevantes a la consulta. Úsalos como contexto para responder o para construir la instrucción al subagente correcto.
+- NO la uses para consultar montos/totales de gastos o ingresos — eso es `manage_expenses_and_income`, que consulta los registros reales.
+
 CUÁNDO USAR `start_risk_profiler`:
 - El usuario pide armar / rehacer / actualizar su perfil de riesgo: "haz mi perfil de inversión", "evalúa mi tolerancia al riesgo", "quiero hacer el cuestionario".
 - O cuando consultaste `get_my_risk_profile` y `has_profile=false` y el usuario quiere uno.
@@ -173,12 +178,26 @@ def _channel_capabilities(channel: str) -> str:
     return _CHANNEL_CAPABILITIES.get((channel or "").lower(), _CHANNEL_CAPABILITIES["web"])
 
 
-def _build_supervisor_prompt(current_date: str, channel: str) -> str:
-    return _SUPERVISOR_PROMPT_TEMPLATE.format(
+_SEMANTIC_CONTEXT_TEMPLATE = """
+
+MEMORIA DE CONVERSACIONES PASADAS (mensajes antiguos recuperados por similitud con el mensaje actual — pueden ser irrelevantes):
+{semantic_context}
+Úsala SOLO si ayuda a entender la referencia del usuario; si no aplica, ignórala por completo y no la menciones. Los datos financieros reales siempre salen de los subagentes, no de esta memoria."""
+
+
+def _build_supervisor_prompt(
+    current_date: str, channel: str, semantic_context: str | None = None
+) -> str:
+    prompt = _SUPERVISOR_PROMPT_TEMPLATE.format(
         current_date=current_date,
         channel=(channel or "web"),
         channel_capabilities=_channel_capabilities(channel),
     )
+    if semantic_context:
+        prompt += _SEMANTIC_CONTEXT_TEMPLATE.format(
+            semantic_context=semantic_context
+        )
+    return prompt
 
 
 def _supervisor_model() -> ChatOpenAI:
@@ -198,6 +217,7 @@ def build_supervisor(
     expense_categories_str: str,
     income_categories_str: str,
     current_date: str,
+    semantic_context: str | None = None,
 ):
     """Builds the main Tresqu supervisor with subagents and risk-profiler wired as tools.
 
@@ -294,6 +314,32 @@ def build_supervisor(
             logger.exception(f"analyst subagent failed: {exc}")
             return f"(error en subagente analista: {exc})"
 
+    @tool("search_conversation_history")
+    async def search_conversation_history(query: str) -> list[str] | str:
+        """Busca semánticamente en TODO el historial de conversación del usuario (todos los canales).
+
+        Úsala cuando el usuario referencia algo dicho en el pasado que no está
+        en los mensajes recientes: "¿qué te dije sobre X?", "lo que hablamos
+        de Y". Pasa como query los términos del tema (ej: "viaje a Cartagena").
+        Devuelve mensajes con fecha y autor, del más antiguo al más reciente.
+        NO devuelve registros financieros — solo lo conversado.
+        """
+        from asgiref.sync import sync_to_async
+
+        from .conversation_memory import search_history
+
+        try:
+            results = await sync_to_async(search_history)(user, query)
+        except Exception as exc:
+            logger.exception(f"search_conversation_history failed: {exc}")
+            return "(error buscando en el historial de conversación)"
+        if not results:
+            return (
+                "No encontré mensajes anteriores relacionados con eso. "
+                "Dile al usuario que no recuerdas haberlo hablado y pídele más detalles."
+            )
+        return results
+
     @tool("get_my_risk_profile")
     async def get_my_risk_profile() -> dict[str, Any]:
         """Lee el perfil de riesgo EFECTIVO actual del usuario (declarado o inferido).
@@ -359,9 +405,12 @@ def build_supervisor(
             call_expenses_subagent,
             call_wallbit_subagent,
             call_analyst_subagent,
+            search_conversation_history,
             get_my_risk_profile,
             start_risk_profiler,
         ],
-        system_prompt=_build_supervisor_prompt(current_date, channel),
+        system_prompt=_build_supervisor_prompt(
+            current_date, channel, semantic_context
+        ),
     )
     return agent, pending_container, risk_profiler_signal
