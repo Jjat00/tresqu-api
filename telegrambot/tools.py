@@ -14,6 +14,7 @@ from income.models import Income, IncomeCategory
 from users.models import User
 from categories.models import Category, UserExpenseCategory, UserIncomeCategory
 from categories.utils import get_or_create_user_expense_category, get_or_create_user_income_category
+from agents.run_context import record_created_transaction
 # serializasers
 from .serializasers import ExpenseData, IncomeData
 from .currencies import is_valid_currency
@@ -642,6 +643,7 @@ def create_expense(
         embedding=embedding,
         raw_message=expense_text
     )
+    record_created_transaction('expense', expense.id)
     return (
         f"✅ ¡Gasto registrado!\n"
         f"📊 Categoría: {category_name}\n"
@@ -1127,6 +1129,7 @@ def create_income(
             note=note,
             raw_message=income_text
         )
+        record_created_transaction('income', income.id)
 
         # Generar embedding para la búsqueda semántica
         try:

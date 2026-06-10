@@ -144,6 +144,17 @@ class Income(models.Model):
         help_text='Categoría de ingreso personalizada por usuario'
     )
 
+    # Mensaje saliente (confirmación del bot) que registró este ingreso;
+    # permite resolverlo de forma determinista al citar (swipe to reply)
+    # o reaccionar a ese mensaje.
+    source_message = models.ForeignKey(
+        'users.Message',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='created_incomes',
+    )
+
     description = models.TextField(blank=True)
     timestamp = models.DateTimeField()
     received_at = models.DateField(null=True, blank=True)
