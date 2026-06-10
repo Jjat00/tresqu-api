@@ -173,6 +173,32 @@ CONTENIDO:
         return None
 
 
+def _record_notification_as_message(user, phone_number, text, sent_message_id):
+    """
+    Guarda la notificación de Gmail como mensaje saliente en el chat de
+    WhatsApp del usuario, igual que cualquier respuesta del bot: queda en el
+    historial que ve el agente (fetch_last_messages) y se vuelve citable vía
+    _get_quoted_message_text. create_message genera el embedding del texto.
+    """
+    try:
+        from whatsappbot.bot import (
+            create_message,
+            get_or_create_chat,
+            update_chat_user,
+        )
+        from whatsappbot.utils import normalize_phone_number
+
+        chat, _ = get_or_create_chat(normalize_phone_number(phone_number))
+        if chat.user_id is None:
+            update_chat_user(chat, user)
+        create_message(chat, sent_message_id or "", "outgoing", text)
+    except Exception as e:
+        logger.error(
+            f"Error registrando notificación de Gmail como mensaje de chat "
+            f"para usuario {user.id}: {e}"
+        )
+
+
 def send_transaction_confirmation_whatsapp(
     user,
     transaction,
@@ -246,6 +272,9 @@ def send_transaction_confirmation_whatsapp(
             logger.info(
                 f"Notificación de {txn_noun} enviada a {phone_number} "
                 f"(wamid={sent_message_id})"
+            )
+            _record_notification_as_message(
+                user, phone_number, message, sent_message_id
             )
             return sent_message_id
         else:
