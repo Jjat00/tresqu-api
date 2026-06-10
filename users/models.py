@@ -1,5 +1,5 @@
 from django.db import models
-from pgvector.django import VectorField
+from pgvector.django import VectorField, CosineDistance
 from django.utils import timezone
 import datetime
 import random
@@ -462,6 +462,26 @@ class Message(models.Model):
 
     # No aplicamos restricción de BD para preservar datos duplicados existentes
     # La prevención se maneja a nivel de aplicación con cache y verificaciones
+
+    @classmethod
+    def find_similar(cls, user, embedding, limit=5, exclude_ids=None):
+        """
+        Encuentra mensajes del usuario similares al embedding proporcionado,
+        en cualquier canal (Telegram/WhatsApp). Devuelve un queryset anotado
+        con ``distance`` (coseno) y ordenado del más similar al menos.
+        """
+        if embedding is None:
+            return cls.objects.none()
+
+        qs = cls.objects.filter(
+            chat__user=user,
+            embedding__isnull=False,
+        )
+        if exclude_ids:
+            qs = qs.exclude(id__in=exclude_ids)
+        return qs.annotate(
+            distance=CosineDistance('embedding', embedding)
+        ).order_by('distance')[:limit]
 
     def __str__(self):
         return f"{self.get_message_type_display()} message: {self.text[:50]}"
