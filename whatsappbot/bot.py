@@ -1013,6 +1013,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                         f"- \"Pagué la cuenta de luz, 75k\"\n"
                         f"- \"Gané 100000 pesos en mi negocio\"\n\n"
                         f"💹 ¿Inviertes? Conecta Wallbit para ver y operar tus acciones y ETFs de EE. UU. desde el chat: https://tresqu.com/dashboard/account?tab=integraciones\n\n"
+                        f"📖 Esto es solo el comienzo: también entiendo notas de voz y fotos de recibos, capturo compras desde tu Gmail y más. Mira todo lo que puedes hacer: https://tresqu.com/funciones\n\n"
                         f"Puedes ver tu dashboard en https://tresqu.com/dashboard/home para revisar tus gastos, ingresos e inversiones.\n\n"
                         f"Agrega a Tresqu en tus contactos para que puedas enviarle mensajes siempre que quieras."
                     )

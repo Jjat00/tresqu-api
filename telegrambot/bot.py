@@ -551,7 +551,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             f"Puedes registrar tus gastos simplemente enviándome mensajes como:\n"
             f"- \"Gasté 50k en comida\"\n"
             f"- \"Compré café por 35000\"\n"
-            f"- \"Pagué la cuenta de luz, 75k\""
+            f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+            f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
         )
     else:
         # Intentar encontrar si existe un usuario registrado con este ID de Telegram
@@ -568,7 +569,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 f"Puedes registrar tus gastos simplemente enviándome mensajes como:\n"
                 f"- \"Gasté 50k en comida\"\n"
                 f"- \"Compré café por 35000\"\n"
-                f"- \"Pagué la cuenta de luz, 75k\""
+                f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+                f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
             )
         else:
             # Personalizar mensaje si viene de un enlace de referido
@@ -579,7 +581,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"Para comenzar, necesitas registrarte con tu número de teléfono. "
                     f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
                     f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
-                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
+                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente.\n\n"
+                    f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
                 )
             else:
                 welcome_message = (
@@ -588,7 +591,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                     f"Para comenzar, necesitas registrarte con tu número de teléfono. "
                     f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
                     f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
-                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente."
+                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente.\n\n"
+                    f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
                 )
 
             # Crear botón para solicitar número de teléfono
