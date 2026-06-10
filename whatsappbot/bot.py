@@ -423,14 +423,15 @@ def _llm_intent_is_categorization(text: str) -> bool:
         )
 
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Decide si el mensaje del usuario es la CATEGORÍA de un gasto pendiente
+            ("system", """Decide si el mensaje del usuario es una respuesta de CATEGORIZACIÓN de un gasto pendiente
 o es un MENSAJE NUEVO (registrar otro gasto/ingreso, pregunta, saludo, etc.).
 
-Contexto: el usuario recibió antes una notificación pidiéndole clasificar un gasto.
+Contexto: el usuario recibió antes una notificación de una compra detectada en su correo,
+pidiéndole clasificarla o corregir la categoría.
 
 Responde ÚNICAMENTE con una sola palabra en minúscula:
-- "categoria" si el mensaje es el nombre de una categoría (ej: "alimentación", "transporte", "ocio", "comida", "streaming", "salud", "mercado").
-- "otro" en cualquier otro caso: si menciona montos, verbos de registrar ("gasté", "pagué", "compré", "gané"), preguntas, saludos, agradecimientos, o texto no relacionado."""),
+- "categoria" si el mensaje es el nombre de una categoría (ej: "alimentación", "transporte", "ocio", "comida", "streaming", "salud", "mercado") O si describe QUÉ fue esa compra SIN mencionar monto (ej: "fue la compra de unos cereales", "eso fue del mercado", "es el pago del gimnasio").
+- "otro" en cualquier otro caso: si menciona montos o cantidades de dinero, si registra un movimiento nuevo con monto ("gasté 20k en pan", "me pagaron 500"), preguntas, saludos, agradecimientos, o texto no relacionado."""),
             ("human", "{text}"),
         ])
 
@@ -856,14 +857,15 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     )
 
                 # Guardar y enviar respuesta usando Meta API
-                await sync_to_async(create_message)(
+                outgoing_msg = await sync_to_async(create_message)(
                     chat, f"response_{message_id}", "outgoing", response_text
                 )
 
                 success = await send_whatsapp_response(
                     instance_name="meta_api",
                     to_number=sender_number,
-                    message=response_text
+                    message=response_text,
+                    message_record=outgoing_msg,
                 )
 
                 return success, response_text
@@ -948,14 +950,15 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     )
 
                 # Guardar y enviar respuesta usando Meta API
-                await sync_to_async(create_message)(
+                outgoing_msg = await sync_to_async(create_message)(
                     chat, f"response_{message_id}", "outgoing", response_text
                 )
 
                 success = await send_whatsapp_response(
                     instance_name="meta_api",
                     to_number=sender_number,
-                    message=response_text
+                    message=response_text,
+                    message_record=outgoing_msg,
                 )
 
                 return success, response_text
@@ -995,8 +998,8 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
                     user, target_processed_email, message_text
                 )
                 # Guardar y enviar respuesta
-                await sync_to_async(create_message)(chat, f"response_{message_id}", "outgoing", response_text)
-                success = await send_whatsapp_response(instance_name="meta_api", to_number=sender_number, message=response_text)
+                outgoing_msg = await sync_to_async(create_message)(chat, f"response_{message_id}", "outgoing", response_text)
+                success = await send_whatsapp_response(instance_name="meta_api", to_number=sender_number, message=response_text, message_record=outgoing_msg)
                 return success, response_text
         except ImportError:
             pass  # gmailbot no instalado
@@ -1022,7 +1025,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         response_text = await process_message(user, effective_message_text, sender_phone=sender_number)
 
         # 9. Guardar la respuesta en la base de datos
-        await sync_to_async(create_message)(
+        outgoing_msg = await sync_to_async(create_message)(
             chat, f"response_{message_id}", "outgoing", response_text
         )
 
@@ -1030,7 +1033,8 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         success = await send_whatsapp_response(
             instance_name="meta_api",
             to_number=sender_number,
-            message=response_text
+            message=response_text,
+            message_record=outgoing_msg,
         )
 
         if success:
@@ -1046,7 +1050,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         return False, f"Error: {str(e)}"
 
 
-async def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None):
+async def send_whatsapp_response(instance_name, to_number, message, server_url=None, api_key=None, message_record=None):
     """
     Envía una respuesta a un número de WhatsApp utilizando Meta WhatsApp API
 
@@ -1056,6 +1060,10 @@ async def send_whatsapp_response(instance_name, to_number, message, server_url=N
         message (str): Mensaje a enviar
         server_url (str): URL del servidor (no usado en Meta API)
         api_key (str): Clave de API (no usado en Meta API)
+        message_record (Message): registro saliente ya guardado en BD; si se pasa,
+            se actualiza su platform_message_id con el wamid real que devuelve
+            Meta, para poder resolver luego respuestas citadas (swipe to reply)
+            sobre mensajes del bot.
     """
     try:
         # Usar Meta WhatsApp API exclusivamente
@@ -1066,10 +1074,21 @@ async def send_whatsapp_response(instance_name, to_number, message, server_url=N
             f"Enviando mensaje Meta API a {to_number}: {message[:50]}...")
 
         # Ejecutar la función síncrona en un thread separado
-        success = await asyncio.to_thread(send_meta_whatsapp_message, to_number, message)
+        success, sent_message_id = await asyncio.to_thread(
+            send_meta_whatsapp_message, to_number, message, return_message_id=True
+        )
 
         if success:
             logger.info(f"✅ Mensaje Meta enviado exitosamente a {to_number}")
+            if message_record is not None and sent_message_id:
+                try:
+                    message_record.platform_message_id = sent_message_id
+                    await sync_to_async(message_record.save)(
+                        update_fields=["platform_message_id"]
+                    )
+                except Exception as e:
+                    logger.error(
+                        f"Error guardando wamid del mensaje saliente: {e}")
         else:
             logger.error(f"❌ Error enviando mensaje Meta a {to_number}")
 

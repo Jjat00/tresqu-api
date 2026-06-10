@@ -104,27 +104,30 @@ def categorize_gmail_transaction(
 
         # Usar IA para interpretar la categoría
         prompt = ChatPromptTemplate.from_messages([
-            ("system", """Eres un asistente financiero. El usuario quiere categorizar un {txn_noun}.
-Analiza el texto del usuario y determina la categoría más apropiada.
+            ("system", """Eres un asistente financiero. El usuario respondió a la notificación de un {txn_noun} detectado automáticamente desde su Gmail. Su respuesta puede ser el nombre de una categoría, una descripción de qué fue la transacción, o algo que no aporta información de categorización.
 
 Categorías existentes del usuario ({txn_noun}): {existing_categories}
 
 Responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks):
-{{{{
-    "category_name": "Nombre de la categoría",
+{{
+    "is_categorization": true/false,
+    "category_name": "Nombre de la categoría (solo si is_categorization=true)",
     "is_new": true/false,
+    "new_description": "Descripción corta de la transacción, o null",
     "description": "Descripción breve si es nueva categoría",
     "examples": "Ejemplos si es nueva categoría",
     "color": "#RRGGBB si es nueva categoría"
-}}}}
+}}
 
 REGLAS:
-- Si el texto del usuario coincide o es similar a una categoría existente, usa esa
-- Si no coincide con ninguna, crea una nueva con is_new=true
-- El nombre de la categoría debe estar en el mismo idioma que el usuario
-- Prioriza las categorías existentes sobre crear nuevas"""),
+- is_categorization=true si el texto nombra una categoría (ej: "alimentación", "transporte") O describe qué fue la transacción (ej: "fue la compra de unos cereales" → categoría de alimentación/mercado).
+- is_categorization=false si el texto NO permite deducir una categoría: referencias vagas ("me refiero a este", "este gasto"), preguntas, saludos o texto no relacionado. En ese caso deja los demás campos en null.
+- Si el usuario DESCRIBIÓ la transacción, además de la categoría devuelve "new_description" con una descripción corta y limpia (ej: "Compra de cereales"). Si solo dio el nombre de una categoría, deja "new_description" en null.
+- Si el texto coincide o es similar a una categoría existente, usa esa; solo crea una nueva (is_new=true) si ninguna encaja.
+- NUNCA uses "Sin Categorizar" ni "Otros" como category_name: si no puedes deducir algo mejor, devuelve is_categorization=false.
+- El nombre de la categoría debe estar en el mismo idioma que el usuario."""),
             ("human", """El {txn_noun} es: {txn_description} por {txn_amount} {txn_currency}
-El usuario quiere categorizarlo como: {category_text}"""),
+Respuesta del usuario: {category_text}"""),
         ])
 
         chain = prompt | llm
@@ -146,7 +149,29 @@ El usuario quiere categorizarlo como: {category_text}"""),
             response_text = response_text.strip()
 
         result = json.loads(response_text)
-        category_name = result.get('category_name', category_text.strip().title())
+
+        if not result.get('is_categorization') or not result.get('category_name'):
+            # El texto no permite deducir una categoría (ej: "me refiero a este").
+            # Dejamos el email en ventana de categorización para que el próximo
+            # mensaje del usuario se enrute de vuelta a este flujo, y le pedimos
+            # la categoría explícitamente.
+            if not processed_email.awaiting_categorization:
+                processed_email.awaiting_categorization = True
+                processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
+            current_category = (
+                txn.user_income_category.name if is_income and txn.user_income_category
+                else txn.user_expense_category.name if not is_income and txn.user_expense_category
+                else 'Sin Categorizar'
+            )
+            return (
+                f"Este {txn_noun} es:\n\n"
+                f"{source_icon} *{txn.description}* - {txn.amount} {txn.currency}\n"
+                f"📁 *Categoría actual:* {current_category}\n\n"
+                f"¿En qué categoría lo pongo? También puedes describirme qué fue "
+                f"(ej: \"fue la compra del mercado\")."
+            )
+
+        category_name = result.get('category_name')
 
         kwargs = {}
         if result.get('is_new'):
@@ -157,18 +182,24 @@ El usuario quiere categorizarlo como: {category_text}"""),
                 kwargs['examples'] = result.get('examples', '')
             kwargs['color'] = result.get('color', '')
 
+        new_description = (result.get('new_description') or '').strip()
+        txn_update_fields = ['updated_at']
+        if new_description:
+            txn.description = new_description
+            txn_update_fields.append('description')
+
         if is_income:
             category, was_created = get_or_create_user_income_category(
                 user, category_name, **kwargs
             )
             txn.user_income_category = category
-            txn.save(update_fields=['user_income_category', 'updated_at'])
+            txn.save(update_fields=['user_income_category'] + txn_update_fields)
         else:
             category, was_created = get_or_create_user_expense_category(
                 user, category_name, **kwargs
             )
             txn.user_expense_category = category
-            txn.save(update_fields=['user_expense_category', 'updated_at'])
+            txn.save(update_fields=['user_expense_category'] + txn_update_fields)
 
         processed_email.awaiting_categorization = False
         processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
@@ -192,30 +223,20 @@ El usuario quiere categorizarlo como: {category_text}"""),
         return confirmation
 
     except json.JSONDecodeError as e:
+        # No adivinamos una categoría a partir del texto crudo: mantenemos el
+        # email en ventana de categorización y pedimos la categoría de nuevo.
         logger.error(f"Error parseando respuesta de categorización: {e}")
         try:
-            if is_income:
-                category, _ = get_or_create_user_income_category(
-                    user, category_text.strip().title()
-                )
-                if txn:
-                    txn.user_income_category = category
-                    txn.save(update_fields=['user_income_category', 'updated_at'])
-            else:
-                category, _ = get_or_create_user_expense_category(
-                    user, category_text.strip().title()
-                )
-                if txn:
-                    txn.user_expense_category = category
-                    txn.save(update_fields=['user_expense_category', 'updated_at'])
-            processed_email.awaiting_categorization = False
-            processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
-            return (
-                f"✅ {txn_noun.capitalize()} categorizado como "
-                f"*{category_text.strip().title()}*.\n¡Listo!"
-            )
+            if not processed_email.awaiting_categorization:
+                processed_email.awaiting_categorization = True
+                processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
         except Exception:
-            return f"Hubo un error categorizando el {txn_noun}. Por favor, intenta de nuevo."
+            pass
+        return (
+            f"No pude interpretar la categoría para este {txn_noun}. "
+            f"Respóndeme con el nombre de la categoría (ej: \"Alimentación\") "
+            f"o cuéntame qué fue la compra."
+        )
 
     except Exception as e:
         logger.error(f"Error categorizando {txn_noun} de Gmail: {e}")

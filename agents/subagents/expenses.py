@@ -43,7 +43,9 @@ from telegrambot.tools import (
     parse_income,
     parse_incomes,
     parse_relative_date,
+    search_expenses_by_amount,
     search_expenses_by_text,
+    search_incomes_by_amount,
     search_incomes_by_text,
     update_expense,
     update_income,
@@ -188,6 +190,34 @@ def build_expenses_tools(user: User) -> list:
             return []
 
     @tool
+    def search_expenses_by_exact_amount(amount: float, currency: str | None = None) -> List[Dict[str, Any]]:
+        """Busca gastos por monto exacto (los más recientes primero). Úsala cuando el
+        usuario referencia un gasto por su valor ("el gasto de 14000")."""
+        try:
+            return search_expenses_by_amount.invoke({
+                "user_external_id": external_id,
+                "amount": amount,
+                "currency": currency,
+            })
+        except Exception as exc:
+            logger.error(f"search_expenses_by_exact_amount: {exc}")
+            return []
+
+    @tool
+    def search_incomes_by_exact_amount(amount: float, currency: str | None = None) -> List[Dict[str, Any]]:
+        """Busca ingresos por monto exacto (los más recientes primero). Úsala cuando el
+        usuario referencia un ingreso por su valor ("el ingreso de 500000")."""
+        try:
+            return search_incomes_by_amount.invoke({
+                "user_external_id": external_id,
+                "amount": amount,
+                "currency": currency,
+            })
+        except Exception as exc:
+            logger.error(f"search_incomes_by_exact_amount: {exc}")
+            return []
+
+    @tool
     def get_category_expenses(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
         """Obtiene gastos de una categoría específica en un rango de fechas."""
         try:
@@ -279,6 +309,8 @@ def build_expenses_tools(user: User) -> list:
         get_user_incomes,
         search_expenses,
         search_incomes,
+        search_expenses_by_exact_amount,
+        search_incomes_by_exact_amount,
         get_category_expenses,
         get_category_incomes,
         get_top_expense_categories,
@@ -317,7 +349,9 @@ CLASIFICACIÓN:
 
 EDICIÓN / ELIMINACIÓN:
 - Si hay ID, verifica con get_expense_by_id / get_income_by_id.
-- Si no hay ID pero describe el movimiento, usa search_expenses / search_incomes.
+- Si el usuario referencia el movimiento por su MONTO ("el gasto de 14000", "el de 400k"), usa search_expenses_by_exact_amount / search_incomes_by_exact_amount. Expande abreviaciones: "400k" = 400000, "1.5M" = 1500000.
+- Si no hay ID ni monto pero describe el movimiento, usa search_expenses / search_incomes.
+- Si hay varios candidatos y no es obvio cuál es, pregunta al usuario en vez de adivinar. NUNCA edites un movimiento distinto al que el usuario referenció.
 - Luego update_expense/update_income o delete_expense/delete_income.
 
 VERACIDAD DE ACCIONES (CRÍTICO):
