@@ -89,8 +89,8 @@ def categorize_gmail_transaction(
             processed_email.awaiting_categorization = False
             processed_email.save(update_fields=['awaiting_categorization', 'updated_at'])
             return (
-                f"No se encontró el {txn_noun} asociado a este email. "
-                f"La categorización ha sido cancelada."
+                f"No se encontró el {txn_noun} asociado a este email "
+                f"(puede que ya haya sido eliminado)."
             )
 
         # Obtener las categorías existentes del tipo correcto
@@ -110,6 +110,7 @@ Categorías existentes del usuario ({txn_noun}): {existing_categories}
 
 Responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks):
 {{
+    "is_deletion": true/false,
     "is_categorization": true/false,
     "category_name": "Nombre de la categoría (solo si is_categorization=true)",
     "is_new": true/false,
@@ -120,6 +121,7 @@ Responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks):
 }}
 
 REGLAS:
+- is_deletion=true si el usuario pide eliminar/borrar/quitar el registro (ej: "elimínalo", "bórralo", "elimina este gasto") O indica que la transacción no es real o no debería registrarse (ej: "no fue una compra", "es un duplicado", "no registres esto"). En ese caso deja los demás campos en false/null.
 - is_categorization=true si el texto nombra una categoría (ej: "alimentación", "transporte") O describe qué fue la transacción (ej: "fue la compra de unos cereales" → categoría de alimentación/mercado).
 - is_categorization=false si el texto NO permite deducir una categoría: referencias vagas ("me refiero a este", "este gasto"), preguntas, saludos o texto no relacionado. En ese caso deja los demás campos en null.
 - Si el usuario DESCRIBIÓ la transacción, además de la categoría devuelve "new_description" con una descripción corta y limpia (ej: "Compra de cereales"). Si solo dio el nombre de una categoría, deja "new_description" en null.
@@ -150,6 +152,32 @@ Respuesta del usuario: {category_text}"""),
 
         result = json.loads(response_text)
 
+        if result.get('is_deletion'):
+            # El usuario pidió eliminar el registro vinculado a esta
+            # notificación. El borrado es hard delete: la fila (y su
+            # embedding pgvector) desaparecen, así que las consultas
+            # semánticas no quedan contaminadas. El FK del ProcessedEmail
+            # queda en NULL automáticamente (on_delete=SET_NULL).
+            deleted_summary = f"{txn.description} - {txn.amount} {txn.currency}"
+            txn.delete()
+            # Limpiar también la referencia en memoria: tras el delete la
+            # instancia relacionada ya no tiene PK y Django bloquearía el save.
+            fk_field = 'income' if is_income else 'expense'
+            setattr(processed_email, fk_field, None)
+            processed_email.awaiting_categorization = False
+            processed_email.save(
+                update_fields=[fk_field, 'awaiting_categorization', 'updated_at']
+            )
+            logger.info(
+                f"{txn_noun.capitalize()} eliminado vía respuesta a notificación "
+                f"Gmail (ProcessedEmail {processed_email.id}) para usuario {user.id}"
+            )
+            return (
+                f"🗑️ *{txn_noun.capitalize()} eliminado*\n\n"
+                f"{source_icon} {deleted_summary}\n\n"
+                f"Ya no aparecerá en tus estadísticas ni reportes."
+            )
+
         if not result.get('is_categorization') or not result.get('category_name'):
             # El texto no permite deducir una categoría (ej: "me refiero a este").
             # Dejamos el email en ventana de categorización para que el próximo
@@ -168,7 +196,7 @@ Respuesta del usuario: {category_text}"""),
                 f"{source_icon} *{txn.description}* - {txn.amount} {txn.currency}\n"
                 f"📁 *Categoría actual:* {current_category}\n\n"
                 f"¿En qué categoría lo pongo? También puedes describirme qué fue "
-                f"(ej: \"fue la compra del mercado\")."
+                f"(ej: \"fue la compra del mercado\") o pedirme que lo elimine."
             )
 
         category_name = result.get('category_name')
