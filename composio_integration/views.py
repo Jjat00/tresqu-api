@@ -235,9 +235,8 @@ class StatusView(APIView):
                     "google_email": None,
                     "connected_at": None,
                     "trigger_active": False,
-                    "total_emails_processed": 0,
-                    "total_purchases_detected": 0,
-                    "pending_categorization": 0,
+                    "total_expenses_detected": 0,
+                    "total_incomes_detected": 0,
                 }
             )
 
@@ -250,12 +249,13 @@ class StatusView(APIView):
                 "connected_at": connection.created_at,
                 "trigger_active": bool(connection.trigger_id),
                 "last_error": connection.last_error or None,
-                "total_emails_processed": emails_qs.filter(
-                    processing_status="processed"
+                # Solo registros que siguen existiendo (los FK son SET_NULL):
+                # si el usuario eliminó el gasto/ingreso, deja de contar.
+                "total_expenses_detected": emails_qs.filter(
+                    expense__isnull=False
                 ).count(),
-                "total_purchases_detected": emails_qs.filter(is_purchase=True).count(),
-                "pending_categorization": emails_qs.filter(
-                    awaiting_categorization=True
+                "total_incomes_detected": emails_qs.filter(
+                    income__isnull=False
                 ).count(),
             }
         )
