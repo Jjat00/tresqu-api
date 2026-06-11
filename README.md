@@ -329,7 +329,7 @@ Consulta [`.env.example`](.env.example) para la lista completa. Las más relevan
 | `income/` | CRUD de ingresos + analytics |
 | `categories/` | Categorías predefinidas y personalizadas |
 | `savings/` | Metas de ahorro y proyecciones |
-| `telegrambot/` | Bot de Telegram — NLP + agente LangChain |
+| `telegrambot/` | Bot de Telegram — NLP + agente LangChain. Hospeda las tools compartidas de parsing (`tools.py`): las `parse_*` reciben la moneda por defecto del usuario e interpretan **montos coloquiales** ("gasté 90 en una camisa" → 90.000 si la moneda es COP, según plausibilidad del monto para lo descrito — `COLLOQUIAL_AMOUNTS_RULE`) |
 | `whatsappbot/` | Bot WhatsApp — Meta API, voz (Whisper), imágenes (Vision) |
 | `gmailbot/` | Parser de compras: recibe eventos del webhook de Composio, crea `ProcessedEmail` y `Expense`. La parte de OAuth/polling vive en `composio_integration/`. |
 | **`composio_integration/`** | **(nuevo)** Broker genérico Composio (composio.dev). Hosting del SDK client, state machine OAuth (connect → callback → active → disconnect), verificación HMAC del webhook, state-token JWT con nonce anti-replay y tareas Celery. Toolkits nuevos (Slack, Notion, …) implementan el protocolo `ToolkitHandler` y se enganchan vía `registry`. Detalle: [`docs/COMPOSIO_ARCHITECTURE.md`](docs/COMPOSIO_ARCHITECTURE.md), [`docs/COMPOSIO_GMAIL_SETUP.md`](docs/COMPOSIO_GMAIL_SETUP.md) |
@@ -423,7 +423,7 @@ Detección automática de compras en correos vía **Composio**:
 | `/connect-url/` | GET | JWT | Inicia OAuth, devuelve `{redirect_url, connected_account_id, already_connected}` |
 | `/callback/` | GET | — (state-token) | Landing del OAuth — redirige al frontend |
 | `/composio-webhook/` | POST | HMAC (`webhook-signature`) | Eventos de trigger entrantes |
-| `/status/` | GET | JWT | Estado para la UI (`connected`, `trigger_active`, contadores) |
+| `/status/` | GET | JWT | Estado para la UI (`connected`, `trigger_active`, `total_expenses_detected`, `total_incomes_detected` — solo cuentan registros que siguen existiendo, los FK son `SET_NULL`) |
 | `/disconnect/` | POST | JWT | Borra trigger + connected_account en Composio, marca local `disconnected` |
 | `/retry-trigger/` | POST | JWT | Re-encola `provision_triggers_async` si quedó en `failed` |
 
@@ -545,11 +545,15 @@ Detalle completo: [`docs/MARKET_ANALYST.md`](docs/MARKET_ANALYST.md).
 | **`/api/wallbit/connect/`** | Valida y guarda una API key cifrada |
 | **`/api/wallbit/status/`** | Estado de conexión del usuario |
 | **`/api/wallbit/disconnect/`** | Revoca + activa kill switch |
+| **`/api/wallbit/pause/`** · **`/resume/`** | Pausa/reanuda el agente (1h–1 semana) sin desconectar |
 | **`/api/wallbit/sync/`** | Encola un sync manual |
 | **`/api/wallbit/limits/`** | GET/POST de `AgentLimits` |
 | **`/api/wallbit/agent/decisions/`** | Audit log paginado |
 | **`/api/wallbit/agent/confirm/{id}/`** | Ejecuta una decisión pendiente |
-| **`/api/wallbit/assets/search/`** | **(nuevo)** Busca en el catálogo de Wallbit (cualquier acción/ETF invertible) |
+| **`/api/wallbit/agent/cancel/{id}/`** | Cancela una decisión pendiente |
+| **`/api/wallbit/investments/`** | Lista `Investment` del usuario |
+| **`/api/wallbit/portfolio/summary/`** · **`/holdings/`** · **`/timeline/`** · **`/pnl-timeline/`** | Resumen, posiciones y series del portafolio (P&L reconstruido con precios de `marketdata`) |
+| **`/api/wallbit/assets/search/`** | Busca en el catálogo de Wallbit (cualquier acción/ETF invertible) |
 | **`/api/market/assets/{symbol}/history/`** | **(nuevo)** Serie histórica de precios para el gráfico (proveedor Twelve Data) |
 | **`/api/agents/risk-profile/`** | GET/POST/DELETE del perfil declarado (POST = manual override) |
 | **`/api/agents/risk-profile/effective/`** | Perfil **efectivo** combinando declarado + inferido (consume esto desde frontend y guardrails) |

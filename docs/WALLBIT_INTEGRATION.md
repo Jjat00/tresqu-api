@@ -1,6 +1,8 @@
 # Wallbit Integration — Plan ajustado
 
-**Status:** Listo para implementación
+> **⚠️ Documento histórico (mayo 2026):** este fue el plan de diseño previo a la implementación. La integración ya está construida; la fuente de verdad actual es el código (`wallbit/`) y la sección Wallbit del [`README.md`](../README.md). Se conserva como registro de decisiones. La sección 8 se actualizó a los endpoints reales.
+
+**Status:** Implementado
 **Brief original:** `/mnt/d/Projects/challenge-wallbit/TRESQU_PILOT_BRIEF.md` (referencia técnica completa)
 **Deadline submission:** martes 26 mayo 2026, 23:59 COL
 **Live final:** viernes 29 mayo 2026, 18:00 COL
@@ -169,23 +171,30 @@ Para las 5 tools que escriben (`place_trade`, `move_funds`, `deposit_chest`, `wi
 
 ---
 
-## 8. Endpoints REST (sin cambios vs brief)
+## 8. Endpoints REST (actualizado a lo implementado — fuente: `wallbit/urls.py`)
 
 ```
-POST   /api/wallbit/connect              { api_key } → 200 | 400
-POST   /api/wallbit/disconnect           → 200
-GET    /api/wallbit/status               → { connected, last_sync_at, balance_summary }
-POST   /api/wallbit/sync                 → trigger sync manual (Celery task)
-GET    /api/wallbit/transactions         → mirror local paginated
-GET    /api/wallbit/balance              → cached + fresh si stale
-POST   /api/wallbit/statements/upload    multipart → parsed_statement_id
-GET    /api/wallbit/statements/{id}      → status del parse
-GET    /api/wallbit/agent/decisions      → log paginado
-POST   /api/wallbit/agent/confirm/{id}   → confirma decisión pendiente
-POST   /api/wallbit/limits               → set AgentLimits
-GET    /api/wallbit/limits               → get AgentLimits
-GET    /api/wallbit/investments          → list Investment del user
+POST   /api/wallbit/connect/                  { api_key } → 200 | 400
+POST   /api/wallbit/disconnect/               → revoca + kill switch
+POST   /api/wallbit/pause/                    → pausa el agente (1h–1 semana)
+POST   /api/wallbit/resume/                   → reanuda el agente
+GET    /api/wallbit/status/                   → { connected, last_sync_at, ... }
+POST   /api/wallbit/sync/                     → trigger sync manual (Celery task)
+GET    /api/wallbit/agent/decisions/          → log paginado
+POST   /api/wallbit/agent/confirm/{id}/       → confirma decisión pendiente
+POST   /api/wallbit/agent/cancel/{id}/        → cancela decisión pendiente
+GET/POST /api/wallbit/limits/                 → AgentLimits
+GET    /api/wallbit/assets/search/            → catálogo Wallbit (acciones/ETFs)
+GET    /api/wallbit/investments/              → list Investment del user
+GET    /api/wallbit/portfolio/summary/        → resumen del portafolio
+GET    /api/wallbit/portfolio/holdings/       → posiciones actuales
+GET    /api/wallbit/portfolio/timeline/       → valor del portafolio en el tiempo
+GET    /api/wallbit/portfolio/pnl-timeline/   → P&L reconstruido (txns × marketdata)
 ```
+
+Del plan original NO se implementaron: `GET /transactions`, `GET /balance`
+(se consultan vía agente/status), ni `POST /statements/upload` y
+`GET /statements/{id}` (el parser de extractos PDF quedó fuera del alcance).
 
 ---
 
