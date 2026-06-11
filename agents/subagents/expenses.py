@@ -69,6 +69,43 @@ def build_expenses_tools(user: User) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound."""
 
     external_id = user.external_id
+    default_currency = user.default_currency or "USD"
+
+    @tool
+    async def parse_expense_for_user(text: str) -> dict:
+        """Analiza un mensaje y extrae UN gasto (monto, categoría, fecha, nota).
+        Interpreta montos coloquiales según la moneda por defecto del usuario."""
+        return await parse_expense.ainvoke({
+            "text": text,
+            "user_default_currency": default_currency,
+        })
+
+    @tool
+    async def parse_expenses_for_user(text: str) -> Dict[str, Any]:
+        """Extrae VARIOS gastos de un mismo mensaje. Interpreta montos coloquiales
+        según la moneda por defecto del usuario."""
+        return await parse_expenses.ainvoke({
+            "text": text,
+            "user_default_currency": default_currency,
+        })
+
+    @tool
+    async def parse_income_for_user(text: str) -> dict:
+        """Analiza un mensaje y extrae UN ingreso (monto, categoría, fecha, nota).
+        Interpreta montos coloquiales según la moneda por defecto del usuario."""
+        return await parse_income.ainvoke({
+            "text": text,
+            "user_default_currency": default_currency,
+        })
+
+    @tool
+    async def parse_incomes_for_user(text: str) -> Dict[str, Any]:
+        """Extrae VARIOS ingresos de un mismo mensaje. Interpreta montos coloquiales
+        según la moneda por defecto del usuario."""
+        return await parse_incomes.ainvoke({
+            "text": text,
+            "user_default_currency": default_currency,
+        })
 
     @tool
     def get_current_date_for_user() -> str:
@@ -291,10 +328,10 @@ def build_expenses_tools(user: User) -> list:
     return [
         get_current_date_for_user,
         parse_relative_date_for_user,
-        parse_expense,
-        parse_expenses,
-        parse_income,
-        parse_incomes,
+        parse_expense_for_user,
+        parse_expenses_for_user,
+        parse_income_for_user,
+        parse_incomes_for_user,
         is_greeting,
         create_expense_for_user,
         create_income_for_user,
@@ -323,6 +360,7 @@ def _build_system_prompt(
     expense_categories_str: str,
     income_categories_str: str,
     current_date: str,
+    default_currency: str,
 ) -> str:
     return f"""Eres el subagente de gastos e ingresos de Tresqu. El supervisor te delega instrucciones puntuales — ejecútalas con las tools disponibles y devuelve una respuesta breve y concreta para que el supervisor la presente al usuario.
 
@@ -334,12 +372,13 @@ Categorías disponibles para ingresos: {income_categories_str}
 
 REGLAS DE OPERACIÓN:
 - Si la instrucción menciona un saludo o conversación general, usa is_greeting y devuelve.
-- Si la instrucción es un GASTO único, usa parse_expense + create_expense_for_user.
-- Si son varios gastos (separados por "y", "," ";"), usa parse_expenses y crea uno por uno.
-- Mismo patrón para INGRESOS con parse_income/parse_incomes/create_income_for_user.
+- Si la instrucción es un GASTO único, usa parse_expense_for_user + create_expense_for_user.
+- Si son varios gastos (separados por "y", "," ";"), usa parse_expenses_for_user y crea uno por uno.
+- Mismo patrón para INGRESOS con parse_income_for_user/parse_incomes_for_user/create_income_for_user.
 - Si hay referencias temporales (ayer, el sábado, hace una semana), usa parse_relative_date_for_user. Para días de semana, asume el más reciente en el pasado.
 - Si falta fecha, usa get_current_date_for_user.
 - MONEDA: NUNCA infieras ni adivines la moneda. Solo pásala a las tools si el usuario la dijo de forma EXPLÍCITA e inequívoca (USD, EUR, "dólares", "euros", "pesos colombianos", "pesos argentinos"...). Palabras ambiguas como "pesos" a secas NO cuentan: deja la moneda vacía y la tool usará la moneda por defecto del usuario. Si el usuario SÍ nombró una moneda, respétala aunque difiera de la suya por defecto.
+- ESCALA DE MONTOS COLOQUIALES: La moneda por defecto del usuario es {default_currency}. En monedas de alta denominación (COP, CLP, PYG, VES...) la gente omite los miles al hablar: "gasté 90 en una camisa" significa 90.000, no 90 pesos. Las tools parse_*_for_user ya aplican esta regla; si registras o editas un monto SIN pasar por ellas, aplícala tú: determina la moneda en juego (la explícita del mensaje, o si no hay, la por defecto) y, si es de alta denominación y el monto literal es implausiblemente bajo para lo descrito (camisa de 90 COP, cena de 20 COP, proyecto pagado a 200 COP), interprétalo como MILES (90 → 90000). Si el monto ya es plausible (4500 un café) o el usuario fue explícito ("90 mil", "90k", "90.000"), no lo toques. En USD/EUR y similares NO aplica: 90 USD son 90 dólares. Esta regla ajusta SOLO el monto, nunca la moneda.
 
 CLASIFICACIÓN:
 - PRIMERO intenta usar una categoría existente de la lista.
@@ -349,7 +388,7 @@ CLASIFICACIÓN:
 
 EDICIÓN / ELIMINACIÓN:
 - Si hay ID, verifica con get_expense_by_id / get_income_by_id.
-- Si el usuario referencia el movimiento por su MONTO ("el gasto de 14000", "el de 400k"), usa search_expenses_by_exact_amount / search_incomes_by_exact_amount. Expande abreviaciones: "400k" = 400000, "1.5M" = 1500000.
+- Si el usuario referencia el movimiento por su MONTO ("el gasto de 14000", "el de 400k"), usa search_expenses_by_exact_amount / search_incomes_by_exact_amount. Expande abreviaciones: "400k" = 400000, "1.5M" = 1500000. Si el monto literal no devuelve resultados y la moneda en juego es de alta denominación, intenta también la interpretación en miles ("el gasto de 90" → busca 90 y luego 90000).
 - Si no hay ID ni monto pero describe el movimiento, usa search_expenses / search_incomes.
 - Si hay varios candidatos y no es obvio cuál es, pregunta al usuario en vez de adivinar. NUNCA edites un movimiento distinto al que el usuario referenció.
 - Luego update_expense/update_income o delete_expense/delete_income.
@@ -390,6 +429,7 @@ QUÉ NO HACER:
 - ❌ Sumar categorías a ojo.
 - ❌ Crear categoría nueva si hay una existente que encaje.
 - ❌ Inferir o adivinar la moneda de un gasto/ingreso cuando el usuario no la dijo explícitamente.
+- ❌ Registrar 90 pesos por "gasté 90 en una camisa" cuando la moneda por defecto es COP: ahí son 90.000 (regla de montos coloquiales).
 - ❌ Decir que eliminaste/creaste/editaste algo (o cuántos) sin que la tool lo haya confirmado.
 """
 
@@ -407,6 +447,9 @@ def build_expenses_subagent(
         model=_model(),
         tools=tools,
         system_prompt=_build_system_prompt(
-            expense_categories_str, income_categories_str, current_date
+            expense_categories_str,
+            income_categories_str,
+            current_date,
+            user.default_currency or "USD",
         ),
     )

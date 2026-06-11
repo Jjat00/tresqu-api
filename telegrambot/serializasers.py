@@ -5,7 +5,16 @@ import datetime as _dt
 
 class ExpenseData(BaseModel):
     """Datos de un gasto extraído de un mensaje de usuario"""
-    amount: float = Field(..., description="Cantidad de dinero gastada.")
+    amount: float = Field(
+        ...,
+        description=(
+            "Cantidad de dinero gastada, ya expandida: abreviaturas como '20k', "
+            "'1.5M' o '90 mil' se convierten a 20000, 1500000, 90000. Aplica la "
+            "regla de ESCALA DE MONTOS COLOQUIALES del prompt: en monedas de alta "
+            "denominación (COP, CLP...), un monto implausiblemente bajo para lo "
+            "comprado significa miles ('gasté 90 en una camisa' → 90000)."
+        ),
+    )
     currency: Optional[str] = Field(
         None,
         description=(
@@ -36,7 +45,16 @@ class ExpenseData(BaseModel):
 
 class IncomeData(BaseModel):
     """Datos de un ingreso extraído de un mensaje de usuario"""
-    amount: float = Field(..., description="Cantidad de dinero recibida.")
+    amount: float = Field(
+        ...,
+        description=(
+            "Cantidad de dinero recibida, ya expandida: abreviaturas como '20k', "
+            "'1.5M' o '200 mil' se convierten a 20000, 1500000, 200000. Aplica la "
+            "regla de ESCALA DE MONTOS COLOQUIALES del prompt: en monedas de alta "
+            "denominación (COP, CLP...), un monto implausiblemente bajo para el "
+            "concepto significa miles ('me pagaron 200 de un proyecto' → 200000)."
+        ),
+    )
     currency: Optional[str] = Field(
         None,
         description=(

@@ -54,6 +54,33 @@ class ExpenseList(BaseModel):
     expenses: List[ExpenseData]
 
 
+# Regla compartida por las 4 tools parse_* (gastos e ingresos). Es un fragmento
+# de ChatPromptTemplate: {user_default_currency} se resuelve en el ainvoke.
+COLLOQUIAL_AMOUNTS_RULE = """
+        IMPORTANTE — ESCALA DE MONTOS COLOQUIALES: La moneda por defecto del usuario es {user_default_currency}.
+        En monedas de alta denominación (COP, CLP, PYG, VES, KRW, IDR, HUF...) la gente suele
+        omitir los miles al hablar: "gasté 90 en una camisa" casi siempre significa 90.000,
+        no 90 pesos. Decide la escala del monto así:
+        1. Determina la moneda en juego: la que el usuario mencionó explícitamente si la hay;
+           si no mencionó ninguna, la moneda por defecto del usuario.
+        2. Si esa moneda es de alta denominación y el monto literal es IMPLAUSIBLEMENTE bajo
+           para lo descrito (una camisa de 90 COP, una cena de 20 COP o un proyecto pagado a
+           200 COP no existen), interpreta el número como MILES: 90 → 90000, 20 → 20000,
+           200 → 200000. Escala SOLO si la lectura en miles también es plausible para lo
+           descrito.
+        3. Si el monto literal ya es plausible para lo descrito, regístralo tal cual, SIN
+           modificarlo — sobre todo en compras baratas: "4500 un café" → 4500,
+           "compré dulces a 500" → 500 (un dulce de 500 COP existe; 500.000 en dulces es
+           absurdo). Ante la duda entre dos lecturas posibles, prefiere el monto LITERAL.
+        4. Si el usuario fue explícito con la magnitud ("90 mil", "90k", "90.000", "1.5M",
+           "$90.000"), respétala siempre: 90k → 90000, 1.5M → 1500000.
+        5. En monedas de baja denominación (USD, EUR, GBP...) NO apliques esta regla:
+           "gasté 90 en una camisa" en USD son 90 dólares literales.
+        Esta regla ajusta SOLO el monto (amount). NUNCA cambia ni infiere la moneda:
+        `currency` sigue las reglas de moneda explícita de arriba.
+        """
+
+
 @tool
 def get_current_date(user_external_id: str) -> str:
     """Devuelve la fecha actual en formato YYYY‑MM‑DD, considerando la zona horaria del usuario."""
@@ -152,9 +179,11 @@ def parse_relative_date(date_text: str, user_external_id: str) -> str:
 
 
 @tool()
-async def parse_expense(text: str) -> dict:
+async def parse_expense(text: str, user_default_currency: str = "USD") -> dict:
     """
     Analiza un mensaje para extraer un gasto.
+    Pasa en `user_default_currency` la moneda por defecto del usuario (ISO 4217):
+    se usa para interpretar montos coloquiales ("gasté 90 en una camisa" → 90000 en COP).
     Devuelve dict o {'error': …} si no hay datos suficientes.
     """
     structured_llm = llm.with_structured_output(
@@ -186,7 +215,7 @@ async def parse_expense(text: str) -> dict:
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas, "lucas", "varos" u otra palabra
         ambigua, o no menciona moneda, deja `currency` en null — el sistema usará la moneda por
         defecto del usuario.
-
+""" + COLLOQUIAL_AMOUNTS_RULE + """
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
@@ -197,15 +226,17 @@ async def parse_expense(text: str) -> dict:
 
     try:
         chain = prompt | structured_llm
-        result = await chain.ainvoke({"text": text})
+        result = await chain.ainvoke(
+            {"text": text, "user_default_currency": user_default_currency})
         return dict(result)
     except Exception as e:
         return {"error": str(e)}
 
 
 @tool
-async def parse_expenses(text: str) -> Dict[str, Any]:
-    """Extrae VARIOS gastos."""
+async def parse_expenses(text: str, user_default_currency: str = "USD") -> Dict[str, Any]:
+    """Extrae VARIOS gastos. Pasa en `user_default_currency` la moneda por defecto
+    del usuario (ISO 4217) para interpretar montos coloquiales."""
     chain = (ChatPromptTemplate.from_messages([
         ("system", """
         Eres un asistente financiero experto en extraer información de gastos.
@@ -231,12 +262,13 @@ async def parse_expenses(text: str) -> Dict[str, Any]:
         USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-        """),
+""" + COLLOQUIAL_AMOUNTS_RULE),
         ("human", "{text}")
     ]) | llm.with_structured_output(
         ExpenseList, method="function_calling"))
     try:
-        result: ExpenseList = await chain.ainvoke({"text": text})
+        result: ExpenseList = await chain.ainvoke(
+            {"text": text, "user_default_currency": user_default_currency})
         return result.model_dump()
     except Exception as e:
         return {"error": str(e)}
@@ -918,9 +950,11 @@ class IncomeList(BaseModel):
 
 
 @tool()
-async def parse_income(text: str) -> dict:
+async def parse_income(text: str, user_default_currency: str = "USD") -> dict:
     """
     Analiza un mensaje para extraer un ingreso.
+    Pasa en `user_default_currency` la moneda por defecto del usuario (ISO 4217):
+    se usa para interpretar montos coloquiales ("me pagaron 200 del proyecto" → 200000 en COP).
     Devuelve dict o {'error': …} si no hay datos suficientes.
     """
     structured_llm = llm.with_structured_output(
@@ -951,7 +985,7 @@ async def parse_income(text: str) -> dict:
         o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-
+""" + COLLOQUIAL_AMOUNTS_RULE + """
         Por ejemplo:
         - "ayer recibí un pago a 20K" debe registrarse con la fecha de ayer
         - "el sábado me pagaron 100k" debe registrarse con la fecha del sábado más reciente
@@ -962,15 +996,17 @@ async def parse_income(text: str) -> dict:
 
     try:
         chain = prompt | structured_llm
-        result = await chain.ainvoke({"text": text})
+        result = await chain.ainvoke(
+            {"text": text, "user_default_currency": user_default_currency})
         return dict(result)
     except Exception as e:
         return {"error": str(e)}
 
 
 @tool
-async def parse_incomes(text: str) -> Dict[str, Any]:
-    """Extrae VARIOS ingresos."""
+async def parse_incomes(text: str, user_default_currency: str = "USD") -> Dict[str, Any]:
+    """Extrae VARIOS ingresos. Pasa en `user_default_currency` la moneda por defecto
+    del usuario (ISO 4217) para interpretar montos coloquiales."""
     chain = (ChatPromptTemplate.from_messages([
         ("system", """
         Eres un asistente financiero experto en extraer información de ingresos.
@@ -996,12 +1032,13 @@ async def parse_incomes(text: str) -> Dict[str, Any]:
         USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-        """),
+""" + COLLOQUIAL_AMOUNTS_RULE),
         ("human", "{text}")
     ]) | llm.with_structured_output(
         IncomeList, method="function_calling"))
     try:
-        result: IncomeList = await chain.ainvoke({"text": text})
+        result: IncomeList = await chain.ainvoke(
+            {"text": text, "user_default_currency": user_default_currency})
         return result.model_dump()
     except Exception as e:
         return {"error": str(e)}
