@@ -65,6 +65,7 @@ class ProcessedEmail(models.Model):
         ('pending', 'Pendiente'),
         ('processed', 'Procesado'),
         ('skipped', 'Omitido'),
+        ('duplicate', 'Duplicado de otra transacción'),
         ('error', 'Error'),
     ]
 

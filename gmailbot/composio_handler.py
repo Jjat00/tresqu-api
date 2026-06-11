@@ -106,6 +106,7 @@ class GmailComposioHandler:
         if not created and processed_email.processing_status in (
             "processed",
             "skipped",
+            "duplicate",
         ):
             logger.info(
                 "gmail webhook duplicate ignored",

@@ -45,7 +45,7 @@ def parse_purchase_email(
     Returns:
         dict con: is_purchase, transaction_type ("expense"|"income"|"none"),
         payment_status, amount, currency, merchant, date, confidence,
-        suggested_category, category_confidence
+        suggested_category, category_confidence, transaction_reference
         None si hay un error en el procesamiento
     """
     try:
@@ -86,7 +86,8 @@ Responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks):
     "date": "YYYY-MM-DD",
     "confidence": 0.0,
     "suggested_category": "Nombre exacto de una categoría existente o null",
-    "category_confidence": 0.0
+    "category_confidence": 0.0,
+    "transaction_reference": "Identificador único de la transacción o null"
 }}}}
 
 TIPO DE TRANSACCIÓN (lo más importante — no te equivoques):
@@ -119,6 +120,10 @@ REGLAS:
   null. NO mezcles: no sugieras una categoría de gasto para un ingreso o viceversa.
 - category_confidence: 0.0 a 1.0. Usa >=0.8 solo si el contexto hace la categoría
   obvia (ej. empleador → Salario, Uber → Transporte, Rappi → Alimentación).
+- transaction_reference: identificador único de ESTA transacción si el email lo
+  incluye: número de recibo/orden/factura ("#2749-9904", "Order 112-334"), ID de
+  transacción o autorización. NO uses números de cuenta, últimos 4 dígitos de la
+  tarjeta ni números de cliente (no identifican la transacción). Si no hay, null.
 
 IMPORTANTE:
 - Los emails de suscripción renovada exitosamente son gastos (expense).
