@@ -415,6 +415,7 @@ Detección automática de compras en correos vía **Composio**:
 5. El worker llama al SDK de Composio y crea un trigger `GMAIL_NEW_GMAIL_MESSAGE` (polling cada 2 min por default).
 6. Cada nuevo correo: Composio → `POST /api/integrations/gmail/composio-webhook/` (HMAC firmado) → backend valida firma, crea `ProcessedEmail`, encola `gmailbot.composio_tasks.process_gmail_message_async`.
 7. La IA analiza si es compra; si lo es, crea el `Expense` y queda `awaiting_categorization=true`. El usuario asigna categoría desde la UI o respondiendo por WhatsApp/Telegram.
+8. Deduplicación entre correos: si la misma compra llega en dos emails (recibo del comercio + notificación del emisor de la tarjeta) con el mismo monto en una ventana de minutos, la pipeline lo detecta (referencia de transacción o juez LLM comparando ambos correos), marca el segundo `ProcessedEmail` como `duplicate` sin crear otro `Expense`, y si el correo duplicado trae un nombre de comercio más específico mejora la descripción del gasto existente. Ver `DUPLICATE_WINDOW_MINUTES` en `gmailbot/composio_pipeline.py`.
 
 ### Endpoints (todo bajo el prefijo genérico `/api/integrations/<toolkit>/`)
 

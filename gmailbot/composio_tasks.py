@@ -46,7 +46,7 @@ def process_gmail_message_async(self, processed_email_id: int) -> None:
                 )
                 return
 
-            if pe.processing_status in ("processed", "skipped"):
+            if pe.processing_status in ("processed", "skipped", "duplicate"):
                 logger.info(
                     "process_gmail_message: already done",
                     extra={

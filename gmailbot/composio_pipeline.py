@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -44,6 +44,268 @@ logger = logging.getLogger(__name__)
 # Mas estricto que el umbral de busqueda semantica general: aqui una falsa
 # coincidencia auto-asigna una categoria equivocada.
 SEMANTIC_CATEGORY_MAX_DISTANCE = 0.40
+
+# Deduplicacion entre correos: la misma compra suele generar dos emails (el
+# recibo del comercio y la notificacion del emisor de la tarjeta) que llegan
+# con minutos de diferencia y el mismo monto. La ventana es corta a proposito:
+# montos repetidos legitimos (dos cafes iguales) suelen estar mas separados.
+DUPLICATE_WINDOW_MINUTES = 15
+# Confianza minima del juez LLM para descartar como duplicado. Ante la duda
+# se crea la transaccion: un duplicado se borra facil, una compra perdida no.
+DUPLICATE_JUDGE_MIN_CONFIDENCE = 0.8
+
+DUPLICATE_JUDGE_SYSTEM_PROMPT = """Eres un detector de transacciones duplicadas. A veces la MISMA compra genera
+dos correos distintos: el recibo del comercio y la notificación del banco o
+emisor de la tarjeta, con minutos de diferencia y el mismo monto.
+
+Te doy dos correos ya detectados como transacciones del MISMO monto y moneda.
+Decide si describen la MISMA transacción o si son dos compras independientes
+que casualmente coinciden en monto.
+
+Señales de MISMA transacción (duplicado):
+- Uno es recibo/factura de un comercio y el otro una notificación genérica de
+  tarjeta o banco ("Compra exitosa con tu tarjeta", "Alerta de transacción").
+- El correo de la tarjeta/banco menciona al comercio del otro correo.
+- Mismo monto exacto llegando con minutos de diferencia.
+
+Señales de transacciones DISTINTAS:
+- Ambos son recibos de comercios diferentes, sin relación banco↔comercio.
+- Números de orden/recibo/referencia distintos.
+- Productos o conceptos claramente diferentes.
+
+Responde ÚNICAMENTE con un JSON válido (sin markdown, sin backticks):
+{"is_duplicate": true/false, "confidence": 0.0, "best_merchant": "..." }
+
+- confidence: 0.0 a 1.0 sobre tu veredicto. Ante la duda usa confianza BAJA:
+  es preferible registrar un duplicado (se borra fácil) que perder una compra.
+- best_merchant: solo si is_duplicate=true, el nombre de comercio más
+  específico y útil de los dos (ej. "Railway Corporation" es mejor que
+  "Compra Smart Card"). Si is_duplicate=false, null."""
+
+
+def _normalize_reference(ref: Any) -> str:
+    """Normaliza una referencia de transaccion para compararla (solo alnum)."""
+    if not ref:
+        return ""
+    return "".join(ch for ch in str(ref).lower() if ch.isalnum())
+
+
+def _find_duplicate_candidates(
+    pe: ProcessedEmail, amount: Any, currency: str, is_income: bool
+) -> list[ProcessedEmail]:
+    """ProcessedEmails ya procesados del mismo usuario cuya transaccion tiene
+    el mismo monto y moneda y cuyo correo llego con pocos minutos de
+    diferencia respecto al actual."""
+    window = timedelta(minutes=DUPLICATE_WINDOW_MINUTES)
+    anchor = pe.created_at or timezone.now()
+    qs = ProcessedEmail.objects.filter(
+        user=pe.user,
+        processing_status="processed",
+        created_at__gte=anchor - window,
+        created_at__lte=anchor + window,
+    ).exclude(pk=pe.pk)
+    try:
+        amount_dec = Decimal(str(amount))
+    except Exception:
+        return []
+    if is_income:
+        qs = qs.filter(
+            income__isnull=False,
+            income__amount=amount_dec,
+            income__currency=currency,
+        ).select_related("income")
+    else:
+        qs = qs.filter(
+            expense__isnull=False,
+            expense__amount=amount_dec,
+            expense__currency=currency,
+        ).select_related("expense")
+    return list(qs.order_by("-created_at")[:3])
+
+
+def _judge_duplicate_emails(new_email: dict, old_email: dict) -> dict | None:
+    """Pregunta al LLM si dos correos describen la misma transaccion.
+
+    Devuelve ``{"is_duplicate": bool, "confidence": float,
+    "best_merchant": str | None}`` o None si el juez falla (en cuyo caso el
+    caller debe asumir NO duplicado y crear la transaccion).
+    """
+    from langchain_core.messages import HumanMessage, SystemMessage
+
+    from gmailbot.email_processor import llm
+
+    payload = json.dumps(
+        {"correo_nuevo": new_email, "correo_existente": old_email},
+        ensure_ascii=False,
+    )
+    try:
+        response = llm.invoke(
+            [
+                SystemMessage(content=DUPLICATE_JUDGE_SYSTEM_PROMPT),
+                HumanMessage(
+                    content=f"¿Describen la misma transacción?\n\n{payload}"
+                ),
+            ]
+        )
+        text = (response.content or "").strip()
+        if text.startswith("```"):
+            text = text.strip("`")
+            if text.startswith("json"):
+                text = text[4:]
+            text = text.strip()
+        return json.loads(text)
+    except Exception as exc:
+        logger.error(f"Error en juez LLM de duplicados Gmail: {exc}")
+        return None
+
+
+def _detect_cross_email_duplicate(
+    pe: ProcessedEmail,
+    ai_result: dict,
+    amount: Any,
+    currency: str,
+    is_income: bool,
+    subject: str,
+    sender: str,
+) -> dict | None:
+    """Busca una transaccion reciente que sea la MISMA compra que este correo.
+
+    Dos capas: (1) candidatos por monto+moneda exactos en una ventana de
+    minutos (query barata; sin candidatos no cuesta nada), (2) referencia de
+    transaccion si ambos correos la traen (match seguro sin LLM), o juez LLM
+    comparando ambos correos. Devuelve ``{"candidate", "via", "judge"}`` o
+    None si no hay duplicado.
+    """
+    candidates = _find_duplicate_candidates(pe, amount, currency, is_income)
+    if not candidates:
+        return None
+
+    new_ref = _normalize_reference(ai_result.get("transaction_reference"))
+    new_email = {
+        "asunto": subject,
+        "remitente": sender,
+        "comercio": ai_result.get("merchant"),
+        "monto": amount,
+        "moneda": currency,
+        "referencia": ai_result.get("transaction_reference"),
+    }
+    for candidate in candidates:
+        try:
+            old_result = json.loads(candidate.ai_response or "{}")
+        except json.JSONDecodeError:
+            old_result = {}
+        if not isinstance(old_result, dict):
+            old_result = {}
+
+        old_ref = _normalize_reference(old_result.get("transaction_reference"))
+        if new_ref and old_ref:
+            if new_ref == old_ref:
+                return {"candidate": candidate, "via": "reference", "judge": None}
+            # Referencias explicitas distintas: seguro NO es la misma compra.
+            continue
+
+        judge = _judge_duplicate_emails(
+            new_email,
+            {
+                "asunto": candidate.subject,
+                "remitente": candidate.sender,
+                "comercio": old_result.get("merchant"),
+                "monto": amount,
+                "moneda": currency,
+                "referencia": old_result.get("transaction_reference"),
+            },
+        )
+        if (
+            judge
+            and bool(judge.get("is_duplicate"))
+            and float(judge.get("confidence") or 0)
+            >= DUPLICATE_JUDGE_MIN_CONFIDENCE
+        ):
+            return {"candidate": candidate, "via": "llm", "judge": judge}
+    return None
+
+
+def _apply_duplicate(
+    pe: ProcessedEmail,
+    ai_result: dict,
+    transaction_type: str,
+    duplicate: dict,
+    subject: str,
+) -> None:
+    """Marca el ProcessedEmail como duplicado sin crear transaccion.
+
+    Si el juez identifico un merchant mas especifico que el de la transaccion
+    existente (el recibo del comercio vs "Compra Smart Card"), mejora la
+    descripcion del registro existente en vez de descartar el dato. No se
+    envia segunda notificacion de WhatsApp.
+    """
+    candidate: ProcessedEmail = duplicate["candidate"]
+    is_income = transaction_type == "income"
+    existing = candidate.income if is_income else candidate.expense
+    judge = duplicate.get("judge") or {}
+
+    best_merchant = (judge.get("best_merchant") or "").strip()
+    if (
+        existing is not None
+        and best_merchant
+        and best_merchant.lower() != (existing.description or "").lower()
+    ):
+        existing.description = best_merchant
+        try:
+            from gmailbot.email_processor import embeddings as _embeddings
+
+            existing.embedding = _embeddings.embed_query(
+                f"{best_merchant} {subject}"
+            )
+        except Exception as exc:
+            logger.error(
+                f"Error regenerando embedding tras mejorar merchant: {exc}",
+                extra={"processed_email_id": pe.id},
+            )
+        existing.save()
+        logger.info(
+            f"Merchant de transaccion existente mejorado por correo duplicado: "
+            f"'{best_merchant}'",
+            extra={
+                "processed_email_id": pe.id,
+                "duplicate_of_processed_email_id": candidate.id,
+            },
+        )
+
+    pe.processing_status = "duplicate"
+    pe.is_purchase = True
+    pe.transaction_type = transaction_type
+    pe.ai_response = json.dumps(
+        {
+            **ai_result,
+            "duplicate_of": {
+                "processed_email_id": candidate.id,
+                "expense_id": candidate.expense_id,
+                "income_id": candidate.income_id,
+                "via": duplicate["via"],
+                "judge": judge or None,
+            },
+        },
+        ensure_ascii=False,
+    )
+    pe.save(
+        update_fields=[
+            "processing_status",
+            "is_purchase",
+            "transaction_type",
+            "ai_response",
+            "updated_at",
+        ]
+    )
+    logger.info(
+        "composio pipeline duplicate detected",
+        extra={
+            "processed_email_id": pe.id,
+            "duplicate_of_processed_email_id": candidate.id,
+            "via": duplicate["via"],
+            "user_id": pe.user_id,
+        },
+    )
 
 
 def _semantic_category_fallback(user, embedding, is_income: bool) -> str | None:
@@ -214,6 +476,26 @@ def process_composio_email(pe: ProcessedEmail) -> None:
             txn_date = timezone.now().date()
     else:
         txn_date = timezone.now().date()
+
+    # 6b. Deduplicacion entre correos distintos de la misma compra (recibo
+    # del comercio + notificacion de la tarjeta). El lock sobre la fila del
+    # usuario serializa el chequeo+creacion cuando los dos correos llegan
+    # casi a la vez y se procesan en workers paralelos; el caller
+    # (process_gmail_message_async) ya corre en transaction.atomic, asi que
+    # el lock se sostiene hasta el commit de la task.
+    try:
+        type(user).objects.select_for_update().get(pk=user.pk)
+    except Exception as exc:
+        logger.error(
+            f"Error tomando lock de usuario para dedup Gmail: {exc}",
+            extra={"processed_email_id": pe.id, "user_id": user.id},
+        )
+    duplicate = _detect_cross_email_duplicate(
+        pe, ai_result, amount, currency, is_income, subject, sender
+    )
+    if duplicate is not None:
+        _apply_duplicate(pe, ai_result, transaction_type, duplicate, subject)
+        return
 
     # 7. Embedding de la transaccion (se necesita aqui tanto para la busqueda
     # semantica posterior como para el fallback de categoria del paso 8).
