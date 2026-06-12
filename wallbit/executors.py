@@ -79,6 +79,12 @@ def execute_place_trade(
         "order_type": order_type,
         "amount": float(amount_usd),
     }
+    # LIMIT orders carry a price ceiling/floor and a validity window. Some
+    # freshly-listed assets (e.g. SPCX) ONLY accept LIMIT — the preview resolves
+    # those fields and persists them in tool_args, so we just forward them.
+    if order_type == "LIMIT":
+        body["limit_price"] = float(Decimal(str(args["limit_price"])))
+        body["time_in_force"] = (args.get("time_in_force") or "DAY").upper()
     with _client(account) as client:
         response = client.post("/trades", json=body)
 

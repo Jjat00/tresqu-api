@@ -63,9 +63,44 @@ def _pending_payload(
     }
 
 
+def _fetch_asset_meta(account, symbol: str) -> tuple[Decimal | None, bool]:
+    """Best-effort lookup of (current_price, limit_only) for ``symbol``.
+
+    Used to (a) default the limit price when the user didn't give one and
+    (b) auto-detect assets Wallbit only trades with LIMIT orders (their name
+    contains "Only Limit Orders", e.g. SPCX right after its IPO). Any failure
+    degrades to ``(None, False)`` — a quote hiccup must never block a trade.
+    """
+    from .client import WallbitClient, WallbitError
+    from .crypto import decrypt_api_key
+
+    try:
+        with WallbitClient(decrypt_api_key(account.encrypted_api_key)) as client:
+            resp = client.get(f"/assets/{symbol}")
+    except WallbitError as exc:
+        logger.info("place_trade asset lookup failed for %s: %s", symbol, exc)
+        return None, False
+    except Exception as exc:  # noqa: BLE001 — never fail the preview on a lookup
+        logger.warning("place_trade asset lookup crashed for %s: %s", symbol, exc)
+        return None, False
+
+    data = resp.data.get("data") if isinstance(resp.data, dict) else None
+    if not isinstance(data, dict):
+        return None, False
+    limit_only = "only limit orders" in str(data.get("name") or "").lower()
+    raw_price = data.get("price")
+    try:
+        price = Decimal(str(raw_price)) if raw_price is not None else None
+    except (ArithmeticError, ValueError, TypeError):
+        price = None
+    return price, limit_only
+
+
 def _preview_place_trade(
     *, user: User, channel: str, user_message: str,
     action: str, symbol: str, amount_usd: float,
+    order_type: str = "MARKET", limit_price: float | None = None,
+    time_in_force: str = "DAY",
 ) -> dict[str, Any]:
     action_norm = (action or "").upper()
     if action_norm not in {"BUY", "SELL"}:
@@ -81,6 +116,19 @@ def _preview_place_trade(
         return {"ok": False, "error": "amount_invalid",
                 "message": "amount_usd debe ser mayor a 0."}
 
+    order_type_norm = (order_type or "MARKET").upper()
+    if order_type_norm not in {"MARKET", "LIMIT"}:
+        return {"ok": False, "error": "invalid_order_type",
+                "message": "order_type debe ser MARKET o LIMIT."}
+    # A user-supplied limit price only makes sense as a LIMIT order.
+    limit_dec: Decimal | None = None
+    if limit_price is not None:
+        limit_dec = Decimal(str(limit_price))
+        if limit_dec <= 0:
+            return {"ok": False, "error": "limit_price_invalid",
+                    "message": "limit_price debe ser mayor a 0."}
+        order_type_norm = "LIMIT"
+
     try:
         account = get_account_or_raise(user)
         check_kill_switch(account)
@@ -91,14 +139,50 @@ def _preview_place_trade(
     if not check.ok:
         return _limits_error_payload(check)
 
+    # Some freshly-listed assets only accept LIMIT orders; a MARKET order on them
+    # gets an opaque Wallbit rejection. Detect that and auto-switch to LIMIT,
+    # and resolve the default limit price (current quote) when the user gave none.
+    current_price, limit_only = _fetch_asset_meta(account, symbol_norm)
+    if limit_only and order_type_norm == "MARKET":
+        order_type_norm = "LIMIT"
+
+    tif_norm = "DAY"
+    if order_type_norm == "LIMIT":
+        tif_norm = (time_in_force or "DAY").upper()
+        if tif_norm not in {"DAY", "GTC"}:
+            tif_norm = "DAY"
+        if limit_dec is None:
+            limit_dec = current_price
+        if limit_dec is None or limit_dec <= 0:
+            return {
+                "ok": False, "error": "limit_price_required",
+                "message": (
+                    f"{symbol_norm} requiere una orden con precio límite y no pude "
+                    f"obtener su precio actual. Indícame el precio límite, por ej.: "
+                    f"\"compra USD {amount} de {symbol_norm} con límite 140\"."
+                ),
+            }
+
     gate = evaluate_risk_profile_gate(user, action=action_norm, amount_usd=amount)
+
+    if order_type_norm == "LIMIT":
+        summary = (
+            f"{action_norm} {symbol_norm} por USD {amount} "
+            f"(LIMIT @ {limit_dec} USD, {tif_norm})"
+        )
+    else:
+        summary = f"{action_norm} {symbol_norm} por USD {amount}"
 
     preview: dict[str, Any] = {
         "action": action_norm,
         "symbol": symbol_norm,
         "amount_usd": str(amount),
-        "summary": f"{action_norm} {symbol_norm} por USD {amount}",
+        "order_type": order_type_norm,
+        "summary": summary,
     }
+    if order_type_norm == "LIMIT":
+        preview["limit_price"] = str(limit_dec)
+        preview["time_in_force"] = tif_norm
     if gate.warning:
         preview["risk_warning"] = gate.warning
     if gate.snapshot:
@@ -112,7 +196,11 @@ def _preview_place_trade(
         "action": action_norm,
         "symbol": symbol_norm,
         "amount_usd": str(amount),
+        "order_type": order_type_norm,
     }
+    if order_type_norm == "LIMIT":
+        tool_args["limit_price"] = str(limit_dec)
+        tool_args["time_in_force"] = tif_norm
     if gate.snapshot:
         tool_args["risk_gate"] = {
             "pass_through": gate.pass_through,
@@ -361,20 +449,43 @@ def make_wallbit_write_tools(
     """Bind user/channel/message so the LLM only sees the trade-shaped args."""
 
     @tool
-    def wallbit_place_trade(action: str, symbol: str, amount_usd: float) -> dict[str, Any]:
+    def wallbit_place_trade(
+        action: str,
+        symbol: str,
+        amount_usd: float,
+        order_type: str = "MARKET",
+        limit_price: float | None = None,
+        time_in_force: str = "DAY",
+    ) -> dict[str, Any]:
         """Propone una orden de compra/venta de un activo en Wallbit (NO ejecuta).
 
         Devuelve un preview + confirmation_id. El usuario debe confirmar
         con un botón en el chat antes de que se envíe a Wallbit.
 
+        Tipos de orden:
+        - MARKET (default): se ejecuta al precio de mercado del momento.
+        - LIMIT: se ejecuta solo a `limit_price` o mejor. Algunos activos recién
+          listados solo aceptan LIMIT (su ficha trae "Only Limit Orders", p. ej.
+          SPCX). No necesitas detectarlo: el sistema cambia esos a LIMIT
+          automáticamente y usa el precio actual si no diste uno.
+
         Args:
             action: BUY o SELL.
             symbol: Ticker del activo, ej "AAPL".
             amount_usd: Monto en USD a operar.
+            order_type: MARKET (default) o LIMIT.
+            limit_price: Precio límite en USD (solo LIMIT). Si lo das, la orden
+                será LIMIT aunque order_type sea MARKET. Pásalo SOLO si el usuario
+                lo indicó; nunca lo inventes. Si lo dejas en null en una orden
+                LIMIT, se usa el precio actual del activo.
+            time_in_force: Vigencia de una orden LIMIT — DAY (default, expira al
+                cierre) o GTC (hasta cancelar). Se ignora en MARKET.
         """
         return _preview_place_trade(
             user=user, channel=channel, user_message=user_message,
             action=action, symbol=symbol, amount_usd=amount_usd,
+            order_type=order_type, limit_price=limit_price,
+            time_in_force=time_in_force,
         )
 
     @tool
