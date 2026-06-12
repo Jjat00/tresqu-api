@@ -63,6 +63,22 @@ def _record_investment(
     )
 
 
+def _fetch_current_price(client: WallbitClient, symbol: str) -> Decimal | None:
+    """Current price for ``symbol`` from Wallbit, or None on any failure."""
+    try:
+        resp = client.get(f"/assets/{symbol}")
+    except WallbitError:
+        return None
+    data = resp.data.get("data") if isinstance(resp.data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    raw = data.get("price")
+    try:
+        return Decimal(str(raw)) if raw is not None else None
+    except (ArithmeticError, ValueError, TypeError):
+        return None
+
+
 def execute_place_trade(
     decision: AgentDecision, account: WallbitAccount, args: dict[str, Any]
 ) -> dict[str, Any]:
@@ -86,7 +102,33 @@ def execute_place_trade(
         body["limit_price"] = float(Decimal(str(args["limit_price"])))
         body["time_in_force"] = (args.get("time_in_force") or "DAY").upper()
     with _client(account) as client:
-        response = client.post("/trades", json=body)
+        try:
+            response = client.post("/trades", json=body)
+        except WallbitError as exc:
+            # Some freshly-listed assets (e.g. SPCX right after its IPO) reject
+            # MARKET orders with an opaque error because they only accept LIMIT,
+            # and Wallbit no longer flags that restriction in the asset metadata
+            # — so we can't catch it up front. Fall back ONCE to a LIMIT order at
+            # (near) the current price. The USD amount is unchanged, so the user's
+            # spend and all pre-flight limits still hold; only the fill mechanism
+            # changes. A LIMIT order already gets the same retry → no re-fallback.
+            price = None if order_type != "MARKET" else _fetch_current_price(client, symbol)
+            if price is None or price <= 0:
+                raise
+            # BUY caps a hair above market, SELL a hair below, so it still fills.
+            buffer = Decimal("1.02") if direction == "BUY" else Decimal("0.98")
+            limit_price = (price * buffer).quantize(Decimal("0.01"))
+            body = {
+                **body,
+                "order_type": "LIMIT",
+                "limit_price": float(limit_price),
+                "time_in_force": "DAY",
+            }
+            logger.info(
+                "place_trade MARKET rejected for %s (%s); retrying as LIMIT @ %s",
+                symbol, exc, limit_price,
+            )
+            response = client.post("/trades", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
