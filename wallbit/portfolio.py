@@ -107,6 +107,10 @@ class Holding:
     pnl_pct: float
     kind: str = ""
     name: str = ""
+    # True when we hold the shares (live balance) but have no settled cost yet
+    # (e.g. bought in the Wallbit app, not synced/settled). P&L is forced to 0
+    # so the UI can show "sincronizando / —" instead of a phantom full-value gain.
+    cost_pending: bool = False
 
 
 @dataclass
@@ -209,20 +213,29 @@ def get_holdings(user: User) -> list[Holding]:
             net_shares, net_cost = _cost_basis_for_symbol(user, symbol)
             # Prefer Wallbit's reported shares; fall back to what we computed
             effective_shares = shares if shares > 0 else max(net_shares, Decimal(0))
-            # Cost basis = the real USD put into the position (net_cost). We use
-            # it directly instead of avg_cost * shares: amount_usd is recorded
-            # exactly, while the stored share counts may have been rounded, and
-            # multiplying an inflated avg_cost by the precise Wallbit share count
-            # would amplify that rounding into a wrong P&L.
-            cost_basis = net_cost if net_cost > 0 else Decimal(0)
-            avg_cost = (
-                cost_basis / effective_shares
-                if effective_shares > 0 and cost_basis > 0
-                else Decimal(0)
-            )
             market_value = current_price * effective_shares
-            pnl_usd = market_value - cost_basis
-            pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+            if net_cost > 0:
+                # Cost basis = the real USD put into the position (net_cost). We
+                # use it directly instead of avg_cost * shares: amount_usd is
+                # recorded exactly, while the stored share counts may have been
+                # rounded, and multiplying an inflated avg_cost by the precise
+                # Wallbit share count would amplify that into a wrong P&L.
+                cost_basis = net_cost
+                avg_cost = cost_basis / effective_shares if effective_shares > 0 else Decimal(0)
+                pnl_usd = market_value - cost_basis
+                pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+                cost_pending = False
+            else:
+                # We hold shares (live balance) but have NO settled cost for them
+                # yet — typically a buy made in the Wallbit app that hasn't synced
+                # or settled. Reporting cost 0 would invent a gain equal to the
+                # whole position, so treat it as break-even and flag it so the UI
+                # shows "sincronizando / —" until the real cost lands.
+                cost_basis = market_value
+                avg_cost = Decimal(0)
+                pnl_usd = Decimal(0)
+                pnl_pct = 0.0
+                cost_pending = True
 
             holdings.append(
                 Holding(
@@ -236,6 +249,7 @@ def get_holdings(user: User) -> list[Holding]:
                     pnl_pct=pnl_pct,
                     kind=kind,
                     name=name,
+                    cost_pending=cost_pending,
                 )
             )
 
@@ -284,11 +298,13 @@ def get_summary(user: User) -> PortfolioSummary:
         .aggregate(s=Sum("amount_usd"))["s"]
         or Decimal(0)
     )
-    net_invested = Decimal(invested_total) - Decimal(withdrawn_total)
-
     pending_trades = _pending_trades(user)
 
     current_value = Decimal(0)
+    # Market value of held symbols with NO settled cost yet (bought in the
+    # Wallbit app, not synced/settled). Folded into invested below so they net
+    # to zero P&L (break-even) instead of inflating the gain by their full value.
+    untracked_cost = Decimal(0)
     cash: list[CashBalance] = []
     holdings_count = 0
     investment_cash = Decimal(0)
@@ -318,8 +334,18 @@ def get_summary(user: User) -> PortfolioSummary:
                     continue
                 asset = _cached_asset(client, symbol) or {}
                 price = _to_decimal(asset.get("price") or asset.get("current_price"))
-                current_value += price * shares
+                market_value = price * shares
+                current_value += market_value
                 holdings_count += 1
+                _, net_cost = _cost_basis_for_symbol(user, symbol)
+                if net_cost <= 0:
+                    untracked_cost += market_value
+
+    # Fold the break-even placeholder for untracked holdings into invested so the
+    # three hero cards stay coherent (net = bruto − retirado, pnl = value − net)
+    # and no phantom gain leaks in while a real cost is still syncing.
+    invested_total = Decimal(invested_total) + untracked_cost
+    net_invested = invested_total - Decimal(withdrawn_total)
 
     pnl = current_value - net_invested
     pnl_pct = (

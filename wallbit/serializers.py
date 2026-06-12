@@ -139,6 +139,7 @@ class HoldingSerializer(serializers.Serializer):
     market_value = serializers.DecimalField(max_digits=18, decimal_places=2)
     pnl_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     pnl_pct = serializers.FloatField()
+    cost_pending = serializers.BooleanField(default=False)
 
 
 class TimelinePointSerializer(serializers.Serializer):
