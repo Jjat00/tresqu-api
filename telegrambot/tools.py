@@ -81,6 +81,45 @@ COLLOQUIAL_AMOUNTS_RULE = """
         """
 
 
+# Regla compartida por las 4 tools parse_* para clasificar el campo `category`.
+# {available_categories} se resuelve en el ainvoke con las categorías que el
+# usuario YA tiene, para que el parser REUTILICE una existente en vez de inventar
+# una categoría nueva (p. ej. "cena" → "Alimentación", no una categoría "Cena").
+CATEGORY_CLASSIFICATION_RULE = """
+        CLASIFICACIÓN DE LA CATEGORÍA (MUY IMPORTANTE):
+        Categorías que el usuario YA tiene (el prefijo "Gastos:"/"Ingresos:" es solo
+        una etiqueta, NO forma parte del nombre):
+        {available_categories}
+
+        Reglas para el campo `category`:
+        - Elige SIEMPRE una categoría EXISTENTE de la lista de arriba cuando alguna
+          encaje, aunque sea de forma general. La gran mayoría de movimientos
+          cotidianos encajan en una categoría que ya existe.
+        - NUNCA uses como categoría el nombre literal del ítem, comercio o actividad.
+          Clasifícalo en su categoría temática. Ejemplos (aplica el mismo criterio a
+          cualquier otro caso):
+            • "cena", "almuerzo", "desayuno", "café", "mercado", "domicilio",
+              "restaurante", "comida" → "Alimentación"
+            • "taxi", "uber", "bus", "gasolina", "peaje", "parqueadero" → "Transporte y Movilidad"
+            • "cine", "videojuego", "concierto", "salida" → "Entretenimiento y Ocio"
+            • "doctor", "farmacia", "gimnasio", "medicinas" → "Salud y Bienestar"
+        - SOLO si de verdad NINGUNA categoría existente encaja, propón UNA categoría
+          nueva breve y temática (jamás el nombre del ítem). Reutilizar SIEMPRE es
+          preferible a crear.
+        - Cuando uses una categoría existente, escríbela EXACTAMENTE como aparece en la
+          lista (mismas tildes y mayúsculas), sin el prefijo "Gastos:"/"Ingresos:".
+        """
+
+# Fallback cuando no se inyecta la lista de categorías del usuario (p. ej. en
+# llamadas legacy): pedimos al parser que clasifique con categorías temáticas
+# estándar en vez de usar el nombre literal del ítem.
+_NO_CATEGORIES_HINT = (
+    "(lista no disponible; clasifica con categorías temáticas estándar como "
+    "Alimentación, Transporte y Movilidad, Salud y Bienestar, Entretenimiento y "
+    "Ocio, Vivienda, etc., nunca el nombre literal del ítem)"
+)
+
+
 @tool
 def get_current_date(user_external_id: str) -> str:
     """Devuelve la fecha actual en formato YYYY‑MM‑DD, considerando la zona horaria del usuario."""
@@ -179,11 +218,13 @@ def parse_relative_date(date_text: str, user_external_id: str) -> str:
 
 
 @tool()
-async def parse_expense(text: str, user_default_currency: str = "USD") -> dict:
+async def parse_expense(text: str, user_default_currency: str = "USD", expense_categories: str = "") -> dict:
     """
     Analiza un mensaje para extraer un gasto.
     Pasa en `user_default_currency` la moneda por defecto del usuario (ISO 4217):
     se usa para interpretar montos coloquiales ("gasté 90 en una camisa" → 90000 en COP).
+    Pasa en `expense_categories` las categorías que el usuario ya tiene, para que el
+    parser reutilice una existente en vez de inventar una nueva por cada gasto.
     Devuelve dict o {'error': …} si no hay datos suficientes.
     """
     structured_llm = llm.with_structured_output(
@@ -215,7 +256,7 @@ async def parse_expense(text: str, user_default_currency: str = "USD") -> dict:
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas, "lucas", "varos" u otra palabra
         ambigua, o no menciona moneda, deja `currency` en null — el sistema usará la moneda por
         defecto del usuario.
-""" + COLLOQUIAL_AMOUNTS_RULE + """
+""" + COLLOQUIAL_AMOUNTS_RULE + CATEGORY_CLASSIFICATION_RULE + """
         Por ejemplo:
         - "ayer compré un regalo a 20K" debe registrarse con la fecha de ayer
         - "el sábado gasté 100k en cervezas" debe registrarse con la fecha del sábado más reciente
@@ -226,17 +267,21 @@ async def parse_expense(text: str, user_default_currency: str = "USD") -> dict:
 
     try:
         chain = prompt | structured_llm
-        result = await chain.ainvoke(
-            {"text": text, "user_default_currency": user_default_currency})
+        result = await chain.ainvoke({
+            "text": text,
+            "user_default_currency": user_default_currency,
+            "available_categories": expense_categories or _NO_CATEGORIES_HINT,
+        })
         return dict(result)
     except Exception as e:
         return {"error": str(e)}
 
 
 @tool
-async def parse_expenses(text: str, user_default_currency: str = "USD") -> Dict[str, Any]:
+async def parse_expenses(text: str, user_default_currency: str = "USD", expense_categories: str = "") -> Dict[str, Any]:
     """Extrae VARIOS gastos. Pasa en `user_default_currency` la moneda por defecto
-    del usuario (ISO 4217) para interpretar montos coloquiales."""
+    del usuario (ISO 4217) para interpretar montos coloquiales. Pasa en
+    `expense_categories` las categorías existentes del usuario para reutilizarlas."""
     chain = (ChatPromptTemplate.from_messages([
         ("system", """
         Eres un asistente financiero experto en extraer información de gastos.
@@ -262,13 +307,16 @@ async def parse_expenses(text: str, user_default_currency: str = "USD") -> Dict[
         USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-""" + COLLOQUIAL_AMOUNTS_RULE),
+""" + COLLOQUIAL_AMOUNTS_RULE + CATEGORY_CLASSIFICATION_RULE),
         ("human", "{text}")
     ]) | llm.with_structured_output(
         ExpenseList, method="function_calling"))
     try:
-        result: ExpenseList = await chain.ainvoke(
-            {"text": text, "user_default_currency": user_default_currency})
+        result: ExpenseList = await chain.ainvoke({
+            "text": text,
+            "user_default_currency": user_default_currency,
+            "available_categories": expense_categories or _NO_CATEGORIES_HINT,
+        })
         return result.model_dump()
     except Exception as e:
         return {"error": str(e)}
@@ -950,11 +998,13 @@ class IncomeList(BaseModel):
 
 
 @tool()
-async def parse_income(text: str, user_default_currency: str = "USD") -> dict:
+async def parse_income(text: str, user_default_currency: str = "USD", income_categories: str = "") -> dict:
     """
     Analiza un mensaje para extraer un ingreso.
     Pasa en `user_default_currency` la moneda por defecto del usuario (ISO 4217):
     se usa para interpretar montos coloquiales ("me pagaron 200 del proyecto" → 200000 en COP).
+    Pasa en `income_categories` las categorías de ingreso existentes del usuario para
+    reutilizarlas en vez de inventar una nueva.
     Devuelve dict o {'error': …} si no hay datos suficientes.
     """
     structured_llm = llm.with_structured_output(
@@ -985,7 +1035,7 @@ async def parse_income(text: str, user_default_currency: str = "USD") -> dict:
         o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-""" + COLLOQUIAL_AMOUNTS_RULE + """
+""" + COLLOQUIAL_AMOUNTS_RULE + CATEGORY_CLASSIFICATION_RULE + """
         Por ejemplo:
         - "ayer recibí un pago a 20K" debe registrarse con la fecha de ayer
         - "el sábado me pagaron 100k" debe registrarse con la fecha del sábado más reciente
@@ -996,17 +1046,21 @@ async def parse_income(text: str, user_default_currency: str = "USD") -> dict:
 
     try:
         chain = prompt | structured_llm
-        result = await chain.ainvoke(
-            {"text": text, "user_default_currency": user_default_currency})
+        result = await chain.ainvoke({
+            "text": text,
+            "user_default_currency": user_default_currency,
+            "available_categories": income_categories or _NO_CATEGORIES_HINT,
+        })
         return dict(result)
     except Exception as e:
         return {"error": str(e)}
 
 
 @tool
-async def parse_incomes(text: str, user_default_currency: str = "USD") -> Dict[str, Any]:
+async def parse_incomes(text: str, user_default_currency: str = "USD", income_categories: str = "") -> Dict[str, Any]:
     """Extrae VARIOS ingresos. Pasa en `user_default_currency` la moneda por defecto
-    del usuario (ISO 4217) para interpretar montos coloquiales."""
+    del usuario (ISO 4217) para interpretar montos coloquiales. Pasa en
+    `income_categories` las categorías de ingreso existentes del usuario para reutilizarlas."""
     chain = (ChatPromptTemplate.from_messages([
         ("system", """
         Eres un asistente financiero experto en extraer información de ingresos.
@@ -1032,13 +1086,16 @@ async def parse_incomes(text: str, user_default_currency: str = "USD") -> Dict[s
         USD/EUR/ARS, o un nombre claro: "dólares"→USD, "euros"→EUR, "pesos colombianos"→COP,
         "pesos argentinos"→ARS). Si solo dice "pesos" a secas u otra palabra ambigua, o no
         menciona moneda, deja `currency` en null — el sistema usará la moneda por defecto del usuario.
-""" + COLLOQUIAL_AMOUNTS_RULE),
+""" + COLLOQUIAL_AMOUNTS_RULE + CATEGORY_CLASSIFICATION_RULE),
         ("human", "{text}")
     ]) | llm.with_structured_output(
         IncomeList, method="function_calling"))
     try:
-        result: IncomeList = await chain.ainvoke(
-            {"text": text, "user_default_currency": user_default_currency})
+        result: IncomeList = await chain.ainvoke({
+            "text": text,
+            "user_default_currency": user_default_currency,
+            "available_categories": income_categories or _NO_CATEGORIES_HINT,
+        })
         return result.model_dump()
     except Exception as e:
         return {"error": str(e)}

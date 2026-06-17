@@ -65,8 +65,17 @@ def _model() -> ChatOpenAI:
     )
 
 
-def build_expenses_tools(user: User) -> list:
-    """All tools the expenses subagent needs, with ``user_external_id`` bound."""
+def build_expenses_tools(
+    user: User,
+    expense_categories_str: str = "",
+    income_categories_str: str = "",
+) -> list:
+    """All tools the expenses subagent needs, with ``user_external_id`` bound.
+
+    Las categorías existentes del usuario se pasan a los parsers para que
+    clasifiquen reutilizando una categoría existente en vez de inventar una nueva
+    por cada gasto/ingreso.
+    """
 
     external_id = user.external_id
     default_currency = user.default_currency or "USD"
@@ -78,6 +87,7 @@ def build_expenses_tools(user: User) -> list:
         return await parse_expense.ainvoke({
             "text": text,
             "user_default_currency": default_currency,
+            "expense_categories": expense_categories_str,
         })
 
     @tool
@@ -87,6 +97,7 @@ def build_expenses_tools(user: User) -> list:
         return await parse_expenses.ainvoke({
             "text": text,
             "user_default_currency": default_currency,
+            "expense_categories": expense_categories_str,
         })
 
     @tool
@@ -96,6 +107,7 @@ def build_expenses_tools(user: User) -> list:
         return await parse_income.ainvoke({
             "text": text,
             "user_default_currency": default_currency,
+            "income_categories": income_categories_str,
         })
 
     @tool
@@ -105,6 +117,7 @@ def build_expenses_tools(user: User) -> list:
         return await parse_incomes.ainvoke({
             "text": text,
             "user_default_currency": default_currency,
+            "income_categories": income_categories_str,
         })
 
     @tool
@@ -442,7 +455,8 @@ def build_expenses_subagent(
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
-    tools = build_expenses_tools(user)
+    tools = build_expenses_tools(
+        user, expense_categories_str, income_categories_str)
     return create_agent(
         model=_model(),
         tools=tools,

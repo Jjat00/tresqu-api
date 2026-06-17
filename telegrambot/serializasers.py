@@ -26,7 +26,16 @@ class ExpenseData(BaseModel):
             "moneda por defecto del usuario."
         ),
     )
-    category: str = Field(..., description="Categoría del gasto.")
+    category: str = Field(
+        ...,
+        description=(
+            "Categoría TEMÁTICA del gasto. Debe ser, siempre que alguna encaje, una de "
+            "las categorías existentes del usuario provistas en el prompt. NUNCA uses el "
+            "nombre literal del ítem o actividad (no 'cena' ni 'taxi', sino 'Alimentación' "
+            "o 'Transporte y Movilidad'). Solo propón una categoría nueva si ninguna "
+            "existente encaja."
+        ),
+    )
     spent_at: Optional[str] = Field(
         None, description="Fecha del gasto en formato YYYY-MM-DD.")
     note: Optional[str] = Field(
@@ -66,7 +75,15 @@ class IncomeData(BaseModel):
             "moneda por defecto del usuario."
         ),
     )
-    category: str = Field(..., description="Categoría del ingreso.")
+    category: str = Field(
+        ...,
+        description=(
+            "Categoría TEMÁTICA del ingreso. Debe ser, siempre que alguna encaje, una de "
+            "las categorías de ingreso existentes del usuario provistas en el prompt. "
+            "NUNCA uses el nombre literal de la fuente puntual; clasifícala en su categoría "
+            "temática. Solo propón una categoría nueva si ninguna existente encaja."
+        ),
+    )
     received_at: Optional[str] = Field(
         None, description="Fecha del ingreso en formato YYYY-MM-DD.")
     note: Optional[str] = Field(
