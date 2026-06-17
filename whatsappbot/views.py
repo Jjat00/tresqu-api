@@ -133,8 +133,17 @@ def handle_meta_webhook(request):
 
 def process_meta_messages(value, waba_id):
     """
-    Procesa los mensajes entrantes de Meta WhatsApp API con prevención de duplicados
+    Encola cada mensaje entrante de Meta para procesamiento asíncrono en Celery.
+
+    El webhook responde 200 de inmediato y el trabajo pesado (LLM + llamadas a
+    la API de Meta) corre en el worker. Así un deploy/reinicio del proceso web
+    no interrumpe el procesamiento ni dispara reintentos de Meta por timeout, y
+    la idempotencia se ancla al *resultado* de la tarea, no a un candado puesto
+    antes de procesar (ver ``whatsappbot/tasks.py``).
     """
+    # Import diferido: views es importado por tasks, evitamos el ciclo.
+    from .tasks import process_meta_message_async
+
     try:
         messages = value.get('messages', [])
         contacts = value.get('contacts', [])
@@ -149,142 +158,131 @@ def process_meta_messages(value, waba_id):
                 'wa_id': wa_id
             }
 
-        # Procesar cada mensaje
         for message in messages:
+            message_id = message.get('id')
             try:
-                # Información básica del mensaje
-                message_id = message.get('id')
-                from_number = message.get('from')
-                timestamp = message.get('timestamp')
-                message_type = message.get('type', 'text')
-
-                # Contexto de "reply/quote": Meta incluye este bloque cuando el
-                # usuario deslizó hacia la izquierda para responder otro mensaje.
-                # Nos interesa context.id (el wamid del mensaje referenciado).
-                context_block = message.get('context') or {}
-                replied_to_message_id = context_block.get('id')
-
-                # PREVENCIÓN DE DUPLICADOS - Verificar si el mensaje ya está siendo procesado
-                cache_key = f"{MESSAGE_PROCESSING_PREFIX}{message_id}"
-
-                # Verificar si el mensaje ya fue procesado o está en proceso
-                if get_cache(cache_key):
-                    logger.info(
-                        f"⚠️ Mensaje duplicado detectado - ID: {message_id}, De: {from_number}. Ignorando.")
-                    continue
-
-                # Marcar el mensaje como en proceso (expirará automáticamente en 5 minutos)
-                # IMPORTANTE: NO limpiar manualmente el caché después del procesamiento
-                # para prevenir duplicados cuando WhatsApp envía el mismo webhook múltiples veces
-                set_cache(cache_key, True, MESSAGE_PROCESSING_TIMEOUT)
+                process_meta_message_async.delay(
+                    message, contacts_dict, waba_id)
                 logger.info(
-                    f"🔒 Mensaje marcado para procesamiento - ID: {message_id}, De: {from_number}")
-
-                # Obtener información del contacto
-                contact_info = contacts_dict.get(from_number, {})
-                sender_name = contact_info.get('name', '')
-
-                logger.info(
-                    f"Procesando mensaje Meta - ID: {message_id}, De: {from_number}, Tipo: {message_type}")
-
-                # Extraer contenido del mensaje según el tipo
-                message_text = ""
-                media_url = None
-
-                if message_type == 'interactive':
-                    interactive = message.get('interactive', {}) or {}
-                    if interactive.get('type') == 'button_reply':
-                        button_reply = interactive.get('button_reply', {}) or {}
-                        button_id = button_reply.get('id', '') or ''
-                        if button_id.startswith('wallbit_'):
-                            try:
-                                from users.models import User
-                                from .wallbit_handlers import handle_button_press
-                                wa_external_id = f"wa_{from_number}"
-                                user = User.objects.filter(
-                                    external_id__contains=wa_external_id
-                                ).first()
-                                if user is None:
-                                    reply_text = "No encontré tu cuenta."
-                                else:
-                                    reply_text = handle_button_press(button_id, user)
-                                if reply_text:
-                                    send_meta_whatsapp_message(
-                                        from_number, reply_text
-                                    )
-                            except Exception as cb_err:
-                                logger.exception(
-                                    f"Error procesando botón Wallbit: {cb_err}"
-                                )
-                            cache.delete(cache_key)
-                            continue
-                    cache.delete(cache_key)
-                    continue
-                if message_type == 'text':
-                    message_text = message.get('text', {}).get('body', '')
-                elif message_type == 'image':
-                    image_data = message.get('image', {})
-                    message_text = image_data.get('caption', '')
-                    media_url = image_data.get('id')  # Media ID para descargar
-                elif message_type == 'audio':
-                    audio_data = message.get('audio', {})
-                    media_url = audio_data.get('id')
-                elif message_type == 'video':
-                    video_data = message.get('video', {})
-                    message_text = video_data.get('caption', '')
-                    media_url = video_data.get('id')
-                elif message_type == 'document':
-                    document_data = message.get('document', {})
-                    message_text = document_data.get('caption', '')
-                    media_url = document_data.get('id')
-                elif message_type == 'voice':
-                    voice_data = message.get('voice', {})
-                    media_url = voice_data.get('id')
-                else:
-                    logger.info(
-                        f"Tipo de mensaje no soportado: {message_type}")
-                    # Limpiar el cache antes de continuar
-                    cache.delete(cache_key)
-                    continue
-
-                try:
-                    # Procesar el mensaje usando la lógica existente
-                    success, response = asyncio.run(handle_meta_whatsapp_message(
-                        sender_number=from_number,
-                        message_text=message_text,
-                        message_id=message_id,
-                        waba_id=waba_id,
-                        sender_name=sender_name,
-                        message_type=message_type,
-                        media_url=media_url,
-                        replied_to_message_id=replied_to_message_id,
-                    ))
-
-                    if success:
-                        logger.info(
-                            f"✅ Mensaje Meta procesado exitosamente para {from_number}")
-                    else:
-                        logger.error(
-                            f"❌ Error procesando mensaje Meta para {from_number}")
-
-                except Exception as processing_error:
-                    logger.exception(
-                        f"Error procesando mensaje Meta ID {message_id}: {str(processing_error)}")
-                    # En caso de error, limpiar el caché para permitir reintento
-                    delete_cache(cache_key)
-                    logger.info(
-                        f"🔓 Cache limpiado por error para mensaje ID: {message_id}")
-
-            except Exception as e:
+                    f"📥 Mensaje Meta encolado para procesamiento - ID: {message_id}")
+            except Exception as enqueue_error:
+                # Si el broker está caído no podemos perder el mensaje (Meta no
+                # reintentará porque devolvemos 200): lo procesamos en línea
+                # como último recurso.
                 logger.exception(
-                    f"Error procesando mensaje individual de Meta: {str(e)}")
-                # Asegurar limpieza del cache en caso de error
-                if 'cache_key' in locals():
-                    delete_cache(cache_key)
-                continue
+                    f"No se pudo encolar el mensaje {message_id}, procesando en línea: {enqueue_error}")
+                try:
+                    _process_single_meta_message(
+                        message, contacts_dict, waba_id)
+                except Exception:
+                    logger.exception(
+                        f"Fallo el procesamiento en línea del mensaje {message_id}")
 
     except Exception as e:
         logger.exception(f"Error procesando mensajes de Meta: {str(e)}")
+
+
+def _process_single_meta_message(message, contacts_dict, waba_id):
+    """
+    Procesa un único mensaje entrante de Meta: extrae el contenido según el tipo
+    y delega en la lógica de manejo existente.
+
+    Es síncrona y está pensada para ejecutarse dentro de una tarea Celery
+    (``process_meta_message_async``). NO gestiona deduplicación: de eso se
+    encarga la tarea, que ancla la idempotencia al resultado del procesamiento.
+
+    Devuelve ``(success: bool, response)``. Propaga excepciones cuando el error
+    amerita un reintento por parte de Celery.
+    """
+    message_id = message.get('id')
+    from_number = message.get('from')
+    message_type = message.get('type', 'text')
+
+    # Contexto de "reply/quote": Meta incluye este bloque cuando el usuario
+    # deslizó hacia la izquierda para responder otro mensaje. Nos interesa
+    # context.id (el wamid del mensaje referenciado).
+    context_block = message.get('context') or {}
+    replied_to_message_id = context_block.get('id')
+
+    # Obtener información del contacto
+    contact_info = contacts_dict.get(from_number, {})
+    sender_name = contact_info.get('name', '')
+
+    logger.info(
+        f"Procesando mensaje Meta - ID: {message_id}, De: {from_number}, Tipo: {message_type}")
+
+    # Extraer contenido del mensaje según el tipo
+    message_text = ""
+    media_url = None
+
+    if message_type == 'interactive':
+        interactive = message.get('interactive', {}) or {}
+        if interactive.get('type') == 'button_reply':
+            button_reply = interactive.get('button_reply', {}) or {}
+            button_id = button_reply.get('id', '') or ''
+            if button_id.startswith('wallbit_'):
+                try:
+                    from users.models import User
+                    from .wallbit_handlers import handle_button_press
+                    wa_external_id = f"wa_{from_number}"
+                    user = User.objects.filter(
+                        external_id__contains=wa_external_id
+                    ).first()
+                    if user is None:
+                        reply_text = "No encontré tu cuenta."
+                    else:
+                        reply_text = handle_button_press(button_id, user)
+                    if reply_text:
+                        send_meta_whatsapp_message(from_number, reply_text)
+                except Exception as cb_err:
+                    logger.exception(
+                        f"Error procesando botón Wallbit: {cb_err}")
+        return True, "interactive handled"
+
+    if message_type == 'text':
+        message_text = message.get('text', {}).get('body', '')
+    elif message_type == 'image':
+        image_data = message.get('image', {})
+        message_text = image_data.get('caption', '')
+        media_url = image_data.get('id')  # Media ID para descargar
+    elif message_type == 'audio':
+        audio_data = message.get('audio', {})
+        media_url = audio_data.get('id')
+    elif message_type == 'video':
+        video_data = message.get('video', {})
+        message_text = video_data.get('caption', '')
+        media_url = video_data.get('id')
+    elif message_type == 'document':
+        document_data = message.get('document', {})
+        message_text = document_data.get('caption', '')
+        media_url = document_data.get('id')
+    elif message_type == 'voice':
+        voice_data = message.get('voice', {})
+        media_url = voice_data.get('id')
+    else:
+        logger.info(f"Tipo de mensaje no soportado: {message_type}")
+        return True, "unsupported type ignored"
+
+    # Procesar el mensaje usando la lógica existente
+    success, response = asyncio.run(handle_meta_whatsapp_message(
+        sender_number=from_number,
+        message_text=message_text,
+        message_id=message_id,
+        waba_id=waba_id,
+        sender_name=sender_name,
+        message_type=message_type,
+        media_url=media_url,
+        replied_to_message_id=replied_to_message_id,
+    ))
+
+    if success:
+        logger.info(
+            f"✅ Mensaje Meta procesado exitosamente para {from_number}")
+    else:
+        logger.error(
+            f"❌ Error procesando mensaje Meta para {from_number}")
+
+    return success, response
 
 
 def process_meta_message_status(value, waba_id):
