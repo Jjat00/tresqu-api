@@ -120,6 +120,22 @@ _NO_CATEGORIES_HINT = (
 )
 
 
+def _user_today(user):
+    """Fecha actual (``date``) en la zona horaria del usuario.
+
+    ``timezone.now()`` está en UTC (USE_TZ + TIME_ZONE='UTC'); tomar ``.date()``
+    directo adelanta el día para registros nocturnos en zonas UTC-negativas
+    (p. ej. a las 19:00 en COP/UTC-5 ya es el día siguiente en UTC), haciendo que
+    el gasto aparezca en el día equivocado del dashboard. Convertimos a la zona
+    del usuario antes de extraer la fecha.
+    """
+    try:
+        user_tz = pytz.timezone(user.timezone)
+        return timezone.now().astimezone(user_tz).date()
+    except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
+        return timezone.now().date()
+
+
 @tool
 def get_current_date(user_external_id: str) -> str:
     """Devuelve la fecha actual en formato YYYY‑MM‑DD, considerando la zona horaria del usuario."""
@@ -635,7 +651,7 @@ def create_expense(
     if spent_at:
         date = datetime.strptime(spent_at, "%Y-%m-%d").date()
     else:
-        date = timezone.now().date()
+        date = _user_today(user)
 
     # Normalizar el nombre de la categoría para mostrar (capitalizar cada palabra)
     display_category_name = category.strip().title()
@@ -1205,9 +1221,9 @@ def create_income(
                 received_date = datetime.strptime(
                     received_at, "%Y-%m-%d").date()
             except ValueError:
-                received_date = timezone.now().date()
+                received_date = _user_today(user)
         else:
-            received_date = timezone.now().date()
+            received_date = _user_today(user)
 
         # NUEVO: Crear el objeto Income con categoría por usuario
         income_text = f"Ingreso de {amount} {currency} en {user_income_category.name} el {received_date}. {note}"

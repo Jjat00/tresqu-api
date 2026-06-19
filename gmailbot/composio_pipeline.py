@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytz
 from django.utils import timezone
 
 from categories.utils import (
@@ -469,13 +470,21 @@ def process_composio_email(pe: ProcessedEmail) -> None:
     amount = ai_result.get("amount", 0)
     currency = ai_result.get("currency", user.default_currency)
     date_str = ai_result.get("date")
+    txn_date = None
     if date_str:
         try:
             txn_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except (ValueError, TypeError):
+            txn_date = None
+    if txn_date is None:
+        # Fecha por defecto en la zona del usuario. timezone.now() está en UTC
+        # (USE_TZ + TIME_ZONE='UTC'); tomar .date() directo adelantaría el día
+        # para compras detectadas de noche en zonas UTC-negativas.
+        try:
+            user_tz = pytz.timezone(user.timezone)
+            txn_date = timezone.now().astimezone(user_tz).date()
+        except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
             txn_date = timezone.now().date()
-    else:
-        txn_date = timezone.now().date()
 
     # 6b. Deduplicacion entre correos distintos de la misma compra (recibo
     # del comercio + notificacion de la tarjeta). El lock sobre la fila del
