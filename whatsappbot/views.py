@@ -1277,7 +1277,7 @@ def get_template_message(template):
             "• \"Gasté 25000 en almuerzo\"\n"
             "• \"Compré café por 5000\"\n"
             "• \"Gané 50000 en mi negocio\"\n\n"
-            "📊 Revisa tu dashboard en https://tresqu.com\n\n"
+            "📊 Revisa tu dashboard en https://tresqu.com/dashboard/home\n\n"
             "¡Tus finanzas bajo control! 💪"
         ),
         'welcome': (
@@ -1295,7 +1295,7 @@ def get_template_message(template):
             "Es un buen momento para revisar tus finanzas del día:\n\n"
             "💰 ¿Registraste todos tus gastos de hoy?\n"
             "💵 ¿Anotaste tus ingresos?\n\n"
-            "📱 Revisa tu dashboard: https://tresqu.com\n\n"
+            "📱 Revisa tu dashboard: https://tresqu.com/dashboard/home\n\n"
             "¡Mantén el control de tus finanzas! 🎯"
         ),
         'weekly_reminder': (
@@ -1305,7 +1305,7 @@ def get_template_message(template):
             "📈 ¿Cómo van tus gastos esta semana?\n"
             "💡 ¿Hay algún patrón que notes?\n"
             "🎯 ¿Estás cumpliendo tus metas?\n\n"
-            "📊 Revisa tu resumen semanal: https://tresqu.com\n\n"
+            "📊 Revisa tu resumen semanal: https://tresqu.com/dashboard/home\n\n"
             "¡Sigue así! 💪"
         )
     }

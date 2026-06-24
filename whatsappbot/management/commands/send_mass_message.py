@@ -199,7 +199,7 @@ class Command(BaseCommand):
                 "• \"Gasté 25000 en almuerzo\"\n"
                 "• \"Compré café por 5000\"\n"
                 "• \"Gané 50000 en mi negocio\"\n\n"
-                "📊 Revisa tu dashboard en https://tresqu.com\n\n"
+                "📊 Revisa tu dashboard en https://tresqu.com/dashboard/home\n\n"
                 "¡Tus finanzas bajo control! 💪"
             ),
             'welcome': (
