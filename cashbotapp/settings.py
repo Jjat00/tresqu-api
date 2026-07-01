@@ -272,10 +272,15 @@ SECURE_CROSS_ORIGIN_OPENER_POLICY = "same-origin-allow-popups"
 
 # Configuración de JWT
 SIMPLE_JWT = {
+    # Access token corto (se renueva solo vía refresh); refresh largo y
+    # rotativo => sesión "rolling": mientras uses la app al menos una vez
+    # cada 30 días, nunca vuelves a ver la pantalla de login.
     'ACCESS_TOKEN_LIFETIME': timedelta(days=1),
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=7),
-    'ROTATE_REFRESH_TOKENS': False,
-    'BLACKLIST_AFTER_ROTATION': True,
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),
+    'ROTATE_REFRESH_TOKENS': True,
+    # El blacklist app de simplejwt no está instalado; con rotación activa
+    # esto DEBE quedar en False para no intentar blacklistear (rompería el refresh).
+    'BLACKLIST_AFTER_ROTATION': False,
     'UPDATE_LAST_LOGIN': False,
 
     'ALGORITHM': 'HS256',
