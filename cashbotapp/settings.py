@@ -14,6 +14,7 @@ from datetime import timedelta
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 import dj_database_url
 import logging
 # Cargar variables de entorno desde .env
@@ -30,11 +31,33 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 WHATSAPP_BOT_NUMBER = os.getenv("WHATSAPP_BOT_NUMBER")
 TELEGRAM_BOT_USERNAME = os.getenv("TELEGRAM_BOT_USERNAME")
 
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-tu+u#i1h(6eq-m5l638yf-2as0w@wvu)4+m-ug364dno^s(bn3'
-
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = os.getenv("DEBUG")
+# Solo se activa con un valor explícitamente afirmativo. Antes esto era
+# os.getenv("DEBUG") a secas y la cadena "False" es truthy en Python: con
+# DEBUG=False en Railway, producción corría igualmente con DEBUG activo.
+DEBUG = os.getenv("DEBUG", "False").strip().lower() in ("true", "1", "yes", "on")
+
+# SECURITY WARNING: keep the secret key used in production secret!
+# La clave firma los JWT, las cookies de sesión y los state tokens de OAuth,
+# y se lee del entorno. Nunca la escribas en el repositorio: hasta el
+# 2026-08-24 estuvo aquí hardcodeada, en un repo público, y con ella cualquiera
+# podía firmar un token válido de cualquier usuario.
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY")
+
+if not SECRET_KEY:
+    if DEBUG:
+        # Desarrollo sin clave definida: una efímera, distinta en cada arranque.
+        # Define DJANGO_SECRET_KEY en tu .env para que las sesiones locales
+        # sobrevivan a un reinicio del runserver.
+        from django.core.management.utils import get_random_secret_key
+        SECRET_KEY = get_random_secret_key()
+    else:
+        raise ImproperlyConfigured(
+            "Falta DJANGO_SECRET_KEY: defínela en las variables de entorno del "
+            "servicio antes de desplegar. Genera una con "
+            "`python -c \"from django.core.management.utils import "
+            "get_random_secret_key; print(get_random_secret_key())\"`."
+        )
 
 ALLOWED_HOSTS = ["*"]
 
