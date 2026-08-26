@@ -709,6 +709,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     logger.info(f"Mensaje recibido de {chat_id}: {user_message_text[:50]}...")
 
+    # Corte anti-bucle por chat: una ráfaga o un eco se descarta antes de tocar
+    # la base de datos, y cubre también a quien aún no tiene cuenta (si no,
+    # recibiría el mensaje de registro una y otra vez). El filtro de TEMA vive
+    # en el agente (agents/relevance_guard).
+    from agents import relevance_guard
+
+    blocked = await relevance_guard.check_flood_async(
+        relevance_guard.scope_key("telegram", chat_id), user_message_text or ""
+    )
+    if blocked:
+        logger.info(
+            f"Mensaje descartado por el guardrail ({blocked.reason}) - chat {chat_id}"
+        )
+        return
+
     # Obtener o crear el chat
     chat, _ = await get_or_create_chat_async(chat_id)
 
