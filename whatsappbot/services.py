@@ -171,11 +171,15 @@ async def build_history(user_id: int) -> list:
     return messages
 
 
-async def process_message(user: User, raw_text: str, sender_phone: str | None = None) -> str:
+async def process_message(user: User, raw_text: str, sender_phone: str | None = None) -> str | None:
     """Public WhatsApp entry point — delegates to the unified agents supervisor.
 
     If the agent produced a pending Wallbit confirmation, send the interactive
     confirmation buttons before returning the textual recap.
+
+    Devuelve ``None`` cuando el guardrail de tema cortó el turno: el caller no
+    debe enviar ni registrar nada (así se corta un intercambio automático en
+    vez de alimentarlo).
     """
 
     history = await build_history(user.id)
@@ -185,6 +189,10 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
         channel="whatsapp",
         history=history,
     )
+
+    if response.silent:
+        logger.info(f"Mensaje silenciado por el guardrail de tema (usuario {user.id})")
+        return None
 
     pending = response.pending_confirmation
     if pending and sender_phone:
