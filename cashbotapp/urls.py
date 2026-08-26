@@ -16,7 +16,9 @@ Including another URLconf
 """
 from django.contrib import admin
 from django.urls import path, include
-from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
+from rest_framework_simplejwt.views import TokenObtainPairView
+
+from cashbotapp.token_views import UserTokenRefreshView
 
 from drf_spectacular.views import SpectacularAPIView, SpectacularRedocView, SpectacularSwaggerView
 
@@ -36,7 +38,9 @@ urlpatterns = [
     path('', include('composio_integration.urls'), name='composio-integration'),
     # JWT auth
     path('api/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
-    path('api/token/refresh/', TokenRefreshView.as_view(), name='token_refresh'),
+    # Refresh propio: el de simplejwt busca al usuario en auth_user y aquí
+    # los tokens pertenecen a users.User (ver cashbotapp/token_views.py).
+    path('api/token/refresh/', UserTokenRefreshView.as_view(), name='token_refresh'),
     # API Documentation
     path('schema/', SpectacularAPIView.as_view(), name='schema'),
     path('schema/swagger-ui/',
