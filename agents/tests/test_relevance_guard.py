@@ -137,6 +137,47 @@ async def _run_deterministic() -> None:
     _check("un fallo del clasificador deja pasar el mensaje", fallback["on_topic"] is True)
 
 
+async def _run_context() -> None:
+    """El contexto que se le pasa al clasificador."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from agents import relevance_guard as guard
+
+    print("\n[9] Contexto de la conversación")
+    history = [
+        HumanMessage(content="compré una moto usada el finde"),
+        AIMessage(content="Listo, la registré como transporte: 8.000.000 COP."),
+    ]
+    context = guard._recent_context(history)
+    _check("incluye lo que dijo el usuario", "Usuario: compré una moto usada el finde" in context)
+    _check("incluye lo que dijo Tresqu", "Tresqu: Listo, la registré" in context)
+    _check("historial vacío no revienta", guard._recent_context([]) == "")
+
+    _check(
+        "reconoce que el turno previo lo cerró Tresqu",
+        guard._last_turn_is_assistant(history) is True,
+    )
+    _check(
+        "y que un turno del usuario no es una pregunta pendiente",
+        guard._last_turn_is_assistant(history + [HumanMessage(content="ah bueno")]) is False,
+    )
+
+    # Una respuesta corta a una pregunta de Tresqu pasa sin gastar clasificador;
+    # la misma frase sin esa pregunta detrás, no.
+    async def _off(text, hist):
+        return {"on_topic": False, "automated": False}
+
+    guard._classify = _off  # type: ignore[assignment]
+    _check(
+        "'la primera' tras una pregunta de Tresqu pasa",
+        (await guard.check_relevance("test:ctx1", "la primera", history)).allow,
+    )
+    _check(
+        "'la primera' sin conversación detrás, no",
+        not (await guard.check_relevance("test:ctx2", "la primera", [])).allow,
+    )
+
+
 async def _run_integration() -> None:
     """El cableado real: ``process_message`` corta antes de construir el supervisor."""
     from types import SimpleNamespace
@@ -207,16 +248,54 @@ async def _run_live() -> None:
         ("¿me recomiendas una serie para ver hoy?", False),
         ("Estimado cliente, este es un mensaje automático. No responda a este número.", False),
     ]
-    print("\n[live] clasificador real")
+    print("\n[live] clasificador real, mensaje suelto")
     for text, expected in cases:
         result = await guard._classify(text, [])
         ok = result["on_topic"] == expected
         _check(f"{'on ' if expected else 'off'} | {text[:48]!r} -> {result}", ok)
 
+    # Lo que de verdad importa: mensajes que solos no dicen nada y en contexto sí.
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    moto = [
+        HumanMessage(content="compré una moto usada el fin de semana"),
+        AIMessage(content="Listo, la registré como transporte: 8.000.000 COP el 2026-08-24."),
+    ]
+    pregunta = [
+        HumanMessage(content="anota 60 mil de la salida de anoche"),
+        AIMessage(content="¿La registro en Restaurantes o en Entretenimiento?"),
+    ]
+    nvda = [
+        HumanMessage(content="cómo va NVDA?"),
+        AIMessage(content="NVDA cerró en 178,2 USD, un 3,1 % abajo en la semana."),
+    ]
+
+    contextual = [
+        ("era de segunda, por eso me salió tan barata", True, moto),
+        ("la segunda", True, pregunta),
+        ("y eso cómo me deja el mes?", True, moto),
+        ("y cuánto llevo perdido ahí?", True, nvda),
+        # Respuestas que solas no significan nada y que el hilo vuelve válidas.
+        ("no, el otro", True, pregunta),
+        ("fue el martes por la tarde", True, pregunta),
+        ("ninguna de las dos, mejor déjalo así", True, pregunta),
+        # Y el control opuesto: el contexto no debe volverse permisivo con un
+        # tema nuevo ajeno a las finanzas.
+        ("oye y de paso, ¿me pasas la receta del ajiaco?", False, moto),
+        ("mejor cuéntame un chiste", False, pregunta),
+        ("hazme un script de python para eso", False, pregunta),
+    ]
+    print("\n[live] clasificador real, con la conversación detrás")
+    for text, expected, hist in contextual:
+        result = await guard._classify(text, hist)
+        ok = result["on_topic"] == expected
+        _check(f"{'on ' if expected else 'off'} | {text[:44]!r} -> {result}", ok)
+
 
 def main() -> int:
     _setup()
     asyncio.run(_run_deterministic())
+    asyncio.run(_run_context())
     asyncio.run(_run_integration())
     if "--live" in sys.argv:
         asyncio.run(_run_live())
