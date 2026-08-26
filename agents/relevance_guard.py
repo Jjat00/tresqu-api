@@ -15,8 +15,10 @@ Capas, de la más barata a la más cara:
 2. Atajos locales (regex): comandos, montos y vocabulario financiero pasan
    directo; también las respuestas cortas que continúan un turno reciente de
    Tresqu ("sí", "el segundo", "1000").
-3. Clasificador ``gpt-4.1-nano``: on-topic / off-topic / automático. Cuesta una
-   fracción ínfima de un turno del supervisor.
+3. Clasificador ``gpt-4.1-nano``: on-topic / off-topic / automático. Juzga el
+   mensaje dentro de los últimos turnos del hilo (de ambos lados), porque uno
+   suelto puede no tener sentido y encajar perfectamente en la conversación.
+   Cuesta una fracción ínfima de un turno del supervisor.
 
 El silencio NO es ceguera: tras un mensaje fuera de tema los siguientes se
 siguen evaluando con las capas 1-3, así que si el remitente pasa a hablar de
@@ -251,14 +253,43 @@ _COURTESY = re.compile(
 _MAX_CONTINUATION_WORDS = 6
 
 
-def _last_assistant_text(history: list) -> str:
-    """Último texto que dijo Tresqu en el historial (para dar contexto)."""
+# Cuántos turnos del hilo ve el clasificador. Un mensaje suelto puede no tener
+# sentido y encajar perfectamente en la conversación ("el segundo", "de la moto
+# que te dije"), así que se le da el hilo, no solo la última frase de Tresqu:
+# durante un silencio Tresqu no contesta, y mirar solo su último mensaje deja
+# el contexto congelado mientras el usuario sigue hablando.
+_CONTEXT_TURNS = 6
+_CONTEXT_SNIPPET = 200
+
+_ROLE_LABELS = {"AIMessage": "Tresqu", "HumanMessage": "Usuario"}
+
+
+def _recent_context(history: list) -> str:
+    """Los últimos turnos del hilo, etiquetados por quién habló."""
+    lines = []
+    for message in (history or [])[-_CONTEXT_TURNS:]:
+        role = _ROLE_LABELS.get(message.__class__.__name__)
+        if not role:
+            continue
+        content = getattr(message, "content", "")
+        if not isinstance(content, str) or not content.strip():
+            continue
+        lines.append(f"{role}: {' '.join(content.split())[:_CONTEXT_SNIPPET]}")
+    return "\n".join(lines)
+
+
+def _last_turn_is_assistant(history: list) -> bool:
+    """``True`` si el turno anterior lo cerró Tresqu (o sea, hizo una pregunta).
+
+    Se mira el ÚLTIMO turno, no "hay algún mensaje de Tresqu en el historial":
+    una respuesta suya de hace tres días no convierte un monosílabo de hoy en
+    una continuación.
+    """
     for message in reversed(history or []):
-        if message.__class__.__name__ == "AIMessage":
-            content = getattr(message, "content", "")
-            if isinstance(content, str) and content.strip():
-                return " ".join(content.split())[:300]
-    return ""
+        role = _ROLE_LABELS.get(message.__class__.__name__)
+        if role:
+            return role == "Tresqu"
+    return False
 
 
 def _local_allow(text: str, history: list, strike: int) -> bool:
@@ -279,7 +310,7 @@ def _local_allow(text: str, history: list, strike: int) -> bool:
         return False
     if _COURTESY.match(stripped):
         return True
-    if len(stripped.split()) <= _MAX_CONTINUATION_WORDS and _last_assistant_text(history):
+    if len(stripped.split()) <= _MAX_CONTINUATION_WORDS and _last_turn_is_assistant(history):
         return True
     return False
 
@@ -296,7 +327,9 @@ on_topic = true cuando el mensaje:
 - habla de dinero, gastos, compras, ingresos, deudas, ahorro, presupuesto, inversiones, acciones, ETFs, saldos, mercado o precios;
 - pide registros, reportes, resúmenes, correcciones o cambios sobre eso;
 - pregunta por Tresqu, sus funciones, su cuenta, sus planes o cómo usarlo;
-- responde o continúa el último mensaje de Tresqu (confirmaciones, "sí", "el segundo", un número suelto, una fecha, una categoría).
+- responde o continúa la conversación reciente: confirmaciones, "sí", "el segundo", un número suelto, una fecha, una categoría, o un detalle de algo que ya se estaba hablando.
+
+REGLA DE CONTEXTO (importante): juzga el mensaje DENTRO de la conversación, no aislado. Si el último turno de la conversación es una pregunta de Tresqu y el mensaje puede leerse como su respuesta (una opción, un nombre, una fecha, una cantidad, una negación o una corrección), on_topic = true, aunque suelto no signifique nada: "no, el otro", "la roja", "fue el martes por la tarde". Eso incluye rechazar, cancelar o posponer lo que Tresqu propuso: "ninguna de las dos", "mejor déjalo así", "olvídalo", "después lo hago". Si por sí solo parece no venir a cuento pero encaja como continuación de lo que se venía hablando, on_topic = true. Ejemplo: si antes se hablaba de una moto que el usuario compró, "era de segunda, me salió en 8 millones" es on_topic. Solo es off_topic si abre un tema nuevo ajeno a las finanzas.
 
 on_topic = false para cualquier otro tema: programación, tecnología, política, salud, deportes, entretenimiento, tareas escolares, religión, cadenas reenviadas o publicidad ajena.
 
@@ -304,7 +337,8 @@ automated = true SOLO si el mensaje parece emitido por un sistema y no escrito p
 
 Ante la duda, on_topic = true.
 
-Último mensaje de Tresqu (contexto, puede estar vacío): {last_assistant}"""
+CONVERSACIÓN RECIENTE (puede estar vacía; el mensaje a clasificar es el que viene aparte, no el último de aquí):
+{context}"""
 
 
 def _classifier() -> ChatOpenAI:
@@ -326,7 +360,7 @@ async def _classify(text: str, history: list) -> dict:
             [
                 SystemMessage(
                     content=_CLASSIFIER_SYSTEM.format(
-                        last_assistant=_last_assistant_text(history) or "(sin contexto)"
+                        context=_recent_context(history) or "(sin contexto)"
                     )
                 ),
                 HumanMessage(content=(text or "")[:MAX_CLASSIFY_CHARS]),
