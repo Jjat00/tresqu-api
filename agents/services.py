@@ -27,7 +27,7 @@ from telegrambot.config import AGENT_MAX_ITERATIONS, AGENT_EXECUTION_TIMEOUT, ER
 from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
-from . import risk_profiler_service
+from . import relevance_guard, risk_profiler_service
 from .conversation_memory import get_semantic_context
 from .retry import retry_with_backoff
 from .supervisor import build_supervisor
@@ -43,10 +43,15 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class AgentResponse:
-    """Result of running the supervisor on a user message."""
+    """Result of running the supervisor on a user message.
+
+    ``silent`` marca los turnos que el guardrail de tema cortó sin nada que
+    decir: el canal NO debe enviar ni registrar mensaje saliente.
+    """
 
     text: str
     pending_confirmation: dict[str, Any] | None = None
+    silent: bool = False
 
 
 @sync_to_async
@@ -83,6 +88,9 @@ async def process_message(
     """Run the Tresqu agent stack on the given message.
 
     Routing order:
+    0. Guardrail anti-bucle: una ráfaga o un eco corta el turno en seco, sin
+       tocar el modelo (ver ``relevance_guard``). El filtro de TEMA vive más
+       abajo, en ``_run_supervisor``, para no interferir con el Q&A del perfil.
     1. ``/perfil`` always starts a fresh risk-profiler session (overwrites any prior).
     2. If a risk-profiler session is paused, classify the message: it can be
        an answer to the pending question, an unrelated intent (handled by the
@@ -91,6 +99,11 @@ async def process_message(
     """
 
     try:
+        if await relevance_guard.check_flood_async(
+            relevance_guard.scope_key(channel, user.id), raw_text
+        ):
+            return AgentResponse(text="", silent=True)
+
         normalized = raw_text.strip().lower()
         if normalized == RISK_PROFILE_COMMAND:
             return await _resume_or_start_profiler(
@@ -141,6 +154,9 @@ async def _route_with_active_session(
         # Process via supervisor without advancing the Q&A. Append a hint so
         # the user knows the profiler is still pending.
         supervisor_response = await _run_supervisor(user, channel, raw_text, history)
+        if supervisor_response.silent:
+            # El guardrail cortó el mensaje: nada que decir, ni siquiera el hint.
+            return supervisor_response
         return AgentResponse(
             text=(supervisor_response.text or "") + RESUME_PROFILE_HINT,
             pending_confirmation=supervisor_response.pending_confirmation,
@@ -189,7 +205,17 @@ async def _run_supervisor(
     raw_text: str,
     history: list,
 ) -> AgentResponse:
-    """Invoke the multi-agent supervisor (no risk-profiler interception)."""
+    """Invoke the multi-agent supervisor (no risk-profiler interception).
+
+    Aquí es donde empieza el gasto real (embeddings + prompt del supervisor +
+    subagentes), así que el filtro de tema se aplica justo antes.
+    """
+
+    verdict = await relevance_guard.check_relevance(
+        relevance_guard.scope_key(channel, user.id), raw_text, history
+    )
+    if not verdict.allow:
+        return AgentResponse(text=verdict.reply or "", silent=verdict.silent)
 
     expense_categories_str, income_categories_str = await _load_categories(user)
     current_date = _user_today(user)

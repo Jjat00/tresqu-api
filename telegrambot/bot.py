@@ -803,6 +803,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Procesar mensaje
         response = await process_message(chat_user, user_message_text)
 
+        # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
+        # bucle automático): no se responde ni se registra nada.
+        if response.silent:
+            logger.info(
+                f"Mensaje silenciado por el guardrail de tema (usuario {chat_user.id})"
+            )
+            return
+
         await update.message.reply_text(response.text, parse_mode="Markdown")
 
         # Si la herramienta devolvió un preview pendiente de confirmación
@@ -1240,6 +1248,19 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
                     # Procesar el mensaje con la transcripción
                     agent_response = await process_message(chat_user, transcription)
+                    if agent_response.silent:
+                        logger.info(
+                            f"Nota de voz silenciada por el guardrail de tema "
+                            f"(usuario {chat_user.id})"
+                        )
+                        await context.bot.delete_message(
+                            chat_id=chat_id, message_id=wait_message.message_id
+                        )
+                        try:
+                            os.unlink(temp_path)
+                        except Exception:
+                            pass
+                        return
                     response_text = agent_response.text
                     pending = agent_response.pending_confirmation
                 else:

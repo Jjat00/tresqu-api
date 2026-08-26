@@ -562,6 +562,21 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
             (cuando usa la función "swipe to reply" de WhatsApp). None si no aplica.
     """
     try:
+        # 0. Corte anti-bucle por número: una ráfaga o un eco se descarta aquí,
+        # antes de descargar media, transcribir o guardar nada. Cubre también a
+        # los números sin cuenta, que si no reciben el mensaje de registro una y
+        # otra vez. El filtro de TEMA vive en el agente (agents/relevance_guard).
+        from agents import relevance_guard
+
+        blocked = await relevance_guard.check_flood_async(
+            relevance_guard.scope_key("whatsapp", sender_number), message_text or ""
+        )
+        if blocked:
+            logger.info(
+                f"🔇 Mensaje descartado por el guardrail ({blocked.reason}) - De: {sender_number}"
+            )
+            return True, ""
+
         # Variable para controlar si saltamos la verificación de mensajes duplicados
         skip_duplicate_check = False
 
@@ -1110,6 +1125,10 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         tracked_transactions = start_transaction_tracking()
 
         response_text = await process_message(user, effective_message_text, sender_phone=sender_number)
+
+        # 8b. Silencio del guardrail de tema: ni respuesta ni registro saliente.
+        if response_text is None:
+            return True, ""
 
         # 9. Guardar la respuesta en la base de datos
         outgoing_msg = await sync_to_async(create_message)(

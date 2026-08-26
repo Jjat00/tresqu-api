@@ -34,7 +34,7 @@ from telegrambot.config import (
 from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmation
 
-from . import risk_profiler_service
+from . import relevance_guard, risk_profiler_service
 from .agent_directory import SPECIALIST_IDS, SUPERVISOR_ID, agent_meta_by_tool
 from .conversation_memory import get_semantic_context
 from .services import (
@@ -74,6 +74,19 @@ _TOOL_LABELS: dict[str, str] = {
     "get_risk_profile_status": "Leer tu perfil",
     "recompute_inference": "Recalcular inferencia",
 }
+
+
+def _guard_final(verdict: "relevance_guard.GuardVerdict") -> dict[str, Any]:
+    """Evento ``final`` que cierra un turno cortado por el guardrail.
+
+    ``silent`` le dice al frontend que no pinte burbuja: el turno no existe.
+    """
+    return {
+        "type": "final",
+        "text": verdict.reply or "",
+        "pending_confirmation": None,
+        "silent": verdict.silent,
+    }
 
 
 def _humanize_tool(name: str) -> str:
@@ -146,6 +159,13 @@ async def stream_agent_events(
     """Yield the agent-interaction events for a single web-chat turn."""
 
     try:
+        blocked = await relevance_guard.check_flood_async(
+            relevance_guard.scope_key(channel, user.id), raw_text
+        )
+        if blocked:
+            yield _guard_final(blocked)
+            return
+
         normalized = raw_text.strip().lower()
 
         if normalized == RISK_PROFILE_COMMAND:
@@ -175,6 +195,13 @@ async def _stream_supervisor(
     history: list,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run the supervisor with ``astream`` and emit step + final events."""
+
+    verdict = await relevance_guard.check_relevance(
+        relevance_guard.scope_key(channel, user.id), raw_text, history
+    )
+    if not verdict.allow:
+        yield _guard_final(verdict)
+        return
 
     expense_categories_str, income_categories_str = await _load_categories(user)
     current_date = _user_today(user)
@@ -286,8 +313,16 @@ async def stream_single_agent(
 
     try:
         if agent_id == SUPERVISOR_ID:
+            # stream_agent_events ya aplica el guardrail completo.
             async for event in stream_agent_events(user, raw_text, channel, history):
                 yield event
+            return
+
+        blocked = await relevance_guard.check_flood_async(
+            relevance_guard.scope_key(channel, user.id), raw_text
+        )
+        if blocked:
+            yield _guard_final(blocked)
             return
 
         if agent_id == "risk":
@@ -341,6 +376,13 @@ async def _stream_risk(
         }
         return
 
+    verdict = await relevance_guard.check_relevance(
+        relevance_guard.scope_key(channel, user.id), raw_text, history
+    )
+    if not verdict.allow:
+        yield _guard_final(verdict)
+        return
+
     agent = build_risk_subagent(user)
     async for event in _stream_agent_run(agent, "risk", raw_text, history):
         yield event
@@ -354,6 +396,13 @@ async def _stream_specialist(
     history: list,
 ) -> AsyncIterator[dict[str, Any]]:
     """Run a single specialist subagent directly and stream its tool calls."""
+
+    verdict = await relevance_guard.check_relevance(
+        relevance_guard.scope_key(channel, user.id), raw_text, history
+    )
+    if not verdict.allow:
+        yield _guard_final(verdict)
+        return
 
     if agent_id == "expenses":
         expense_categories_str, income_categories_str = await _load_categories(user)
