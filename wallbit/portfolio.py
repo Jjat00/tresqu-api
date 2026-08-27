@@ -4,9 +4,17 @@ Combines Investment rows stored in our DB with live calls to Wallbit
 (``/balance/checking``, ``/balance/stocks``, ``/assets/{symbol}``) to
 produce the summary, holdings and timeline used by the dashboard.
 
-Live Wallbit responses are cached in-process for 60 seconds so that
-multiple endpoints called within the same dashboard load (summary +
-holdings) only hit Wallbit once per symbol.
+Live Wallbit reads go through ONE per-account ``LiveSnapshot`` (see
+``get_live_snapshot``) cached in the shared Redis cache, so summary, holdings,
+the P&L anchor and the agent tools all share a single upstream fetch per
+minute — across gunicorn workers — instead of each hitting Wallbit on its own.
+Wallbit sits behind Cloudflare rate limiting: a dashboard load that fired
+~12 requests in a burst (3 endpoints × checking/stocks/assets) tripped it
+("You are being rate-limited by the website owner's configuration"), and the
+client's Retry-After sleeps then kept the block alive for minutes. The snapshot
+is single-flight (concurrent callers wait for the in-flight fetch), falls back
+to the last-good copy marked ``stale`` when Wallbit fails, and after a 429
+stays away from Wallbit for a cooldown so the window can actually clear.
 """
 from __future__ import annotations
 
@@ -19,6 +27,8 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from django.core.cache import caches
+from django.core.cache.backends.base import InvalidCacheBackendError
 from django.db.models import Q, Sum
 from django.db.models.functions import Coalesce
 from django.utils import timezone
@@ -26,14 +36,27 @@ from django.utils import timezone
 from users.models import User
 
 from .agent_safety import AccountNotConnected, get_account_or_raise
-from .client import WallbitClient, WallbitError
+from .client import WallbitClient, WallbitError, WallbitRateLimitError
 from .crypto import decrypt_api_key
 from .models import PENDING_TX_STATUSES, Investment, WallbitAccount
 
 logger = logging.getLogger(__name__)
 
-_CACHE_TTL_SECONDS = 60
-_asset_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+# Live snapshot caching. The live TTL matches the dashboard's refetch interval
+# (60 s) so the UI sees fresh numbers once a minute at most. Last-good is kept
+# long enough to ride out an upstream outage / rate-limit block.
+_SNAPSHOT_TTL = 60
+_SNAPSHOT_LASTGOOD_TTL = 24 * 3600
+# Single-flight: the first caller takes the lock and fetches; concurrent callers
+# poll the cache for the result instead of racing Wallbit. The lock TTL bounds a
+# crashed holder; the wait bounds how long a request blocks on a slow upstream.
+_SNAPSHOT_LOCK_TTL = 30
+_SNAPSHOT_WAIT_SECONDS = 20.0
+_SNAPSHOT_POLL_SECONDS = 0.25
+# After a 429 we stop calling Wallbit for this long (or Retry-After, capped).
+# Every request inside the blocked window would otherwise extend it.
+_RATE_LIMIT_COOLDOWN_DEFAULT = 90
+_RATE_LIMIT_COOLDOWN_MAX = 600
 
 # Wallbit's /balance/stocks returns cash balances as pseudo-positions whose
 # "symbol" is the currency code (e.g. USD). Those are NOT holdings — they are
@@ -58,22 +81,246 @@ def _settled_q() -> Q:
     return Q(wallbit_tx__isnull=True) | ~Q(wallbit_tx__status__in=PENDING_TX_STATUSES)
 
 
-def _cached_asset(client: WallbitClient, symbol: str) -> dict[str, Any] | None:
-    now = time.time()
-    cached = _asset_cache.get(symbol)
-    if cached and (now - cached[0]) < _CACHE_TTL_SECONDS:
-        return cached[1]
+class WallbitUnavailableError(WallbitError):
+    """Wallbit could not be reached AND there is no last-good snapshot to serve.
+
+    Raised instead of returning zeros so callers (views, P&L anchor, agent
+    tools) can say "no disponible" rather than report an empty portfolio.
+    """
+
+
+@dataclass
+class LiveSnapshot:
+    """One account's live Wallbit state: cash rows, positions and asset details.
+
+    ``stale`` is True when this is a last-good copy served because the fresh
+    fetch failed; ``reason`` says why (``rate_limited``, ``upstream_error``,
+    ``in_flight_timeout``). ``fetched_at`` is when the data was actually read
+    from Wallbit (None only for the empty, nothing-to-serve snapshot).
+    """
+
+    checking: list[dict[str, Any]] = field(default_factory=list)
+    positions: list[dict[str, Any]] = field(default_factory=list)
+    assets: dict[str, dict[str, Any]] = field(default_factory=dict)
+    fetched_at: datetime | None = None
+    stale: bool = False
+    reason: str = ""
+
+    @property
+    def has_data(self) -> bool:
+        return self.fetched_at is not None
+
+    def to_cache(self) -> dict[str, Any]:
+        # Plain dict (not the dataclass) so a code change never breaks unpickling
+        # of an entry written by the previous deploy.
+        return {
+            "checking": self.checking,
+            "positions": self.positions,
+            "assets": self.assets,
+            "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
+        }
+
+    @classmethod
+    def from_cache(cls, raw: Any, *, stale: bool = False, reason: str = "") -> "LiveSnapshot | None":
+        if not isinstance(raw, dict):
+            return None
+        fetched_at = None
+        if raw.get("fetched_at"):
+            try:
+                fetched_at = datetime.fromisoformat(raw["fetched_at"])
+            except (TypeError, ValueError):
+                fetched_at = None
+        return cls(
+            checking=list(raw.get("checking") or []),
+            positions=list(raw.get("positions") or []),
+            assets=dict(raw.get("assets") or {}),
+            fetched_at=fetched_at,
+            stale=stale,
+            reason=reason,
+        )
+
+
+def _cache():
+    """Shared (cross-worker) cache: the Redis one used by marketdata, else default."""
     try:
-        response = client.get(f"/assets/{symbol}")
-    except WallbitError as exc:
-        logger.warning("portfolio: failed to fetch asset %s: %s", symbol, exc)
+        return caches["marketdata"]
+    except InvalidCacheBackendError:
+        return caches["default"]
+
+
+def _cache_get(key: str) -> Any:
+    try:
+        return _cache().get(key)
+    except Exception as exc:  # noqa: BLE001 — cache must never break the request
+        logger.warning("wallbit snapshot cache get failed (%s); treating as miss", exc)
         return None
-    payload = response.data or {}
+
+
+def _cache_set(key: str, value: Any, ttl: int) -> None:
+    try:
+        _cache().set(key, value, ttl)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wallbit snapshot cache set failed (%s); skipping", exc)
+
+
+def _cache_add(key: str, value: Any, ttl: int) -> bool:
+    """Atomic set-if-absent. On a broken cache backend we *pretend* we got the
+    lock so the request still fetches (uncoordinated beats blocked)."""
+    try:
+        return bool(_cache().add(key, value, ttl))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wallbit snapshot cache add failed (%s); fetching uncoordinated", exc)
+        return True
+
+
+def _cache_delete(key: str) -> None:
+    try:
+        _cache().delete(key)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("wallbit snapshot cache delete failed (%s)", exc)
+
+
+def _snap_key(account_id: int) -> str:
+    return f"wb:snap:{account_id}"
+
+
+def _snap_lastgood_key(account_id: int) -> str:
+    return f"wb:snap:lastgood:{account_id}"
+
+
+def _snap_lock_key(account_id: int) -> str:
+    return f"wb:snap:lock:{account_id}"
+
+
+def _snap_cooldown_key(account_id: int) -> str:
+    return f"wb:snap:cooldown:{account_id}"
+
+
+def invalidate_snapshot(account_id: int) -> None:
+    """Drop the live copy (keeps last-good). Call after (re)connecting a key."""
+    _cache_delete(_snap_key(account_id))
+
+
+def _normalize_asset(payload: Any) -> dict[str, Any]:
     asset = payload.get("data", payload) if isinstance(payload, dict) else payload
-    if not isinstance(asset, dict):
-        return None
-    _asset_cache[symbol] = (now, asset)
-    return asset
+    return asset if isinstance(asset, dict) else {}
+
+
+def _fetch_snapshot(api_key: str) -> LiveSnapshot:
+    """Read checking + stocks + one /assets call per held symbol from Wallbit.
+
+    Fails fast on the first 429 (no Retry-After sleeps on the request path —
+    see ``WallbitClient(retry_rate_limited=False)``) so the caller can fall
+    back to last-good and start a cooldown. ``/balance/stocks`` failing sinks
+    the fetch (positions are the point); a failing ``/balance/checking`` or
+    ``/assets/{symbol}`` degrades that piece only, as before.
+    """
+    with WallbitClient(api_key, retry_rate_limited=False) as client:
+        positions = _unwrap_list(client.get("/balance/stocks").data)
+
+        try:
+            checking = _unwrap_list(client.get("/balance/checking").data)
+        except WallbitRateLimitError:
+            raise
+        except WallbitError as exc:
+            logger.warning("portfolio: /balance/checking failed: %s", exc)
+            checking = []
+
+        assets: dict[str, dict[str, Any]] = {}
+        for pos in positions:
+            symbol = (pos.get("symbol") or "").upper()
+            shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
+            if not symbol or symbol in _CASH_SYMBOLS or shares <= 0 or symbol in assets:
+                continue
+            try:
+                assets[symbol] = _normalize_asset(client.get(f"/assets/{symbol}").data)
+            except WallbitRateLimitError:
+                raise
+            except WallbitError as exc:
+                logger.warning("portfolio: failed to fetch asset %s: %s", symbol, exc)
+                assets[symbol] = {}
+
+    return LiveSnapshot(
+        checking=checking,
+        positions=positions,
+        assets=assets,
+        fetched_at=timezone.now(),
+    )
+
+
+def _fallback_snapshot(account_id: int, reason: str) -> LiveSnapshot:
+    last_good = LiveSnapshot.from_cache(
+        _cache_get(_snap_lastgood_key(account_id)), stale=True, reason=reason
+    )
+    if last_good is not None and last_good.has_data:
+        return last_good
+    return LiveSnapshot(stale=True, reason=reason)
+
+
+def get_live_snapshot(account: WallbitAccount, *, require_data: bool = True) -> LiveSnapshot:
+    """Return the account's live snapshot: cached, freshly fetched, or last-good.
+
+    Order: live cache hit → (cooldown active → last-good) → take the
+    single-flight lock and fetch → otherwise wait for the in-flight fetch.
+    With ``require_data`` (default) an empty fallback raises
+    ``WallbitUnavailableError`` instead of returning zeros.
+    """
+    account_id = account.id
+    live_key = _snap_key(account_id)
+
+    snap = LiveSnapshot.from_cache(_cache_get(live_key))
+    if snap is not None and snap.has_data:
+        return snap
+
+    def _finish(result: LiveSnapshot) -> LiveSnapshot:
+        if require_data and not result.has_data:
+            raise WallbitUnavailableError(
+                f"Wallbit no disponible ({result.reason or 'sin datos'})",
+                status=503,
+            )
+        return result
+
+    cooldown_key = _snap_cooldown_key(account_id)
+    if _cache_get(cooldown_key):
+        return _finish(_fallback_snapshot(account_id, "rate_limited"))
+
+    lock_key = _snap_lock_key(account_id)
+    if _cache_add(lock_key, "1", _SNAPSHOT_LOCK_TTL):
+        try:
+            fresh = _fetch_snapshot(decrypt_api_key(account.encrypted_api_key))
+            raw = fresh.to_cache()
+            _cache_set(live_key, raw, _SNAPSHOT_TTL)
+            _cache_set(_snap_lastgood_key(account_id), raw, _SNAPSHOT_LASTGOOD_TTL)
+            return fresh
+        except WallbitRateLimitError as exc:
+            cooldown = int(min(exc.retry_after or _RATE_LIMIT_COOLDOWN_DEFAULT, _RATE_LIMIT_COOLDOWN_MAX))
+            cooldown = max(cooldown, 1)
+            _cache_set(cooldown_key, "1", cooldown)
+            logger.warning(
+                "portfolio: Wallbit rate-limited account %s; cooling down %ss and serving last-good",
+                account_id,
+                cooldown,
+            )
+            return _finish(_fallback_snapshot(account_id, "rate_limited"))
+        except WallbitError as exc:
+            logger.warning("portfolio: live snapshot fetch failed for account %s: %s", account_id, exc)
+            return _finish(_fallback_snapshot(account_id, "upstream_error"))
+        finally:
+            _cache_delete(lock_key)
+
+    # Another request is fetching right now — wait for its result.
+    deadline = time.monotonic() + _SNAPSHOT_WAIT_SECONDS
+    while time.monotonic() < deadline:
+        time.sleep(_SNAPSHOT_POLL_SECONDS)
+        snap = LiveSnapshot.from_cache(_cache_get(live_key))
+        if snap is not None and snap.has_data:
+            return snap
+        if _cache_get(cooldown_key):
+            return _finish(_fallback_snapshot(account_id, "rate_limited"))
+        if not _cache_get(lock_key):
+            # Holder finished without a live entry → it failed; use last-good.
+            return _finish(_fallback_snapshot(account_id, "upstream_error"))
+    return _finish(_fallback_snapshot(account_id, "in_flight_timeout"))
 
 
 def _to_decimal(value: Any) -> Decimal:
@@ -140,6 +387,10 @@ class PortfolioSummary:
     # invested capital or P&L. Each item: symbol, action, amount_usd, shares,
     # executed_at, status.
     pending_trades: list[dict[str, Any]] = field(default_factory=list)
+    # True when the live numbers come from the last-good snapshot because
+    # Wallbit failed / rate-limited us; ``as_of`` is when they were read.
+    stale: bool = False
+    as_of: datetime | None = None
 
 
 @dataclass
@@ -188,82 +439,68 @@ def _cost_basis_for_symbol(user: User, symbol: str) -> tuple[Decimal, Decimal]:
 def get_holdings(user: User) -> list[Holding]:
     """Live snapshot of the user's positions with cost basis + P&L."""
     account = get_account_or_raise(user)
-    api_key = decrypt_api_key(account.encrypted_api_key)
+    snap = get_live_snapshot(account)
 
     holdings: list[Holding] = []
-    with WallbitClient(api_key) as client:
-        try:
-            stocks_response = client.get("/balance/stocks")
-        except WallbitError as exc:
-            logger.warning("portfolio: /balance/stocks failed for user %s: %s", user.id, exc)
-            return []
+    for pos in snap.positions:
+        symbol = (pos.get("symbol") or "").upper()
+        shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
+        if not symbol or symbol in _CASH_SYMBOLS or shares <= 0:
+            continue
 
-        positions = _unwrap_list(stocks_response.data)
-        for pos in positions:
-            symbol = (pos.get("symbol") or "").upper()
-            shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
-            if not symbol or symbol in _CASH_SYMBOLS or shares <= 0:
-                continue
+        asset = snap.assets.get(symbol) or {}
+        current_price = _to_decimal(asset.get("price") or asset.get("current_price"))
+        kind = (asset.get("type") or asset.get("kind") or "").upper()
+        name = asset.get("name") or asset.get("description") or ""
 
-            asset = _cached_asset(client, symbol) or {}
-            current_price = _to_decimal(asset.get("price") or asset.get("current_price"))
-            kind = (asset.get("type") or asset.get("kind") or "").upper()
-            name = asset.get("name") or asset.get("description") or ""
+        net_shares, net_cost = _cost_basis_for_symbol(user, symbol)
+        # Prefer Wallbit's reported shares; fall back to what we computed
+        effective_shares = shares if shares > 0 else max(net_shares, Decimal(0))
+        market_value = current_price * effective_shares
+        if net_cost > 0:
+            # Cost basis = the real USD put into the position (net_cost). We
+            # use it directly instead of avg_cost * shares: amount_usd is
+            # recorded exactly, while the stored share counts may have been
+            # rounded, and multiplying an inflated avg_cost by the precise
+            # Wallbit share count would amplify that into a wrong P&L.
+            cost_basis = net_cost
+            avg_cost = cost_basis / effective_shares if effective_shares > 0 else Decimal(0)
+            pnl_usd = market_value - cost_basis
+            pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+            cost_pending = False
+        else:
+            # We hold shares (live balance) but have NO settled cost for them
+            # yet — typically a buy made in the Wallbit app that hasn't synced
+            # or settled. Reporting cost 0 would invent a gain equal to the
+            # whole position, so treat it as break-even and flag it so the UI
+            # shows "sincronizando / —" until the real cost lands.
+            cost_basis = market_value
+            avg_cost = Decimal(0)
+            pnl_usd = Decimal(0)
+            pnl_pct = 0.0
+            cost_pending = True
 
-            net_shares, net_cost = _cost_basis_for_symbol(user, symbol)
-            # Prefer Wallbit's reported shares; fall back to what we computed
-            effective_shares = shares if shares > 0 else max(net_shares, Decimal(0))
-            market_value = current_price * effective_shares
-            if net_cost > 0:
-                # Cost basis = the real USD put into the position (net_cost). We
-                # use it directly instead of avg_cost * shares: amount_usd is
-                # recorded exactly, while the stored share counts may have been
-                # rounded, and multiplying an inflated avg_cost by the precise
-                # Wallbit share count would amplify that into a wrong P&L.
-                cost_basis = net_cost
-                avg_cost = cost_basis / effective_shares if effective_shares > 0 else Decimal(0)
-                pnl_usd = market_value - cost_basis
-                pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
-                cost_pending = False
-            else:
-                # We hold shares (live balance) but have NO settled cost for them
-                # yet — typically a buy made in the Wallbit app that hasn't synced
-                # or settled. Reporting cost 0 would invent a gain equal to the
-                # whole position, so treat it as break-even and flag it so the UI
-                # shows "sincronizando / —" until the real cost lands.
-                cost_basis = market_value
-                avg_cost = Decimal(0)
-                pnl_usd = Decimal(0)
-                pnl_pct = 0.0
-                cost_pending = True
-
-            holdings.append(
-                Holding(
-                    symbol=symbol,
-                    shares=effective_shares,
-                    avg_cost=avg_cost,
-                    current_price=current_price,
-                    market_value=market_value,
-                    cost_basis=cost_basis,
-                    pnl_usd=pnl_usd,
-                    pnl_pct=pnl_pct,
-                    kind=kind,
-                    name=name,
-                    cost_pending=cost_pending,
-                )
+        holdings.append(
+            Holding(
+                symbol=symbol,
+                shares=effective_shares,
+                avg_cost=avg_cost,
+                current_price=current_price,
+                market_value=market_value,
+                cost_basis=cost_basis,
+                pnl_usd=pnl_usd,
+                pnl_pct=pnl_pct,
+                kind=kind,
+                name=name,
+                cost_pending=cost_pending,
             )
+        )
 
     holdings.sort(key=lambda h: h.market_value, reverse=True)
     return holdings
 
 
-def _cash_balances(client: WallbitClient) -> list[CashBalance]:
-    try:
-        response = client.get("/balance/checking")
-    except WallbitError as exc:
-        logger.warning("portfolio: /balance/checking failed: %s", exc)
-        return []
-    rows = _unwrap_list(response.data)
+def _cash_balances(rows: list[dict[str, Any]]) -> list[CashBalance]:
     out: list[CashBalance] = []
     for row in rows:
         currency = (row.get("currency") or row.get("code") or "").upper()
@@ -276,7 +513,7 @@ def _cash_balances(client: WallbitClient) -> list[CashBalance]:
 def get_summary(user: User) -> PortfolioSummary:
     """Top-level portfolio numbers for the hero cards."""
     account = get_account_or_raise(user)
-    api_key = decrypt_api_key(account.encrypted_api_key)
+    snap = get_live_snapshot(account)
 
     # Capital invertido en ACCIONES/ETFs únicamente (BUY/SELL). Los depósitos
     # al Robo Advisor (DEPOSIT/WITHDRAW) NO se suman aquí: su valor actual no
@@ -309,37 +546,27 @@ def get_summary(user: User) -> PortfolioSummary:
     holdings_count = 0
     investment_cash = Decimal(0)
 
-    with WallbitClient(api_key) as client:
-        cash = _cash_balances(client)
+    cash = _cash_balances(snap.checking)
 
-        # Reuse the holdings function indirectly to keep symbol caching warm
-        stocks_response = None
-        try:
-            stocks_response = client.get("/balance/stocks")
-        except WallbitError as exc:
-            logger.warning("portfolio summary: /balance/stocks failed: %s", exc)
-
-        if stocks_response is not None:
-            positions = _unwrap_list(stocks_response.data)
-            for pos in positions:
-                symbol = (pos.get("symbol") or "").upper()
-                shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
-                if not symbol or shares <= 0:
-                    continue
-                if symbol in _CASH_SYMBOLS:
-                    # Uninvested cash inside the investment account: for USD the
-                    # "shares" value IS the dollar amount free to invest.
-                    if symbol == "USD":
-                        investment_cash += shares
-                    continue
-                asset = _cached_asset(client, symbol) or {}
-                price = _to_decimal(asset.get("price") or asset.get("current_price"))
-                market_value = price * shares
-                current_value += market_value
-                holdings_count += 1
-                _, net_cost = _cost_basis_for_symbol(user, symbol)
-                if net_cost <= 0:
-                    untracked_cost += market_value
+    for pos in snap.positions:
+        symbol = (pos.get("symbol") or "").upper()
+        shares = _to_decimal(pos.get("shares") or pos.get("quantity"))
+        if not symbol or shares <= 0:
+            continue
+        if symbol in _CASH_SYMBOLS:
+            # Uninvested cash inside the investment account: for USD the
+            # "shares" value IS the dollar amount free to invest.
+            if symbol == "USD":
+                investment_cash += shares
+            continue
+        asset = snap.assets.get(symbol) or {}
+        price = _to_decimal(asset.get("price") or asset.get("current_price"))
+        market_value = price * shares
+        current_value += market_value
+        holdings_count += 1
+        _, net_cost = _cost_basis_for_symbol(user, symbol)
+        if net_cost <= 0:
+            untracked_cost += market_value
 
     # Fold the break-even placeholder for untracked holdings into invested so the
     # three hero cards stay coherent (net = bruto − retirado, pnl = value − net)
@@ -367,6 +594,8 @@ def get_summary(user: User) -> PortfolioSummary:
         investment_cash_usd=investment_cash,
         last_sync_at=account.last_sync_at,
         pending_trades=pending_trades,
+        stale=snap.stale,
+        as_of=snap.fetched_at,
     )
 
 

@@ -17,7 +17,14 @@ from .client import (
 from .crypto import decrypt_api_key, encrypt_api_key
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
-from .portfolio import get_holdings, get_pnl_timeline, get_summary, get_timeline
+from .portfolio import (
+    WallbitUnavailableError,
+    get_holdings,
+    get_pnl_timeline,
+    get_summary,
+    get_timeline,
+    invalidate_snapshot,
+)
 from .serializers import (
     AgentDecisionSerializer,
     AgentLimitsSerializer,
@@ -78,6 +85,8 @@ class WallbitConnectView(APIView):
                 "kill_switch_until": None,
             },
         )
+        # A (re)connected key must not serve the previous key's cached snapshot.
+        invalidate_snapshot(account.id)
         return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
 
 
@@ -379,6 +388,13 @@ class PortfolioSummaryView(APIView):
                 {"detail": "Wallbit not connected", "connected": False},
                 status=status.HTTP_424_FAILED_DEPENDENCY,
             )
+        except WallbitUnavailableError as exc:
+            # Wallbit is down / rate-limiting us and there is no last-good
+            # snapshot yet: say so instead of rendering a $0 portfolio.
+            return Response(
+                {"detail": str(exc), "unavailable": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except WallbitError as exc:
             logger.warning("portfolio summary upstream failure", exc_info=exc)
             return Response(
@@ -400,6 +416,11 @@ class PortfolioHoldingsView(APIView):
             return Response(
                 {"detail": "Wallbit not connected", "connected": False},
                 status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        except WallbitUnavailableError as exc:
+            return Response(
+                {"detail": str(exc), "unavailable": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except WallbitError as exc:
             logger.warning("portfolio holdings upstream failure", exc_info=exc)

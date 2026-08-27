@@ -55,7 +55,14 @@ class WallbitValidationError(WallbitError):
 
 
 class WallbitRateLimitError(WallbitError):
-    """429 — rate limit exceeded after retries are exhausted."""
+    """429 — rate limit exceeded (after retries, or immediately when the
+    client was built with ``retry_rate_limited=False``).
+
+    ``retry_after`` carries the upstream ``Retry-After`` seconds when present
+    so callers can size a cooldown instead of hammering the blocked window.
+    """
+
+    retry_after: float | None = None
 
 
 class WallbitServerError(WallbitError):
@@ -84,10 +91,28 @@ class WallbitClient:
     httpx.Client closes.
     """
 
-    def __init__(self, api_key: str, *, base_url: str | None = None, timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        max_attempts: int = MAX_ATTEMPTS,
+        retry_rate_limited: bool = True,
+    ) -> None:
+        """
+        ``max_attempts`` bounds transport/5xx/429 retries. ``retry_rate_limited``
+        controls whether a 429 is retried after sleeping ``Retry-After``: keep
+        it on for background jobs, turn it OFF on request-path reads — the
+        dashboard would otherwise block for up to ``BACKOFF_CAP × attempts``
+        seconds while every retry keeps the upstream (Cloudflare) rate-limit
+        window open. Callers should fail fast and serve a cached snapshot.
+        """
         if not api_key:
             raise WallbitAuthError("API key is required")
         self._api_key = api_key
+        self._max_attempts = max(1, int(max_attempts))
+        self._retry_rate_limited = retry_rate_limited
         self._client = httpx.Client(
             base_url=(base_url or settings.WALLBIT_API_BASE_URL).rstrip("/"),
             timeout=timeout,
@@ -129,13 +154,14 @@ class WallbitClient:
         url = f"{API_PREFIX}{path}" if not path.startswith(API_PREFIX) else path
         headers = {"X-API-Key": self._api_key}
 
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        max_attempts = self._max_attempts
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = self._client.request(
                     method, url, params=params, json=json, headers=headers
                 )
             except httpx.RequestError as exc:
-                if attempt == MAX_ATTEMPTS:
+                if attempt == max_attempts:
                     logger.error(
                         "wallbit transport error", extra={"method": method, "path": url, "attempt": attempt, "error": str(exc)}
                     )
@@ -155,11 +181,11 @@ class WallbitClient:
                 },
             )
 
-            if response.status_code == 429 and attempt < MAX_ATTEMPTS:
+            if response.status_code == 429 and self._retry_rate_limited and attempt < max_attempts:
                 self._sleep_for_retry_after(response, attempt)
                 continue
 
-            if 500 <= response.status_code < 600 and attempt < MAX_ATTEMPTS:
+            if 500 <= response.status_code < 600 and attempt < max_attempts:
                 self._sleep_backoff(attempt)
                 continue
 
@@ -192,7 +218,10 @@ class WallbitClient:
 
         status = response.status_code
         if status >= 400:
-            raise _error_for_status(status, payload)
+            error = _error_for_status(status, payload)
+            if isinstance(error, WallbitRateLimitError):
+                error.retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise error
 
         return WallbitResponse(status=status, data=payload, rate_limit=rate_limit)
 
@@ -212,6 +241,15 @@ def _parse_rate_limit(headers) -> RateLimitState:
         remaining=_int("X-RateLimit-Remaining"),
         reset_at=_int("X-RateLimit-Reset"),
     )
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 def _error_for_status(status: int, payload: Any) -> WallbitError:

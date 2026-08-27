@@ -126,6 +126,10 @@ class PortfolioSummarySerializer(serializers.Serializer):
     investment_cash_usd = serializers.DecimalField(max_digits=18, decimal_places=2)
     last_sync_at = serializers.DateTimeField(allow_null=True)
     pending_trades = PendingTradeSerializer(many=True, read_only=True)
+    # True when Wallbit failed / rate-limited us and these live numbers come
+    # from the last-good snapshot; ``as_of`` is when they were actually read.
+    stale = serializers.BooleanField(read_only=True)
+    as_of = serializers.DateTimeField(allow_null=True, read_only=True)
 
 
 class HoldingSerializer(serializers.Serializer):

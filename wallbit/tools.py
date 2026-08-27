@@ -62,11 +62,21 @@ def wallbit_get_balance(user_external_id: str) -> dict[str, Any]:
     Combina GET /balance/checking (saldos en moneda) y GET /balance/stocks
     (posiciones por símbolo, sin precio actual ni P&L). Útil para responder
     "¿cuál es mi saldo?", "¿cuánto tengo en Wallbit?", "¿qué acciones tengo?".
+
+    Reads the shared per-account live snapshot (same source as the dashboard)
+    so a chat question never adds an extra burst against Wallbit's rate limit.
+    ``stale=true`` means Wallbit did not answer and these are the last known
+    numbers, read at ``as_of`` — say so to the user instead of presenting them
+    as current.
     """
+    from .portfolio import get_live_snapshot
+
     try:
-        with _load_client(user_external_id) as client:
-            checking = client.get("/balance/checking").data or {}
-            stocks = client.get("/balance/stocks").data or {}
+        user = User.objects.get(external_id=user_external_id)
+        account = WallbitAccount.objects.get(user=user)
+        if account.status != WallbitAccount.CONNECTED:
+            raise WallbitError(f"Wallbit account is {account.status}")
+        snap = get_live_snapshot(account)
     except WallbitAccount.DoesNotExist:
         return {"ok": False, "error": "wallbit_not_connected"}
     except User.DoesNotExist:
@@ -77,8 +87,10 @@ def wallbit_get_balance(user_external_id: str) -> dict[str, Any]:
 
     return {
         "ok": True,
-        "checking": checking.get("data", checking) if isinstance(checking, dict) else checking,
-        "stocks": stocks.get("data", stocks) if isinstance(stocks, dict) else stocks,
+        "checking": snap.checking,
+        "stocks": snap.positions,
+        "stale": snap.stale,
+        "as_of": snap.fetched_at.isoformat() if snap.fetched_at else None,
     }
 
 
@@ -164,6 +176,10 @@ def wallbit_get_portfolio(user_external_id: str) -> dict[str, Any]:
     return {
         "ok": True,
         "connected": True,
+        # stale=true → Wallbit no respondió; son los últimos datos conocidos
+        # (leídos en as_of). Dilo al usuario en vez de presentarlos como actuales.
+        "stale": bool(summary.stale) if summary is not None else False,
+        "as_of": summary.as_of.isoformat() if summary is not None and summary.as_of else None,
         "holdings": positions,
         "stocks_total": {
             "invested_usd": _money_str(stocks_cost),
