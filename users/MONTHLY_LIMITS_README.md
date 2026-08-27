@@ -5,7 +5,7 @@ Este documento explica cómo funciona el nuevo sistema de límites mensuales par
 ## 🎯 **Resumen del Sistema**
 
 - **Límites Mensuales**: Cada usuario tiene límites que se reinician automáticamente cada mes
-- **Plan Básico por Defecto**: Todos los usuarios tienen plan básico automáticamente (50 gastos + 50 ingresos/mes)
+- **Plan Básico por Defecto**: Todos los usuarios tienen plan básico automáticamente (100 gastos + 50 ingresos/mes)
 - **Planes Premium/Business**: Registros ilimitados por mes
 - **Conteo Automático**: Los límites se actualizan automáticamente con signals de Django
 
@@ -13,7 +13,7 @@ Este documento explica cómo funciona el nuevo sistema de límites mensuales par
 
 | Plan | Gastos/Mes | Ingresos/Mes | Precio |
 |------|------------|--------------|--------|
-| **BASIC** | 50 | 50 | Gratis |
+| **BASIC** | 100 | 50 | Gratis |
 | **PREMIUM** | ∞ Ilimitado | ∞ Ilimitado | $5/mes |
 | **BUSINESS** | ∞ Ilimitado | ∞ Ilimitado | $20/mes |
 
@@ -60,7 +60,7 @@ Los límites se definen en `users/plan_limits.py`:
 ```python
 PLAN_LIMITS = {
     'BASIC': {
-        'max_expenses': 50,    # 50 gastos por mes
+        'max_expenses': 100,   # 100 gastos por mes
         'max_incomes': 50,     # 50 ingresos por mes
     },
     'PREMIUM': {
@@ -119,7 +119,7 @@ if can_add:
     print("✅ Gasto creado exitosamente")
 else:
     print(f"❌ {message}")
-    # "Has alcanzado el límite de 50 gastos mensuales del plan básico..."
+    # "Has alcanzado el límite de 100 gastos mensuales del plan básico..."
 ```
 
 ## 🛠️ **Comandos de Gestión**
@@ -153,7 +153,7 @@ print(summary)
 # Output:
 # {
 #   'period': '2025-01',
-#   'expenses': {'used': 45, 'limit': 50, 'remaining': 5},
+#   'expenses': {'used': 95, 'limit': 100, 'remaining': 5},
 #   'incomes': {'used': 30, 'limit': 50, 'remaining': 20}
 # }
 ```
@@ -210,7 +210,7 @@ now = timezone.now()
 users_at_limit = MonthlyUsage.objects.filter(
     year=now.year,
     month=now.month,
-    expenses_count__gte=50
+    expenses_count__gte=100
 ).select_related('user')
 
 # Uso promedio por plan
@@ -231,7 +231,7 @@ usage_by_plan = MonthlyUsage.objects.filter(
 Cuando un usuario alcanza el límite, recibe mensajes claros:
 
 ```
-❌ Has alcanzado el límite de 50 gastos mensuales del plan básico. 
+❌ Has alcanzado el límite de 100 gastos mensuales del plan básico. 
    Actualiza a Premium para registros ilimitados y más funciones. 
    El límite se reinicia el próximo mes.
 ```

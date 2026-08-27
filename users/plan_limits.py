@@ -17,7 +17,7 @@ PLAN_LIMITS = {
         # Configurable via BASIC_PLAN_MAX_EXPENSES
         'max_expenses': BASIC_MAX_EXPENSES,
         'max_incomes': BASIC_MAX_INCOMES,      # Configurable via BASIC_PLAN_MAX_INCOMES
-        'description': 'Plan básico con límites mensuales para nuevos usuarios'
+        'description': 'Plan básico con límites mensuales para nuevos usuarios (por defecto 100 gastos + 50 ingresos)'
     },
     'PREMIUM': {
         'max_expenses': None,  # Ilimitado por mes
@@ -102,10 +102,10 @@ def get_upgrade_message(plan_name, record_type='expense'):
         limits = get_plan_limits(plan_name)
 
         if record_type == 'expense':
-            max_expenses = limits.get('max_expenses', 50)
+            max_expenses = limits.get('max_expenses', BASIC_MAX_EXPENSES)
             return f"Has alcanzado el límite de {max_expenses} gastos mensuales del plan básico. Actualiza a Premium para registros ilimitados y más funciones. El límite se reinicia el próximo mes."
         else:
-            max_incomes = limits.get('max_incomes', 50)
+            max_incomes = limits.get('max_incomes', BASIC_MAX_INCOMES)
             return f"Has alcanzado el límite de {max_incomes} ingresos mensuales del plan básico. Actualiza a Premium para registros ilimitados y más funciones. El límite se reinicia el próximo mes."
 
     return "Límite mensual alcanzado. Contacta soporte para más información."
