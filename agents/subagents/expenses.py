@@ -57,6 +57,35 @@ from users.models import User
 logger = logging.getLogger(__name__)
 
 
+def _unknown_args(tool, payload: dict) -> list[str]:
+    declared = set(getattr(tool, "args", None) or {})
+    return sorted(set(payload) - declared)
+
+
+def _invoke_strict(tool, payload: dict):
+    """Como ``tool.invoke`` pero FALLA si el payload trae argumentos que la tool
+    no declara. LangChain los descartaría en silencio: así fue como
+    ``get_user_expenses(start_date, end_date)`` devolvió el histórico completo y
+    el modelo "sumó" 11,99M cuando el real era 8,24M (2026-08-27). Un error
+    ruidoso aquí es mucho mejor que un número inventado con aspecto exacto."""
+    unknown = _unknown_args(tool, payload)
+    if unknown:
+        raise TypeError(
+            f"{tool.name} no acepta {unknown}; declara {sorted(tool.args)}"
+        )
+    return tool.invoke(payload)
+
+
+async def _ainvoke_strict(tool, payload: dict):
+    """Versión async de ``_invoke_strict``."""
+    unknown = _unknown_args(tool, payload)
+    if unknown:
+        raise TypeError(
+            f"{tool.name} no acepta {unknown}; declara {sorted(tool.args)}"
+        )
+    return await tool.ainvoke(payload)
+
+
 def _model() -> ChatOpenAI:
     return ChatOpenAI(
         model=getattr(settings, "AGENT_EXPENSES_MODEL", "gpt-4.1"),
@@ -86,7 +115,7 @@ def build_expenses_tools(
     async def parse_expense_for_user(text: str) -> dict:
         """Analiza un mensaje y extrae UN gasto (monto, categoría, fecha, nota).
         Interpreta montos coloquiales según la moneda por defecto del usuario."""
-        return await parse_expense.ainvoke({
+        return await _ainvoke_strict(parse_expense, {
             "text": text,
             "user_default_currency": default_currency,
             "expense_categories": expense_categories_str,
@@ -96,7 +125,7 @@ def build_expenses_tools(
     async def parse_expenses_for_user(text: str) -> Dict[str, Any]:
         """Extrae VARIOS gastos de un mismo mensaje. Interpreta montos coloquiales
         según la moneda por defecto del usuario."""
-        return await parse_expenses.ainvoke({
+        return await _ainvoke_strict(parse_expenses, {
             "text": text,
             "user_default_currency": default_currency,
             "expense_categories": expense_categories_str,
@@ -106,7 +135,7 @@ def build_expenses_tools(
     async def parse_income_for_user(text: str) -> dict:
         """Analiza un mensaje y extrae UN ingreso (monto, categoría, fecha, nota).
         Interpreta montos coloquiales según la moneda por defecto del usuario."""
-        return await parse_income.ainvoke({
+        return await _ainvoke_strict(parse_income, {
             "text": text,
             "user_default_currency": default_currency,
             "income_categories": income_categories_str,
@@ -116,7 +145,7 @@ def build_expenses_tools(
     async def parse_incomes_for_user(text: str) -> Dict[str, Any]:
         """Extrae VARIOS ingresos de un mismo mensaje. Interpreta montos coloquiales
         según la moneda por defecto del usuario."""
-        return await parse_incomes.ainvoke({
+        return await _ainvoke_strict(parse_incomes, {
             "text": text,
             "user_default_currency": default_currency,
             "income_categories": income_categories_str,
@@ -126,7 +155,7 @@ def build_expenses_tools(
     def get_current_date_for_user() -> str:
         """Obtiene la fecha actual en formato YYYY-MM-DD considerando la zona horaria del usuario."""
         try:
-            return get_current_date.invoke({"user_external_id": external_id})
+            return _invoke_strict(get_current_date, {"user_external_id": external_id})
         except Exception as exc:
             logger.error(f"get_current_date_for_user: {exc}")
             return datetime.now().strftime("%Y-%m-%d")
@@ -135,7 +164,7 @@ def build_expenses_tools(
     def parse_relative_date_for_user(date_text: str) -> str:
         """Convierte referencias temporales relativas a fechas YYYY-MM-DD."""
         try:
-            return parse_relative_date.invoke({
+            return _invoke_strict(parse_relative_date, {
                 "date_text": date_text,
                 "user_external_id": external_id,
             })
@@ -153,7 +182,7 @@ def build_expenses_tools(
     ) -> str:
         """Registra un gasto del usuario. Deja `currency` vacío si el usuario no la dijo
         explícitamente (NO la infieras): la tool usará la moneda por defecto del usuario."""
-        return create_expense.invoke({
+        return _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": currency,
@@ -176,13 +205,13 @@ def build_expenses_tools(
         """Registra un ingreso del usuario. Si la categoría no existe, la crea. Deja `currency`
         vacío si el usuario no la dijo explícitamente (NO la infieras): la tool usará la moneda
         por defecto del usuario."""
-        get_or_create_income_category.invoke({
+        _invoke_strict(get_or_create_income_category, {
             "name": category,
             "description": category_description,
             "example": category_example,
             "color": category_color,
         })
-        return create_income.invoke({
+        return _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": currency,
@@ -197,7 +226,7 @@ def build_expenses_tools(
         calculado en base de datos con el mismo criterio que el dashboard. Úsala
         SIEMPRE para "cuánto gasté", "cuánto llevo este mes", "total de gastos"."""
         try:
-            return get_expense_totals.invoke({
+            return _invoke_strict(get_expense_totals, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -211,7 +240,7 @@ def build_expenses_tools(
         """Total EXACTO de ingresos en un período (YYYY-MM-DD, inclusive), por moneda,
         calculado en base de datos. Úsala SIEMPRE para "cuánto ingresé / recibí"."""
         try:
-            return get_income_totals.invoke({
+            return _invoke_strict(get_income_totals, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -226,7 +255,7 @@ def build_expenses_tools(
         primero). Para consultas de período pasa SIEMPRE start_date y end_date.
         NO la uses para calcular totales: usa get_expense_totals_for_user."""
         try:
-            return get_expenses_by_user.invoke({
+            return _invoke_strict(get_expenses_by_user, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -241,7 +270,7 @@ def build_expenses_tools(
         período pasa SIEMPRE start_date y end_date. NO la uses para totales: usa
         get_income_totals_for_user."""
         try:
-            return get_incomes_by_user.invoke({
+            return _invoke_strict(get_incomes_by_user, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -254,7 +283,7 @@ def build_expenses_tools(
     def search_expenses(search_text: str) -> List[Dict[str, Any]]:
         """Búsqueda semántica de gastos por texto libre (usa embeddings)."""
         try:
-            return search_expenses_by_text.invoke({
+            return _invoke_strict(search_expenses_by_text, {
                 "user_external_id": external_id,
                 "search_text": search_text,
             })
@@ -266,7 +295,7 @@ def build_expenses_tools(
     def search_incomes(search_text: str) -> List[Dict[str, Any]]:
         """Búsqueda semántica de ingresos por texto libre (usa embeddings)."""
         try:
-            return search_incomes_by_text.invoke({
+            return _invoke_strict(search_incomes_by_text, {
                 "user_external_id": external_id,
                 "search_text": search_text,
             })
@@ -279,7 +308,7 @@ def build_expenses_tools(
         """Busca gastos por monto exacto (los más recientes primero). Úsala cuando el
         usuario referencia un gasto por su valor ("el gasto de 14000")."""
         try:
-            return search_expenses_by_amount.invoke({
+            return _invoke_strict(search_expenses_by_amount, {
                 "user_external_id": external_id,
                 "amount": amount,
                 "currency": currency,
@@ -293,7 +322,7 @@ def build_expenses_tools(
         """Busca ingresos por monto exacto (los más recientes primero). Úsala cuando el
         usuario referencia un ingreso por su valor ("el ingreso de 500000")."""
         try:
-            return search_incomes_by_amount.invoke({
+            return _invoke_strict(search_incomes_by_amount, {
                 "user_external_id": external_id,
                 "amount": amount,
                 "currency": currency,
@@ -306,7 +335,7 @@ def build_expenses_tools(
     def get_category_expenses(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
         """Obtiene gastos de una categoría específica en un rango de fechas."""
         try:
-            return get_expenses_by_category.invoke({
+            return _invoke_strict(get_expenses_by_category, {
                 "user_external_id": external_id,
                 "category": category,
                 "start_date": start_date,
@@ -320,7 +349,7 @@ def build_expenses_tools(
     def get_category_incomes(category: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
         """Obtiene ingresos de una categoría específica en un rango de fechas."""
         try:
-            return get_incomes_by_category.invoke({
+            return _invoke_strict(get_incomes_by_category, {
                 "user_external_id": external_id,
                 "category": category,
                 "start_date": start_date,
@@ -334,7 +363,7 @@ def build_expenses_tools(
     def get_top_expense_categories(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
         """Top categorías de gastos del usuario en un rango de fechas."""
         try:
-            return get_top_categories.invoke({
+            return _invoke_strict(get_top_categories, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -347,7 +376,7 @@ def build_expenses_tools(
     def get_top_income_categories_for_user(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
         """Top categorías de ingresos del usuario en un rango de fechas."""
         try:
-            return get_top_income_categories.invoke({
+            return _invoke_strict(get_top_income_categories, {
                 "user_external_id": external_id,
                 "start_date": start_date,
                 "end_date": end_date,
@@ -364,7 +393,7 @@ def build_expenses_tools(
         el mes actual; con year/month explícitos para meses específicos.
         """
         try:
-            return get_monthly_insights.invoke({
+            return _invoke_strict(get_monthly_insights, {
                 "user_external_id": external_id,
                 "year": year,
                 "month": month,

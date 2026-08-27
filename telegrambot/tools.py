@@ -853,16 +853,39 @@ def _parse_iso_date(value: str | None):
         return None
 
 
-def _filter_by_period(query, field: str, start_date: str | None, end_date: str | None):
+def _user_tz(user):
+    """Zona horaria del usuario; America/Bogota si no tiene (mismo default que el dashboard)."""
+    try:
+        return pytz.timezone(user.timezone)
+    except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
+        return pytz.timezone("America/Bogota")
+
+
+def _filter_by_period(query, field: str, start_date: str | None, end_date: str | None, user=None, ts_field: str = "timestamp"):
     """Filtra un queryset por rango inclusivo sobre ``field`` (fecha real del
-    movimiento: spent_at / received_at), el mismo criterio que usa el dashboard."""
+    movimiento: spent_at / received_at), con el MISMO criterio que el dashboard
+    (``ExpenseViewSet._filter_by_date_range``): los movimientos sin fecha real
+    se ubican por su ``timestamp`` convertido a la zona horaria del usuario.
+    Si el agente y el dashboard filtraran distinto, darían totales distintos."""
+    from datetime import time as _time
+
     start = _parse_iso_date(start_date)
     end = _parse_iso_date(end_date)
+    if not start and not end:
+        return query
+
+    dated = models.Q(**{f"{field}__isnull": False})
+    undated = models.Q(**{f"{field}__isnull": True})
+    tz = _user_tz(user)
     if start:
-        query = query.filter(**{f"{field}__gte": start})
+        dated &= models.Q(**{f"{field}__gte": start})
+        start_utc = tz.localize(datetime.combine(start, _time.min)).astimezone(pytz.UTC)
+        undated &= models.Q(**{f"{ts_field}__gte": start_utc})
     if end:
-        query = query.filter(**{f"{field}__lte": end})
-    return query
+        dated &= models.Q(**{f"{field}__lte": end})
+        end_utc = tz.localize(datetime.combine(end, _time.max)).astimezone(pytz.UTC)
+        undated &= models.Q(**{f"{ts_field}__lte": end_utc})
+    return query.filter(dated | undated)
 
 
 def _totals_by_currency(query) -> List[Dict[str, Any]]:
@@ -885,7 +908,7 @@ def get_expenses_by_user(user_external_id: str, start_date: str | None = None, e
     usa get_expense_totals, que suma en base de datos."""
     try:
         user = User.objects.get(external_id=user_external_id)
-        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date)
+        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user)
         expenses = query.order_by("-spent_at", "-timestamp")[:limit]
         return [{
             'id': str(expense.id),
@@ -913,7 +936,7 @@ def get_expense_totals(user_external_id: str, start_date: str | None = None, end
     except User.DoesNotExist:
         return {"error": "Usuario no encontrado"}
     try:
-        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date)
+        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user)
         return {
             "period": {"from": start_date, "to": end_date},
             "totals": _totals_by_currency(query),
@@ -934,7 +957,7 @@ def get_income_totals(user_external_id: str, start_date: str | None = None, end_
     except User.DoesNotExist:
         return {"error": "Usuario no encontrado"}
     try:
-        query = _filter_by_period(Income.objects.filter(user=user), "received_at", start_date, end_date)
+        query = _filter_by_period(Income.objects.filter(user=user), "received_at", start_date, end_date, user=user)
         return {
             "period": {"from": start_date, "to": end_date},
             "totals": _totals_by_currency(query),

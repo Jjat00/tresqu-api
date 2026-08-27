@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 
 from django.test import SimpleTestCase
 
@@ -36,3 +36,24 @@ class ResolveTransactionDateTests(SimpleTestCase):
 
     def test_recibo_de_hace_un_mes_se_acepta(self):
         self.assertEqual(resolve_transaction_date("2026-07-25", self.today), (date(2026, 7, 25), None))
+
+    def test_bordes_de_la_ventana(self):
+        limite = self.today - timedelta(days=45)
+        self.assertEqual(resolve_transaction_date(limite.isoformat(), self.today), (limite, None))
+        self.assertEqual(resolve_transaction_date((limite - timedelta(days=1)).isoformat(), self.today), (self.today, "too_old"))
+        self.assertEqual(resolve_transaction_date((self.today + timedelta(days=1)).isoformat(), self.today), (self.today, "future"))
+
+    def test_nunca_devuelve_una_fecha_fuera_de_la_ventana(self):
+        """Fuzz: para cualquier fecha extraída (±3 años) el resultado cae en
+        [hoy-45, hoy]. Es la garantía que necesita el dashboard mensual."""
+        for offset in range(-1100, 1100):
+            extraida = self.today + timedelta(days=offset)
+            got, _ = resolve_transaction_date(extraida.isoformat(), self.today)
+            self.assertLessEqual(got, self.today, extraida)
+            self.assertGreaterEqual(got, self.today - timedelta(days=45), extraida)
+
+    def test_formatos_raros_no_rompen(self):
+        for raw in ["22/08/26", "08/22/2026", "ayer", 20260822, "2026-13-01", "2026-02-30"]:
+            got, reason = resolve_transaction_date(raw, self.today)
+            self.assertEqual(got, self.today, raw)
+            self.assertEqual(reason, "unparseable", raw)
