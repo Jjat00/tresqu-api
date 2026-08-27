@@ -597,13 +597,8 @@ def process_composio_email(pe: ProcessedEmail) -> None:
             user_income_category=category,
             embedding=embedding,
         )
-        try:
-            user.get_current_monthly_usage().increment_incomes()
-        except Exception as exc:
-            logger.error(
-                f"Error incrementando uso mensual de ingresos: {exc}",
-                extra={"processed_email_id": pe.id, "user_id": user.id},
-            )
+        # El contador mensual lo incrementa la señal post_save de users.signals;
+        # no incrementar aquí o el correo cuenta doble contra el límite del plan.
         pe.income = income_obj
     else:
         expense_obj = Expense.objects.create(
@@ -618,13 +613,7 @@ def process_composio_email(pe: ProcessedEmail) -> None:
             user_expense_category=category,
             embedding=embedding,
         )
-        try:
-            user.get_current_monthly_usage().increment_expenses()
-        except Exception as exc:
-            logger.error(
-                f"Error incrementando uso mensual de gastos: {exc}",
-                extra={"processed_email_id": pe.id, "user_id": user.id},
-            )
+        # Ídem: la señal post_save ya cuenta este gasto.
         pe.expense = expense_obj
 
     # 10. Marcar el ProcessedEmail como procesado y persistir el ai_response

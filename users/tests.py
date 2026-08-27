@@ -103,3 +103,64 @@ class PlanLimitsTests(TestCase):
 
         self.assertEqual(user.can_add_expense(), (True, ""))
         self.assertEqual(user.can_add_income(), (True, ""))
+
+
+class PlanEnforcementApiTests(TransactionTestCase):
+    """Los planes se respetan de punta a punta por la API: Premium crea gastos e
+    ingresos aunque el contador esté muy por encima del tope de Basic; Basic recibe
+    400 al llegar al suyo. TransactionTestCase por `DatabaseConnectionMiddleware`."""
+
+    def setUp(self):
+        self.client = APIClient()
+
+    def _client_for(self, plan, external_id):
+        user = User.objects.create(external_id=external_id, platform="whatsapp", first_name="Jaime")
+        user.subscription_plan = plan
+        user.subscription_active = True
+        user.save()
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {AccessToken.for_user(user)}")
+        return user, client
+
+    def _expense_payload(self):
+        return {"amount": "12000", "currency": "COP", "description": "almuerzo",
+                "timestamp": "2026-08-27T12:00:00Z", "category_name": "Alimentación"}
+
+    def _income_payload(self):
+        return {"amount": "500000", "currency": "COP", "description": "freelance",
+                "timestamp": "2026-08-27T12:00:00Z", "category_name": "Trabajo Independiente o Freelance"}
+
+    def test_premium_crea_gastos_e_ingresos_sin_tope(self):
+        user, client = self._client_for(SubscriptionPlan.get_premium_plan(), "573009990001")
+        usage = MonthlyUsage.get_current_usage(user)
+        usage.expenses_count = 10_000
+        usage.incomes_count = 10_000
+        usage.save()
+
+        r = client.post("/api/expenses/", self._expense_payload(), format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+        r = client.post("/api/incomes/", self._income_payload(), format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+
+    def test_basic_recibe_400_al_llegar_al_tope(self):
+        user, client = self._client_for(SubscriptionPlan.get_basic_plan(), "573009990002")
+        usage = MonthlyUsage.get_current_usage(user)
+        usage.expenses_count = settings.BASIC_PLAN_MAX_EXPENSES
+        usage.incomes_count = settings.BASIC_PLAN_MAX_INCOMES
+        usage.save()
+
+        r = client.post("/api/expenses/", self._expense_payload(), format="json")
+        self.assertEqual(r.status_code, 400, r.content)
+        self.assertIn(str(settings.BASIC_PLAN_MAX_EXPENSES), r.content.decode())
+        r = client.post("/api/incomes/", self._income_payload(), format="json")
+        self.assertEqual(r.status_code, 400, r.content)
+
+    def test_cada_registro_cuenta_una_sola_vez(self):
+        """La señal post_save es la única que incrementa el contador."""
+        user, client = self._client_for(SubscriptionPlan.get_basic_plan(), "573009990003")
+        before = MonthlyUsage.get_current_usage(user).expenses_count
+
+        r = client.post("/api/expenses/", self._expense_payload(), format="json")
+        self.assertEqual(r.status_code, 201, r.content)
+
+        self.assertEqual(MonthlyUsage.get_current_usage(user).expenses_count, before + 1)
