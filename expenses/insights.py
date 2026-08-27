@@ -78,6 +78,18 @@ def _category_name_from_obj(expense: Expense) -> str:
     return expense.category_str or "Sin categoría"
 
 
+def _totals_by_currency(query) -> list[dict[str, Any]]:
+    rows = (
+        query.values("currency")
+        .annotate(total=Sum("amount"), count=Count("id"))
+        .order_by("-total")
+    )
+    return [
+        {"currency": r["currency"], "total": _to_float(r["total"]), "count": r["count"]}
+        for r in rows
+    ]
+
+
 def compute_monthly_insights(
     user: User,
     year: int | None = None,
@@ -101,18 +113,27 @@ def compute_monthly_insights(
     is_current_month = (year == now_local.year and month == now_local.month)
     effective_end = min(end_date, today_local) if is_current_month else end_date
 
-    currency = getattr(user, "default_currency", "COP")
+    currency = getattr(user, "default_currency", None) or "COP"
 
-    expenses_qs = Expense.objects.filter(
+    all_expenses_qs = Expense.objects.filter(
         user=user,
         spent_at__gte=start_date,
         spent_at__lte=effective_end,
     )
-    incomes_qs = Income.objects.filter(
+    all_incomes_qs = Income.objects.filter(
         user=user,
         received_at__gte=start_date,
         received_at__lte=effective_end,
     )
+    # Todas las estadísticas se calculan en la moneda por defecto del usuario:
+    # sumar COP con USD daría un total sin sentido. Las demás monedas se
+    # reportan aparte en ``other_currencies``.
+    expenses_qs = all_expenses_qs.filter(currency=currency)
+    incomes_qs = all_incomes_qs.filter(currency=currency)
+    other_currencies = {
+        "expenses": _totals_by_currency(all_expenses_qs.exclude(currency=currency)),
+        "incomes": _totals_by_currency(all_incomes_qs.exclude(currency=currency)),
+    }
 
     total_expenses = _to_float(expenses_qs.aggregate(s=Sum("amount"))["s"])
     total_incomes = _to_float(incomes_qs.aggregate(s=Sum("amount"))["s"])
@@ -205,7 +226,7 @@ def compute_monthly_insights(
     prev_start, prev_end = _month_bounds(prev_year, prev_month)
     prev_rows = list(
         Expense.objects
-        .filter(user=user, spent_at__gte=prev_start, spent_at__lte=prev_end)
+        .filter(user=user, currency=currency, spent_at__gte=prev_start, spent_at__lte=prev_end)
         .values("user_expense_category__name", "category__name", "category_str")
         .annotate(total=Sum("amount"))
     )
@@ -328,6 +349,7 @@ def compute_monthly_insights(
             "incomes": total_incomes,
             "net": total_incomes - total_expenses,
         },
+        "other_currencies": other_currencies,
         "daily_stats": {
             "days_with_expenses": days_with_expenses,
             "avg_daily_expense": round(avg_daily, 2),

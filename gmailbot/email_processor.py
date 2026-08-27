@@ -113,7 +113,12 @@ REGLAS:
 - merchant:
     * Para expense: nombre del comercio o empresa (Rappi, Uber, Netflix, banco).
     * Para income: fuente del ingreso (empresa empleadora, remitente, plataforma).
-- date: fecha YYYY-MM-DD o null.
+- date: fecha de la transacción en YYYY-MM-DD, o null si no aparece. OJO con el
+  formato de origen: bancos y comercios de Latinoamérica y Europa escriben
+  DD/MM/YYYY o DD/MM/YY ("22/08/26 a las 16:53" = 2026-08-22; "02/08/2026" = 2 de
+  agosto de 2026). NUNCA lo leas como MM/DD ni como YY/MM/DD; un año de dos
+  dígitos es 20YY. Si dudas entre dos lecturas, devuelve null (se usará la fecha
+  de recepción del correo).
 - confidence: 0.0 a 1.0 sobre si es transacción real Y exitosa.
 - suggested_category: EXACTAMENTE uno de los nombres de la lista del tipo detectado
   (gasto si transaction_type="expense", ingreso si "income"). Si ninguna encaja,

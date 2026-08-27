@@ -843,24 +843,105 @@ def delete_expense(expense_id: str):
         return f"❌ Error al eliminar el gasto: {str(e)}. No se eliminó nada."
 
 
+def _parse_iso_date(value: str | None):
+    """YYYY-MM-DD → date, o None si viene vacío o mal formado."""
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def _filter_by_period(query, field: str, start_date: str | None, end_date: str | None):
+    """Filtra un queryset por rango inclusivo sobre ``field`` (fecha real del
+    movimiento: spent_at / received_at), el mismo criterio que usa el dashboard."""
+    start = _parse_iso_date(start_date)
+    end = _parse_iso_date(end_date)
+    if start:
+        query = query.filter(**{f"{field}__gte": start})
+    if end:
+        query = query.filter(**{f"{field}__lte": end})
+    return query
+
+
+def _totals_by_currency(query) -> List[Dict[str, Any]]:
+    rows = (
+        query.values("currency")
+        .annotate(total=models.Sum("amount"), count=models.Count("id"))
+        .order_by("-total")
+    )
+    return [
+        {"currency": r["currency"], "total": float(r["total"] or 0), "count": r["count"]}
+        for r in rows
+    ]
+
+
 @tool
-def get_expenses_by_user(user_external_id: str):
-    """Obtiene todos los gastos de un usuario."""
+def get_expenses_by_user(user_external_id: str, start_date: str | None = None, end_date: str | None = None, limit: int = 300):
+    """Lista los gastos de un usuario, opcionalmente en un rango de fechas
+    (YYYY-MM-DD, inclusive, por fecha del gasto). Devuelve como máximo ``limit``
+    gastos, los más recientes primero. NO sirve para calcular totales: para eso
+    usa get_expense_totals, que suma en base de datos."""
     try:
         user = User.objects.get(external_id=user_external_id)
-        expenses = Expense.objects.filter(user=user)
+        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date)
+        expenses = query.order_by("-spent_at", "-timestamp")[:limit]
         return [{
             'id': str(expense.id),
-            'amount': expense.amount,
+            'amount': float(expense.amount),
             'currency': expense.currency,
             'category': expense.user_expense_category.name if expense.user_expense_category else (expense.category.name if expense.category else expense.category_str),
-            'spent_at': expense.spent_at.strftime('%Y-%m-%d'),
+            'spent_at': expense.spent_at.strftime('%Y-%m-%d') if expense.spent_at else None,
+            'description': expense.description,
             'note': expense.note,
             'raw_message': expense.raw_message
         } for expense in expenses]
     except Exception as e:
         logger.error(f"Error al obtener gastos: {e}")
         return []
+
+
+@tool
+def get_expense_totals(user_external_id: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+    """Total EXACTO de gastos de un usuario en un período (YYYY-MM-DD, inclusive),
+    agrupado por moneda y calculado en base de datos con el mismo criterio que el
+    dashboard (fecha del gasto). Úsala SIEMPRE para "cuánto gasté / cuánto llevo";
+    nunca sumes una lista a mano. Sin fechas devuelve el total histórico."""
+    try:
+        user = User.objects.get(external_id=user_external_id)
+    except User.DoesNotExist:
+        return {"error": "Usuario no encontrado"}
+    try:
+        query = _filter_by_period(Expense.objects.filter(user=user), "spent_at", start_date, end_date)
+        return {
+            "period": {"from": start_date, "to": end_date},
+            "totals": _totals_by_currency(query),
+        }
+    except Exception as e:
+        logger.error(f"Error al calcular totales de gastos: {e}")
+        return {"error": str(e)}
+
+
+@tool
+def get_income_totals(user_external_id: str, start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+    """Total EXACTO de ingresos de un usuario en un período (YYYY-MM-DD, inclusive),
+    agrupado por moneda y calculado en base de datos (fecha del ingreso). Úsala
+    SIEMPRE para "cuánto ingresé / cuánto recibí"; nunca sumes una lista a mano."""
+    from income.models import Income
+    try:
+        user = User.objects.get(external_id=user_external_id)
+    except User.DoesNotExist:
+        return {"error": "Usuario no encontrado"}
+    try:
+        query = _filter_by_period(Income.objects.filter(user=user), "received_at", start_date, end_date)
+        return {
+            "period": {"from": start_date, "to": end_date},
+            "totals": _totals_by_currency(query),
+        }
+    except Exception as e:
+        logger.error(f"Error al calcular totales de ingresos: {e}")
+        return {"error": str(e)}
 
 
 @tool

@@ -38,6 +38,39 @@ from income.models import Income
 
 from .models import ProcessedEmail
 
+# Un correo de banco/comercio llega el mismo día de la transacción o pocos días
+# después. Una fecha extraída más vieja que esto (o futura) es casi seguro un
+# error de lectura del formato de fecha.
+MAX_TRANSACTION_AGE_DAYS = 45
+
+
+def resolve_transaction_date(date_str, today, max_age_days: int = MAX_TRANSACTION_AGE_DAYS):
+    """Fecha de la transacción a partir de lo que extrajo la IA, con red de
+    seguridad.
+
+    Los bancos latinoamericanos escriben DD/MM/YY ("22/08/26"); leído como
+    YY/MM/DD da 2022-08-26, y "02/08/2026" leído como MM/DD da 8 de febrero.
+    Ambos errores dejan el gasto fuera del mes real y descuadran el dashboard.
+    Si la fecha extraída es futura o más vieja que ``max_age_days`` respecto a
+    ``today`` (fecha local del usuario), se descarta y se usa ``today``.
+
+    Returns:
+        (date, reason): ``reason`` es None si la fecha extraída se aceptó.
+    """
+    parsed = None
+    if date_str:
+        try:
+            parsed = datetime.strptime(str(date_str), "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return today, "unparseable"
+    if parsed is None:
+        return today, None
+    if parsed > today:
+        return today, "future"
+    if (today - parsed).days > max_age_days:
+        return today, "too_old"
+    return parsed, None
+
 logger = logging.getLogger(__name__)
 
 # Distancia coseno maxima (text-embedding-3-small) para considerar que una
@@ -470,21 +503,20 @@ def process_composio_email(pe: ProcessedEmail) -> None:
     amount = ai_result.get("amount", 0)
     currency = ai_result.get("currency", user.default_currency)
     date_str = ai_result.get("date")
-    txn_date = None
-    if date_str:
-        try:
-            txn_date = datetime.strptime(date_str, "%Y-%m-%d").date()
-        except (ValueError, TypeError):
-            txn_date = None
-    if txn_date is None:
-        # Fecha por defecto en la zona del usuario. timezone.now() está en UTC
-        # (USE_TZ + TIME_ZONE='UTC'); tomar .date() directo adelantaría el día
-        # para compras detectadas de noche en zonas UTC-negativas.
-        try:
-            user_tz = pytz.timezone(user.timezone)
-            txn_date = timezone.now().astimezone(user_tz).date()
-        except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
-            txn_date = timezone.now().date()
+    # "Hoy" en la zona del usuario. timezone.now() está en UTC (USE_TZ +
+    # TIME_ZONE='UTC'); tomar .date() directo adelantaría el día para compras
+    # detectadas de noche en zonas UTC-negativas.
+    try:
+        user_tz = pytz.timezone(user.timezone)
+        today_local = timezone.now().astimezone(user_tz).date()
+    except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
+        today_local = timezone.now().date()
+    txn_date, date_reason = resolve_transaction_date(date_str, today_local)
+    if date_reason:
+        logger.warning(
+            f"Fecha extraída descartada ({date_reason}): {date_str!r} -> {txn_date}",
+            extra={"processed_email_id": pe.id, "user_id": user.id},
+        )
 
     # 6b. Deduplicacion entre correos distintos de la misma compra (recibo
     # del comercio + notificacion de la tarjeta). El lock sobre la fila del

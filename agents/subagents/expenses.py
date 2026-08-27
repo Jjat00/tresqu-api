@@ -27,9 +27,11 @@ from telegrambot.tools import (
     delete_income,
     get_current_date,
     get_expense_by_id,
+    get_expense_totals,
     get_expenses_by_category,
     get_expenses_by_user,
     get_income_by_id,
+    get_income_totals,
     get_incomes_by_category,
     get_incomes_by_user,
     get_monthly_insights,
@@ -190,8 +192,39 @@ def build_expenses_tools(
         })
 
     @tool
+    def get_expense_totals_for_user(start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+        """Total EXACTO de gastos en un período (YYYY-MM-DD, inclusive), por moneda,
+        calculado en base de datos con el mismo criterio que el dashboard. Úsala
+        SIEMPRE para "cuánto gasté", "cuánto llevo este mes", "total de gastos"."""
+        try:
+            return get_expense_totals.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_expense_totals_for_user: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def get_income_totals_for_user(start_date: str | None = None, end_date: str | None = None) -> Dict[str, Any]:
+        """Total EXACTO de ingresos en un período (YYYY-MM-DD, inclusive), por moneda,
+        calculado en base de datos. Úsala SIEMPRE para "cuánto ingresé / recibí"."""
+        try:
+            return get_income_totals.invoke({
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+            })
+        except Exception as exc:
+            logger.error(f"get_income_totals_for_user: {exc}")
+            return {"error": str(exc)}
+
+    @tool
     def get_user_expenses(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
-        """Obtiene los gastos del usuario en un rango de fechas opcional."""
+        """Lista los gastos del usuario en un rango de fechas (máx. 300, más recientes
+        primero). Para consultas de período pasa SIEMPRE start_date y end_date.
+        NO la uses para calcular totales: usa get_expense_totals_for_user."""
         try:
             return get_expenses_by_user.invoke({
                 "user_external_id": external_id,
@@ -204,7 +237,9 @@ def build_expenses_tools(
 
     @tool
     def get_user_incomes(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
-        """Obtiene los ingresos del usuario en un rango de fechas opcional."""
+        """Lista los ingresos del usuario en un rango de fechas. Para consultas de
+        período pasa SIEMPRE start_date y end_date. NO la uses para totales: usa
+        get_income_totals_for_user."""
         try:
             return get_incomes_by_user.invoke({
                 "user_external_id": external_id,
@@ -355,6 +390,8 @@ def build_expenses_tools(
         delete_income,
         get_expense_by_id,
         get_income_by_id,
+        get_expense_totals_for_user,
+        get_income_totals_for_user,
         get_user_expenses,
         get_user_incomes,
         search_expenses,
@@ -416,7 +453,8 @@ CONSULTAS:
 - Por categoría + período: get_category_expenses / get_category_incomes.
 - Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
 - Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
-- Listar todo: get_user_expenses / get_user_incomes.
+- TOTALES ("cuánto gasté", "cuánto llevo este mes", "total de ingresos de julio"): get_expense_totals_for_user / get_income_totals_for_user con el rango de fechas del período. Devuelven el total exacto por moneda, calculado igual que el dashboard; reporta cada moneda por separado, tal cual.
+- Listar movimientos: get_user_expenses / get_user_incomes, SIEMPRE con rango de fechas para consultas de período (devuelven máx. 300). Sirven para detallar, no para sumar.
 
 INSIGHTS MENSUALES:
 - Para resúmenes, balances, "cómo voy", "qué tal el mes": LLAMA SIEMPRE get_user_monthly_insights antes de responder.
@@ -440,6 +478,7 @@ FUERA DE TU ESPECIALIDAD:
 QUÉ NO HACER:
 - ❌ Inventar promedios, días pico o patrones sin llamar get_user_monthly_insights.
 - ❌ Sumar categorías a ojo.
+- ❌ Calcular un total sumando movimientos uno a uno a partir de una lista: usa get_expense_totals_for_user / get_income_totals_for_user.
 - ❌ Crear categoría nueva si hay una existente que encaje.
 - ❌ Inferir o adivinar la moneda de un gasto/ingreso cuando el usuario no la dijo explícitamente.
 - ❌ Registrar 90 pesos por "gasté 90 en una camisa" cuando la moneda por defecto es COP: ahí son 90.000 (regla de montos coloquiales).
