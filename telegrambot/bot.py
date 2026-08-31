@@ -11,9 +11,15 @@ from django.db import transaction, connections, connection, InterfaceError
 import pytz
 
 from django.conf import settings
+from django.core.cache import cache
 from users.models import User, Chat, Message, TrackingLink
 from .services import process_message
-from .currencies import COMMON_CURRENCIES, is_valid_currency, get_currency_name
+from .currencies import (
+    COMMON_CURRENCIES,
+    is_valid_currency,
+    get_currency_name,
+    infer_defaults_from_phone,
+)
 
 # Configuración de logging
 logging.basicConfig(
@@ -22,11 +28,12 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-# Definir estados para la conversación
-ESPERANDO_TELEFONO = 0
-ESPERANDO_MONEDA = 1
+# El registro NO usa estados de conversación: el webhook construye una
+# Application nueva por cada update (telegrambot/views.py), así que cualquier
+# estado en memoria se pierde entre mensajes. Todo el alta se resuelve dentro
+# de un solo update y los ajustes posteriores viajan en el callback_data de
+# botones inline. El único estado que queda es el del broadcast de admin.
 ESPERANDO_MENSAJE_BROADCAST = 2
-ESPERANDO_ZONA_HORARIA = 3  # Nuevo estado
 
 
 # Función de utilidad para normalizar números de teléfono
@@ -171,18 +178,22 @@ def get_user_by_phone_number(phone_number):
     return User.objects.filter(phone_number=normalized_phone).first()
 
 
-def create_user(external_id, platform, first_name, username, phone_number=None, default_currency='USD', source_tracking_link=None):
+def create_user(external_id, platform, first_name, username, phone_number=None,
+                default_currency='USD', source_tracking_link=None, timezone=None):
     # Normalizar el número de teléfono (eliminar el signo + si existe)
     normalized_phone = normalize_phone_number(phone_number)
-    user = User.objects.create(
+    campos = dict(
         external_id=external_id,
         platform=platform,
         first_name=first_name or "",
         username=username or "",
         phone_number=normalized_phone,
         default_currency=default_currency,
-        source_tracking_link=source_tracking_link
+        source_tracking_link=source_tracking_link,
     )
+    if timezone:
+        campos["timezone"] = timezone
+    user = User.objects.create(**campos)
 
     # Si hay un tracking link, incrementar el contador de registros
     if source_tracking_link:
@@ -203,6 +214,35 @@ def update_user_currency(user, currency_code):
     """Actualiza la moneda por defecto del usuario"""
     user.default_currency = currency_code
     user.save()
+    return user
+
+
+def complete_existing_user(user, phone_number, currency_code, timezone_code,
+                          tracking_link=None):
+    """Rellena los datos que falten en una cuenta previa del mismo Telegram.
+
+    Pasa cuando alguien quedó a medias en un intento anterior: el external_id ya
+    existe, así que crear otra vez daría IntegrityError.
+    """
+    campos = []
+
+    if not user.phone_number:
+        user.phone_number = normalize_phone_number(phone_number)
+        campos.append("phone_number")
+    if not user.default_currency:
+        user.default_currency = currency_code
+        campos.append("default_currency")
+    if not user.timezone:
+        user.timezone = timezone_code
+        campos.append("timezone")
+    if tracking_link and not user.source_tracking_link_id:
+        user.source_tracking_link = tracking_link
+        campos.append("source_tracking_link")
+        tracking_link.increment_registrations()
+
+    if campos:
+        user.save(update_fields=campos)
+
     return user
 
 
@@ -291,6 +331,7 @@ get_user_by_phone_number_async = sync_to_async(get_user_by_phone_number)
 create_user_async = sync_to_async(create_user)
 update_chat_user_async = sync_to_async(update_chat_user)
 update_user_currency_async = sync_to_async(update_user_currency)
+complete_existing_user_async = sync_to_async(complete_existing_user)
 get_chat_user_async = sync_to_async(get_chat_user)
 get_all_telegram_chats_async = sync_to_async(get_all_telegram_chats)
 is_admin_user_async = sync_to_async(is_admin_user)
@@ -427,90 +468,73 @@ COMMON_TIMEZONES = [
 ]
 
 
-async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Permite al usuario seleccionar o actualizar su zona horaria"""
-    user = update.effective_user
+async def timezone_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/timezone: muestra los botones de zona horaria. Cada botón se basta a sí mismo."""
     chat_id = update.effective_chat.id
-
-    # Obtener el usuario de la base de datos
-    user_id, db_user = await get_chat_user_async(chat_id)
+    _, db_user = await get_chat_user_async(chat_id)
 
     if not db_user:
         await update.message.reply_text(
-            "Primero debes registrarte para configurar tu zona horaria. "
-            "Usa el comando /registrar para comenzar."
+            "Primero necesitas una cuenta. Comparte tu número con el botón de abajo "
+            "y la creo al instante.",
+            reply_markup=contact_keyboard_markup(),
         )
-        return ConversationHandler.END
-
-    # Crear un teclado con las zonas horarias principales
-    keyboard = []
-    for tz_code, tz_name in COMMON_TIMEZONES:
-        keyboard.append([InlineKeyboardButton(
-            tz_name, callback_data=f"tz:{tz_code}")])
-
-    # Añadir un botón para cancelar
-    keyboard.append([InlineKeyboardButton(
-        "Cancelar", callback_data="tz:cancel")])
-
-    reply_markup = InlineKeyboardMarkup(keyboard)
+        return
 
     await update.message.reply_text(
-        f"👋 Hola {user.first_name}!\n\n"
-        f"Selecciona tu zona horaria para mostrar las fechas y horas correctamente:",
-        reply_markup=reply_markup
+        "Selecciona tu zona horaria para que las fechas y horas te cuadren:",
+        reply_markup=timezone_keyboard_markup(db_user.timezone),
     )
 
-    return ESPERANDO_ZONA_HORARIA
 
-
-async def handle_timezone_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Procesa la selección de zona horaria del usuario"""
+async def handle_timezone_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Botones de zona horaria: tz:menu abre el listado, tz:<zona> la aplica."""
     query = update.callback_query
     await query.answer()
 
-    # Extraer la zona horaria seleccionada del callback_data
-    callback_data = query.data
-
-    if callback_data == "tz:cancel":
-        await query.edit_message_text("Operación cancelada.")
-        return ConversationHandler.END
-
-    timezone_code = callback_data.replace("tz:", "")
-
-    # Obtener el usuario
     chat_id = update.effective_chat.id
-    user_id, db_user = await get_chat_user_async(chat_id)
+    _, db_user = await get_chat_user_async(chat_id)
 
     if not db_user:
         await query.edit_message_text(
-            "No se pudo actualizar tu zona horaria. Por favor, registrate primero."
+            "No encuentro tu cuenta. Comparte tu contacto para crearla."
         )
-        return ConversationHandler.END
+        return
 
-    # Actualizar la zona horaria del usuario
-    try:
-        # Verificar que la zona horaria es válida
-        pytz.timezone(timezone_code)
-
-        # Actualizar en la base de datos
-        updated_user = await update_user_timezone_async(db_user, timezone_code)
-
-        # Encontrar el nombre descriptivo de la zona horaria
-        tz_name = next(
-            (name for code, name in COMMON_TIMEZONES if code == timezone_code), timezone_code)
-
+    if query.data == "tz:cancel":
         await query.edit_message_text(
-            f"✅ Tu zona horaria ha sido actualizada a:\n"
-            f"{tz_name}\n\n"
-            f"Ahora todas las fechas y horas se mostrarán correctamente según tu ubicación."
+            "Lo dejamos como está. Puedes cambiarla cuando quieras con /timezone."
         )
+        return
+
+    if query.data == "tz:menu":
+        await query.edit_message_text(
+            "Selecciona tu zona horaria:",
+            reply_markup=timezone_keyboard_markup(db_user.timezone),
+        )
+        return
+
+    timezone_code = query.data.split(":", 1)[1]
+
+    try:
+        pytz.timezone(timezone_code)  # valida antes de guardar
+        await update_user_timezone_async(db_user, timezone_code)
     except Exception as e:
         logger.error(f"Error al actualizar la zona horaria: {e}")
         await query.edit_message_text(
-            f"❌ No se pudo actualizar tu zona horaria. Por favor, intenta nuevamente."
+            "❌ No pude actualizar tu zona horaria. Inténtalo de nuevo con /timezone."
         )
+        return
 
-    return ConversationHandler.END
+    tz_nombre = next(
+        (nombre for codigo, nombre in COMMON_TIMEZONES if codigo == timezone_code),
+        timezone_code)
+    texto = f"✅ Zona horaria: {tz_nombre}"
+
+    await query.edit_message_text(texto)
+
+    chat, _ = await get_or_create_chat_async(chat_id)
+    await create_message_async(chat, "system", "outgoing", texto)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -534,9 +558,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             logger.info(
                 f"Código de referido válido en /start: {referral_code}")
 
-            # Guardar en el contexto para usar durante el registro
-            context.user_data['referral_code'] = referral_code
-            context.user_data['tracking_link_id'] = tracking_link.id
+            # Fuera del proceso: context.user_data muere con este update
+            await remember_tracking_link_async(chat_id, tracking_link.id)
 
     # Guardar el chat en la base de datos si no existe
     chat, created = await get_or_create_chat_async(chat_id)
@@ -578,31 +601,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 welcome_message = (
                     f"¡Hola {user.first_name}! Bienvenido a Tresqu desde {tracking_link.name}. "
                     f"Soy tu asistente de finanzas personales y puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
-                    f"Para comenzar, necesitas registrarte con tu número de teléfono. "
-                    f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
-                    f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
-                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente.\n\n"
+                    f"Para empezar, comparte tu número con el botón de abajo: "
+                    f"con eso creo tu cuenta al instante.\n\n"
+                    f"Si ya usas Tresqu en WhatsApp con ese mismo número, "
+                    f"vincularé tu cuenta en lugar de crear otra.\n\n"
                     f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
                 )
             else:
                 welcome_message = (
                     f"¡Hola {user.first_name}! Soy Tresqu, tu asistente de finanzas personales. "
                     f"Puedo ayudarte a registrar gastos y gestionar tu presupuesto.\n\n"
-                    f"Para comenzar, necesitas registrarte con tu número de teléfono. "
-                    f"Usa el comando /registrar para iniciar el proceso de registro.\n\n"
-                    f"Si ya tienes una cuenta en WhatsApp con tu número de teléfono, "
-                    f"simplemente comparte tu contacto y vincularemos tu cuenta automáticamente.\n\n"
+                    f"Para empezar, comparte tu número con el botón de abajo: "
+                    f"con eso creo tu cuenta al instante.\n\n"
+                    f"Si ya usas Tresqu en WhatsApp con ese mismo número, "
+                    f"vincularé tu cuenta en lugar de crear otra.\n\n"
                     f"📖 Mira todo lo que puedes hacer con Tresqu: https://tresqu.com/funciones"
                 )
 
-            # Crear botón para solicitar número de teléfono
-            contact_keyboard = KeyboardButton(
-                text="Compartir número de teléfono", request_contact=True)
-            reply_markup = ReplyKeyboardMarkup(
-                [[contact_keyboard]], one_time_keyboard=True)
-
-            # Enviar el mensaje de bienvenida con el teclado
-            await update.message.reply_text(welcome_message, reply_markup=reply_markup)
+            # El botón de contacto es la vía de alta: un toque y la cuenta existe
+            await update.message.reply_text(
+                welcome_message, reply_markup=contact_keyboard_markup())
 
             # Registrar respuesta
             await create_message_async(
@@ -626,50 +644,119 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
     # Si el usuario está registrado pero no tiene zona horaria configurada, preguntar
-    if db_user and (not hasattr(db_user, 'timezone') or not db_user.timezone):
-        # Crear un teclado con las zonas horarias principales
-        keyboard = []
-        for tz_code, tz_name in COMMON_TIMEZONES:
-            keyboard.append([InlineKeyboardButton(
-                tz_name, callback_data=f"tz:{tz_code}")])
-
-        # Añadir un botón para cancelar
-        keyboard.append([InlineKeyboardButton(
-            "Cancelar", callback_data="tz:cancel")])
-
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
+    if db_user and not db_user.timezone:
         await update.message.reply_text(
-            "Para ofrecerte una mejor experiencia, necesito saber tu zona horaria. "
-            "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
-            reply_markup=reply_markup
+            "Para mostrarte bien las fechas y las horas, dime tu zona horaria:",
+            reply_markup=timezone_keyboard_markup(),
         )
 
 
-async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Inicia el proceso de registro solicitando el número de teléfono."""
+# ---------------------------------------------------------------------------
+# Alta de cuenta en un solo update
+#
+# El registro no puede apoyarse en un ConversationHandler: el webhook construye
+# una Application nueva por cada update (telegrambot/views.py) y gunicorn corre
+# varios workers, así que el estado en memoria muere entre mensaje y mensaje.
+# Por eso la cuenta se crea completa al recibir el contacto y lo que queda por
+# ajustar viaja dentro del callback_data de botones inline, que se resuelven
+# solos. Lo único que se guarda entre updates es el enlace de referido, y va a
+# la cache compartida, no a context.user_data.
+# ---------------------------------------------------------------------------
+
+REFERRAL_CACHE_TTL = 60 * 60 * 24  # un día
+
+
+def _referral_cache_key(chat_id):
+    return f"telegram:referral:{chat_id}"
+
+
+def remember_tracking_link(chat_id, tracking_link_id):
+    """Recuerda el referido detectado en /start hasta que el alta lo consuma."""
+    try:
+        cache.set(_referral_cache_key(chat_id), tracking_link_id, REFERRAL_CACHE_TTL)
+    except Exception as e:
+        # Un problema de cache jamás debe impedir un registro
+        logger.warning(f"No se pudo guardar el referido del chat {chat_id}: {e}")
+
+
+def pop_tracking_link(chat_id):
+    """Devuelve el TrackingLink pendiente del chat y lo consume."""
+    try:
+        tracking_link_id = cache.get(_referral_cache_key(chat_id))
+    except Exception as e:
+        logger.warning(f"No se pudo leer el referido del chat {chat_id}: {e}")
+        return None
+
+    if not tracking_link_id:
+        return None
+
+    try:
+        return TrackingLink.objects.get(id=tracking_link_id)
+    except TrackingLink.DoesNotExist:
+        logger.warning(f"TrackingLink {tracking_link_id} ya no existe")
+        return None
+    finally:
+        try:
+            cache.delete(_referral_cache_key(chat_id))
+        except Exception:
+            pass
+
+
+remember_tracking_link_async = sync_to_async(remember_tracking_link)
+pop_tracking_link_async = sync_to_async(pop_tracking_link)
+
+
+def contact_keyboard_markup():
+    """Botón que pide el contacto: la única vía de alta en Telegram."""
+    return ReplyKeyboardMarkup(
+        [[KeyboardButton(text="Compartir número de teléfono", request_contact=True)]],
+        one_time_keyboard=True,
+        resize_keyboard=True,
+    )
+
+
+def currency_keyboard_markup(current=None):
+    """Botones inline de moneda; el código viaja en el callback_data (cur:XXX)."""
+    keyboard, fila = [], []
+    for currency in COMMON_CURRENCIES:
+        etiqueta = f"{currency['flag']} {currency['code']}"
+        if current and currency["code"] == current:
+            etiqueta = f"✅ {etiqueta}"
+        fila.append(InlineKeyboardButton(
+            etiqueta, callback_data=f"cur:{currency['code']}"))
+        if len(fila) == 3:
+            keyboard.append(fila)
+            fila = []
+    if fila:
+        keyboard.append(fila)
+    return InlineKeyboardMarkup(keyboard)
+
+
+def timezone_keyboard_markup(current=None):
+    """Botones inline de zona horaria (tz:<zona IANA>)."""
+    keyboard = []
+    for tz_code, tz_name in COMMON_TIMEZONES:
+        etiqueta = f"✅ {tz_name}" if current == tz_code else tz_name
+        keyboard.append([InlineKeyboardButton(
+            etiqueta, callback_data=f"tz:{tz_code}")])
+    keyboard.append([InlineKeyboardButton(
+        "Más tarde", callback_data="tz:cancel")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def account_settings_markup():
+    """Atajos que se ofrecen justo después de crear la cuenta."""
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("Cambiar moneda", callback_data="cur:menu"),
+        InlineKeyboardButton("Cambiar zona horaria", callback_data="tz:menu"),
+    ]])
+
+
+async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/registrar: pide el contacto. La cuenta se crea al recibirlo, en un paso."""
     chat_id = update.effective_chat.id
-    user = update.effective_user
 
-    logger.info(
-        f"Iniciando registro para usuario: {user.id} ({user.username or user.first_name})")
-
-    # Detectar código de referido en el mensaje de registro
-    if update.message and update.message.text:
-        referral_code = await extract_referral_code_async(update.message.text)
-        if referral_code:
-            tracking_link = await find_tracking_link_async(referral_code)
-            if tracking_link:
-                logger.info(
-                    f"Código de referido detectado en registro: {referral_code}")
-                # Guardar en el contexto para usar durante el registro
-                context.user_data['referral_code'] = referral_code
-                context.user_data['tracking_link_id'] = tracking_link.id
-
-    # Verificar si ya existe un chat
     chat, _ = await get_or_create_chat_async(chat_id)
-
-    # Registrar el mensaje recibido
     await create_message_async(
         chat,
         str(update.message.message_id),
@@ -677,28 +764,123 @@ async def register_user(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         update.message.text
     )
 
-    # Crear botón para solicitar número de teléfono
-    contact_keyboard = KeyboardButton(
-        text="Compartir número de teléfono", request_contact=True)
-    reply_markup = ReplyKeyboardMarkup(
-        [[contact_keyboard]], one_time_keyboard=True)
+    # Referido escrito junto al comando: "/registrar EMPRESA_ABC"
+    if update.message.text:
+        referral_code = await extract_referral_code_async(update.message.text)
+        if referral_code:
+            tracking_link = await find_tracking_link_async(referral_code)
+            if tracking_link:
+                logger.info(
+                    f"Código de referido detectado en /registrar: {referral_code}")
+                await remember_tracking_link_async(chat_id, tracking_link.id)
+
+    _, db_user = await get_chat_user_async(chat_id)
+    if db_user and db_user.phone_number:
+        message = (
+            "Ya tienes una cuenta activa en este chat. ✅\n\n"
+            f"Moneda por defecto: {db_user.default_currency}\n\n"
+            "Cámbiala con /moneda o ajusta tu zona horaria con /timezone."
+        )
+        await update.message.reply_text(message)
+        await create_message_async(chat, "system", "outgoing", message)
+        return
 
     message = (
-        "Para registrarte necesitamos tu número de teléfono. "
-        "Por favor, presiona el botón 'Compartir número de teléfono'."
+        "Para crear tu cuenta necesito tu número de teléfono. "
+        "Presiona el botón «Compartir número de teléfono» que aparece abajo.\n\n"
+        "Tiene que llegar por el botón: si lo escribes no puedo comprobar que es tuyo."
     )
+    await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
+    await create_message_async(chat, "system", "outgoing", message)
 
-    await update.message.reply_text(message, reply_markup=reply_markup)
 
-    # Registrar respuesta
+async def currency_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/moneda [CÓDIGO]: cambia la moneda por defecto sin pasos intermedios."""
+    chat_id = update.effective_chat.id
+
+    chat, _ = await get_or_create_chat_async(chat_id)
     await create_message_async(
         chat,
-        "system",
-        "outgoing",
-        message
+        str(update.message.message_id),
+        "incoming",
+        update.message.text
     )
 
-    return ESPERANDO_TELEFONO
+    _, db_user = await get_chat_user_async(chat_id)
+    if not db_user:
+        message = (
+            "Todavía no tienes cuenta. Comparte tu número con el botón de abajo "
+            "y la creo al instante."
+        )
+        await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
+        await create_message_async(chat, "system", "outgoing", message)
+        return
+
+    # "/moneda EUR" aplica directo: cubre las monedas que no están en los botones
+    argumento = context.args[0].upper() if context.args else ""
+    if argumento:
+        if not is_valid_currency(argumento):
+            await update.message.reply_text(
+                f"'{argumento}' no es un código ISO 4217 válido. "
+                f"Prueba con USD, EUR, COP, CLP, MXN..."
+            )
+            return
+
+        await update_user_currency_async(db_user, argumento)
+        message = (
+            f"✅ Tu moneda por defecto ahora es {argumento} "
+            f"({get_currency_name(argumento)})."
+        )
+        await update.message.reply_text(message)
+        await create_message_async(chat, "system", "outgoing", message)
+        return
+
+    await update.message.reply_text(
+        f"Tu moneda por defecto es {db_user.default_currency}. "
+        f"Elige otra abajo o escribe /moneda seguido del código que necesites "
+        f"(por ejemplo /moneda EUR):",
+        reply_markup=currency_keyboard_markup(db_user.default_currency),
+    )
+
+
+async def handle_currency_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Botones de moneda: cur:menu abre el listado, cur:<CÓDIGO> lo aplica."""
+    query = update.callback_query
+    await query.answer()
+
+    chat_id = update.effective_chat.id
+    _, db_user = await get_chat_user_async(chat_id)
+
+    if not db_user:
+        await query.edit_message_text(
+            "No encuentro tu cuenta. Comparte tu contacto para crearla."
+        )
+        return
+
+    if query.data == "cur:menu":
+        await query.edit_message_text(
+            f"Tu moneda por defecto es {db_user.default_currency}. "
+            f"Elige la que uses a diario:",
+            reply_markup=currency_keyboard_markup(db_user.default_currency),
+        )
+        return
+
+    currency_code = query.data.split(":", 1)[1].upper()
+    if not is_valid_currency(currency_code):
+        await query.edit_message_text(
+            "Esa moneda no es válida. Puedes fijarla con /moneda USD."
+        )
+        return
+
+    await update_user_currency_async(db_user, currency_code)
+
+    chat, _ = await get_or_create_chat_async(chat_id)
+    texto = (
+        f"✅ Moneda por defecto: {currency_code} "
+        f"({get_currency_name(currency_code)})."
+    )
+    await query.edit_message_text(texto)
+    await create_message_async(chat, "system", "outgoing", texto)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -730,37 +912,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Obtener el usuario asociado al chat de manera segura
     user_id, chat_user = await get_chat_user_async(chat_id)
 
-    # Si no hay usuario asociado al chat, intentamos encontrarlo por número de teléfono
-    # o asociarlo si ya existe en otra plataforma
+    # Chat sin usuario: puede ser alguien que ya se registró desde otro chat de
+    # Telegram. El teléfono no viaja en los mensajes normales (solo en el
+    # contacto compartido), así que aquí la única pista es el id de Telegram.
     if user_id is None or chat_user is None:
-        # Si el usuario de Telegram tiene número de teléfono (contacto compartido previamente)
-        if hasattr(telegram_user, 'contact') and telegram_user.contact and telegram_user.contact.phone_number:
-            # Normalizar el número de teléfono
-            phone_number = normalize_phone_number(
-                telegram_user.contact.phone_number)
+        existing_user = await get_user_by_external_id_async(str(telegram_user.id))
 
-            # Buscar si existe un usuario con este número
-            existing_user = await get_user_by_phone_number_async(phone_number)
-
-            if existing_user:
-                # Asociar el usuario existente con este chat de Telegram
-                await update_chat_user_async(chat, existing_user)
-                chat_user = existing_user
-                user_id = existing_user.id
-                logger.info(
-                    f"Usuario existente asociado al chat de Telegram: {existing_user.id}")
-        else:
-            # Intentar obtener un usuario asociado con este ID de Telegram
-            telegram_external_id = str(telegram_user.id)
-            existing_user = await get_user_by_external_id_async(telegram_external_id)
-
-            if existing_user:
-                # Asociar el usuario existente con este chat
-                await update_chat_user_async(chat, existing_user)
-                chat_user = existing_user
-                user_id = existing_user.id
-                logger.info(
-                    f"Usuario existente por ID de Telegram asociado al chat: {existing_user.id}")
+        if existing_user:
+            await update_chat_user_async(chat, existing_user)
+            chat_user = existing_user
+            user_id = existing_user.id
+            logger.info(
+                f"Usuario existente por ID de Telegram asociado al chat: {existing_user.id}")
 
     # Registrar el mensaje recibido
     await create_message_async(
@@ -773,19 +936,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Si todavía no hay usuario asociado, solicitar registro
     if user_id is None or chat_user is None:
         message = (
-            "Parece que aún no estás registrado. Usa el comando /registrar para crear una cuenta "
-            "y poder utilizar todas las funciones del bot.\n\n"
-            "Si ya te registraste mediante WhatsApp, necesitarás compartir tu contacto "
-            "para que podamos vincular tu cuenta."
+            "Todavía no tienes cuenta. Comparte tu número con el botón de abajo "
+            "y la creo al instante.\n\n"
+            "Tiene que llegar por el botón: si lo escribes no puedo comprobar que es tuyo. "
+            "Si ya usas Tresqu en WhatsApp con ese número, vincularé esa misma cuenta."
         )
 
-        # Crear botón para solicitar número de teléfono
-        contact_keyboard = KeyboardButton(
-            text="Compartir número de teléfono", request_contact=True)
-        reply_markup = ReplyKeyboardMarkup(
-            [[contact_keyboard]], one_time_keyboard=True)
-
-        await update.message.reply_text(message, reply_markup=reply_markup)
+        await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
 
         # Registrar respuesta
         await create_message_async(
@@ -799,10 +956,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Verificar si el usuario tiene número de teléfono
     if not chat_user.phone_number:
         message = (
-            "Tu cuenta no tiene un número de teléfono registrado. "
-            "Por favor, usa el comando /registrar para completar tu registro."
+            "Falta tu número de teléfono para terminar de configurar la cuenta. "
+            "Compártelo con el botón de abajo y seguimos."
         )
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
 
         # Registrar respuesta
         await create_message_async(
@@ -866,283 +1023,85 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
 
 
-async def handle_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Maneja el contacto recibido y solicita la moneda por defecto."""
-    logger.info("Iniciando handle_contact")
+async def create_account_from_contact(update: Update, context: ContextTypes.DEFAULT_TYPE,
+                                      chat, tg_user, phone_number) -> None:
+    """Crea la cuenta con el contacto recibido y la deja lista para usar.
 
+    Moneda y zona horaria salen del prefijo telefónico para no encadenar
+    preguntas que exigirían recordar un estado entre updates. Son provisionales:
+    los botones del final del mensaje (y /moneda, /timezone) las cambian.
+    """
     chat_id = update.effective_chat.id
-    user = update.effective_user
-    contact = update.message.contact
-    phone_number = contact.phone_number
-
-    logger.info(
-        f"Contacto recibido - chat_id: {chat_id}, user_id: {user.id}, phone: {phone_number}")
-
-    # Normalizar el número de teléfono (eliminar el signo + si existe)
-    normalized_phone = normalize_phone_number(phone_number)
-
-    # Verificar que el contacto pertenece al usuario que está haciendo el registro
-    if str(contact.user_id) != str(user.id):
-        await update.message.reply_text(
-            "El número de teléfono debe ser el tuyo. Por favor, utiliza el botón para compartir tu contacto.",
-            reply_markup=ReplyKeyboardRemove()
-        )
-        return ESPERANDO_TELEFONO
-
-    logger.info(f"Contacto validado para {user.id}: {normalized_phone}")
-
-    # Obtener o crear el chat
-    chat, _ = await get_or_create_chat_async(chat_id)
-
-    # Registrar el mensaje recibido
-    await create_message_async(
-        chat,
-        str(update.message.message_id),
-        "incoming",
-        "Contacto compartido"
-    )
-
-    # Verificar si ya existe un usuario con este número de teléfono
-    # (desde cualquier plataforma WhatsApp/Telegram)
-    existing_user = await get_user_by_phone_number_async(normalized_phone)
-
-    if existing_user:
-        # Si ya existe un usuario con este número, asociarlo a este chat
-        await update_chat_user_async(chat, existing_user)
-
-        await update.message.reply_text(
-            f"¡Bienvenido de nuevo! Tu cuenta ya está vinculada a este chat.\n\n"
-            f"Moneda predeterminada: {existing_user.default_currency}\n\n"
-            f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
-            f"- \"Gasté 50k en comida\"\n"
-            f"- \"Compré café por 35000\"\n"
-            f"- \"Pagué la cuenta de luz, 75k\"",
-            reply_markup=ReplyKeyboardRemove()
-        )
-
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "system",
-            "outgoing",
-            "Cuenta existente vinculada al chat"
-        )
-
-        return ConversationHandler.END
-
-    # Si no existe usuario, continuar con el flujo normal de registro
-    # Guardar el número de teléfono normalizado en el contexto para usarlo después
-    context.user_data["phone_number"] = normalized_phone
-    logger.info("Número de teléfono guardado en context.user_data")
-
-    # Crear botones para monedas comunes usando teclado normal
-    keyboard = []
-    for i in range(0, len(COMMON_CURRENCIES), 2):
-        row = []
-        currency = COMMON_CURRENCIES[i]
-        row.append(KeyboardButton(f"{currency['flag']} {currency['code']}"))
-
-        # Agregar segunda moneda en la fila si existe
-        if i + 1 < len(COMMON_CURRENCIES):
-            currency2 = COMMON_CURRENCIES[i + 1]
-            row.append(KeyboardButton(
-                f"{currency2['flag']} {currency2['code']}"))
-
-        keyboard.append(row)
-
-    # Agregar botón para especificar otra moneda
-    keyboard.append([KeyboardButton("Otra moneda")])
-    logger.info("Agregado botón 'Otra moneda'")
-
-    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True)
-    logger.info("Teclado normal creado")
-
-    message = (
-        "¡Gracias! Ahora necesito que selecciones tu moneda predeterminada. "
-        "Esta moneda se usará cuando no especifiques una al registrar gastos.\n\n"
-        "Selecciona una de las opciones comunes o elige 'Otra moneda' para escribir el código ISO:"
-    )
-
-    await update.message.reply_text(message, reply_markup=reply_markup)
-    logger.info("Mensaje con teclado enviado")
-
-    # Registrar respuesta
-    await create_message_async(
-        chat,
-        "system",
-        "outgoing",
-        message
-    )
-
-    return ESPERANDO_MONEDA
-
-
-async def handle_currency_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Maneja la entrada de texto para el código de moneda."""
-    chat_id = update.effective_chat.id
-    user = update.effective_user
-    text = update.message.text.strip()
-
-    # Obtener o crear el chat
-    chat, _ = await get_or_create_chat_async(chat_id)
-
-    # Registrar el mensaje recibido
-    await create_message_async(
-        chat,
-        str(update.message.message_id),
-        "incoming",
-        text
-    )
-
-    # Si el usuario seleccionó "Otra moneda"
-    if text == "Otra moneda":
-        message = (
-            "Por favor, escribe el código ISO 4217 de tu moneda (3 letras).\n"
-            "Por ejemplo: USD, EUR, GBP, etc."
-        )
-        await update.message.reply_text(message, reply_markup=ReplyKeyboardRemove())
-        return ESPERANDO_MONEDA
-
-    # Extraer el código de moneda del texto (asumiendo formato "🏦 USD")
-    currency_code = text.split(
-    )[-1].upper() if len(text.split()) > 1 else text.upper()
-
-    # Validar el código de moneda
-    if not is_valid_currency(currency_code):
-        message = (
-            f"'{currency_code}' no es un código de moneda válido según ISO 4217.\n"
-            f"Por favor, escribe un código válido de 3 letras como USD, EUR, GBP, etc."
-        )
-        await update.message.reply_text(message)
-        return ESPERANDO_MONEDA
-
-    # Completar el registro con la moneda proporcionada
-    return await complete_registration(update, context, currency_code)
-
-
-async def complete_registration(update: Update, context: ContextTypes.DEFAULT_TYPE, currency_code: str) -> int:
-    """Completa el proceso de registro y configura la moneda predeterminada."""
-    logger.info("Iniciando complete_registration")
-
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    phone_number = context.user_data.get('phone_number')
-    logger.info(
-        f"Procesando registro para chat_id: {chat_id}, user: {user.id}")
-
-    if not phone_number:
-        logger.error("No se encontró número de teléfono en context.user_data")
-        await update.message.reply_text(
-            "No se encontró un número de teléfono. Por favor, inicia el registro nuevamente con /registrar."
-        )
-        return ConversationHandler.END
-
-    # Obtener o crear el chat
-    chat, created = await get_or_create_chat_async(chat_id)
-    logger.info("Chat obtenido/creado en complete_registration")
-
-    # Asegurarse de que el número de teléfono esté normalizado
-    phone_number = normalize_phone_number(phone_number)
-    logger.info(f"Número de teléfono normalizado: {phone_number}")
-
-    # Buscar si ya existe un usuario con este número de teléfono
-    db_user = await get_user_by_phone_number_async(phone_number)
-    logger.info(f"Usuario existente encontrado: {db_user is not None}")
+    currency_code, timezone_code = infer_defaults_from_phone(phone_number)
+    tracking_link = await pop_tracking_link_async(chat_id)
 
     try:
-        # Si no existe, crear un nuevo usuario
-        if not db_user:
-            logger.info("Creando nuevo usuario")
+        db_user = await get_user_by_external_id_async(str(tg_user.id))
 
-            # Obtener tracking link del contexto si existe
-            tracking_link = None
-            if context.user_data.get('tracking_link_id'):
-                try:
-                    tracking_link = await sync_to_async(TrackingLink.objects.get)(
-                        id=context.user_data['tracking_link_id']
-                    )
-                    logger.info(
-                        f"Usando TrackingLink del contexto: {tracking_link.name} ({tracking_link.code})")
-                except TrackingLink.DoesNotExist:
-                    logger.warning(
-                        f"TrackingLink con ID {context.user_data['tracking_link_id']} no encontrado")
-
+        if db_user:
+            # Intento anterior que quedó a medias: se completa en vez de duplicar
+            db_user = await complete_existing_user_async(
+                db_user, phone_number, currency_code, timezone_code, tracking_link)
+            accion = "recuperada"
+        else:
             db_user = await create_user_async(
-                external_id=str(user.id),
+                external_id=str(tg_user.id),
                 platform="telegram",
-                first_name=user.first_name,
-                username=user.username,
+                first_name=tg_user.first_name,
+                username=tg_user.username,
                 phone_number=phone_number,
                 default_currency=currency_code,
-                source_tracking_link=tracking_link
+                timezone=timezone_code,
+                source_tracking_link=tracking_link,
             )
-            action = "creada"
-        else:
-            # Si existe, actualizar la moneda predeterminada
-            logger.info("Actualizando usuario existente")
-            db_user = await update_user_currency_async(db_user, currency_code)
-            action = "actualizada"
+            accion = "creada"
 
-        # Asociar el usuario al chat
         await update_chat_user_async(chat, db_user)
-        logger.info("Usuario asociado al chat")
-
-        # Personalizar mensaje si viene de un enlace de referido
-        success_message = f"¡Registro exitoso! Tu cuenta ha sido {action} correctamente.\n\n"
-
-        if tracking_link and action == "creada":
-            success_message += f"¡Gracias por llegar desde {tracking_link.name}! 🎉\n\n"
-
-        success_message += (
-            f"Moneda predeterminada: {currency_code} ({get_currency_name(currency_code)})\n\n"
-            f"Ahora puedes empezar a registrar tus gastos simplemente enviándome mensajes como:\n"
-            f"- \"Gasté 50k en comida\"\n"
-            f"- \"Compré café por 35000\"\n"
-            f"- \"Pagué la cuenta de luz, 75k\"\n\n"
-            f"💹 ¿Inviertes? Conecta Wallbit para ver y operar tus acciones y ETFs de EE. UU. desde el chat: https://tresqu.com/dashboard/account?tab=integraciones\n\n"
-            f"Recuerda que puedes cambiar tu moneda en cualquier momento con /moneda\n"
-            f"Puedes ver tu dashboard en https://tresqu.com/dashboard/home para revisar tus gastos, ingresos e inversiones."
-        )
-
-        await update.message.reply_text(success_message)
-        logger.info("Mensaje de confirmación enviado")
-
-        # Limpiar datos de referido del contexto después del registro exitoso
-        if 'referral_code' in context.user_data:
-            del context.user_data['referral_code']
-        if 'tracking_link_id' in context.user_data:
-            del context.user_data['tracking_link_id']
-
-        # Preguntar por la zona horaria si no está configurada
-        if not hasattr(db_user, 'timezone') or not db_user.timezone:
-            logger.info("Solicitando zona horaria")
-            # Crear un teclado con las zonas horarias principales
-            keyboard = []
-            for tz_code, tz_name in COMMON_TIMEZONES:
-                keyboard.append([InlineKeyboardButton(
-                    tz_name, callback_data=f"tz:{tz_code}")])
-
-            # Añadir un botón para cancelar
-            keyboard.append([InlineKeyboardButton(
-                "Más tarde", callback_data="tz:cancel")])
-
-            reply_markup = InlineKeyboardMarkup(keyboard)
-
-            await update.message.reply_text(
-                "Para finalizar, por favor selecciona tu zona horaria. "
-                "Esto me permitirá mostrar fechas y horas correctamente según tu ubicación:",
-                reply_markup=reply_markup
-            )
-
-            return ESPERANDO_ZONA_HORARIA
-
-        return ConversationHandler.END
     except Exception as e:
-        logger.error(f"Error en complete_registration: {e}")
-        await update.message.reply_text(
-            "Lo siento, hubo un error al completar tu registro. Por favor, intenta nuevamente."
+        logger.exception(
+            f"Error creando la cuenta de Telegram para el chat {chat_id}: {e}")
+        error = (
+            "No pude crear tu cuenta en este momento. "
+            "Vuelve a intentarlo en unos minutos con /registrar."
         )
-        return ConversationHandler.END
+        await update.message.reply_text(error, reply_markup=ReplyKeyboardRemove())
+        await create_message_async(chat, "error", "outgoing", error)
+        return
+
+    logger.info(
+        f"Cuenta {accion} desde Telegram: usuario {db_user.id}, chat {chat_id}")
+
+    tz_nombre = next(
+        (nombre for codigo, nombre in COMMON_TIMEZONES if codigo == db_user.timezone),
+        db_user.timezone)
+
+    saludo = f"¡Listo, {tg_user.first_name or 'bienvenido'}!"
+    bienvenida = (
+        f"{saludo} Tu cuenta ya está creada. 🎉\n\n"
+        if accion == "creada"
+        else f"{saludo} Retomé la cuenta que habías dejado a medias. ✅\n\n"
+    )
+
+    if tracking_link:
+        bienvenida += f"Gracias por llegar desde {tracking_link.name}.\n\n"
+
+    bienvenida += (
+        f"Moneda: {db_user.default_currency} ({get_currency_name(db_user.default_currency)})\n"
+        f"Zona horaria: {tz_nombre}\n\n"
+        f"Ya puedes registrar tus gastos escribiéndome con normalidad:\n"
+        f"- \"Gasté 50k en comida\"\n"
+        f"- \"Compré café por 35000\"\n"
+        f"- \"Pagué la cuenta de luz, 75k\"\n\n"
+        f"💹 ¿Inviertes? Conecta Wallbit para ver y operar tus acciones y ETFs de "
+        f"EE. UU. desde el chat: https://tresqu.com/dashboard/account?tab=integraciones\n\n"
+        f"Tu dashboard: https://tresqu.com/dashboard/home"
+    )
+
+    await update.message.reply_text(bienvenida, reply_markup=ReplyKeyboardRemove())
+    await create_message_async(chat, "system", "outgoing", bienvenida)
+
+    ajustes = "Deduje la moneda y la zona horaria por tu número. ¿Quieres cambiarlas?"
+    await update.message.reply_text(ajustes, reply_markup=account_settings_markup())
 
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1199,10 +1158,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Si no hay usuario asociado, solicitar registro
     if user_id is None or chat_user is None:
         message = (
-            "Parece que aún no estás registrado. Usa el comando /registrar para crear una cuenta "
-            "y poder utilizar todas las funciones del bot."
+            "Todavía no tienes cuenta. Comparte tu número con el botón de abajo "
+            "y la creo al instante."
         )
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
 
         # Registrar respuesta
         await create_message_async(
@@ -1216,10 +1175,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     # Verificar si el usuario tiene número de teléfono
     if not chat_user.phone_number:
         message = (
-            "Tu cuenta no tiene un número de teléfono registrado. "
-            "Por favor, usa el comando /registrar para completar tu registro."
+            "Falta tu número de teléfono para terminar de configurar la cuenta. "
+            "Compártelo con el botón de abajo y seguimos."
         )
-        await update.message.reply_text(message)
+        await update.message.reply_text(message, reply_markup=contact_keyboard_markup())
 
         # Registrar respuesta
         await create_message_async(
@@ -1454,30 +1413,31 @@ async def send_broadcast_message(update: Update, context: ContextTypes.DEFAULT_T
 
 
 async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Maneja un contacto compartido fuera del flujo de registro formal."""
+    """Punto único de alta: vincula la cuenta que ya existe o crea una nueva.
+
+    Antes este handler solo sabía vincular y, cuando no encontraba cuenta,
+    remitía a /registrar. Como el estado del ConversationHandler no sobrevivía
+    al siguiente update, ese /registrar devolvía justo aquí: nadie podía darse
+    de alta por Telegram.
+    """
     chat_id = update.effective_chat.id
-    user = update.effective_user
+    tg_user = update.effective_user
     contact = update.message.contact
-    phone_number = contact.phone_number
+    phone_number = normalize_phone_number(contact.phone_number)
 
     logger.info(
-        f"Contacto compartido (fuera de registro) - chat_id: {chat_id}, user_id: {user.id}, phone: {phone_number}")
+        f"Contacto compartido - chat_id: {chat_id}, user_id: {tg_user.id}")
 
-    # Normalizar el número de teléfono
-    normalized_phone = normalize_phone_number(phone_number)
-
-    # Verificar que el contacto pertenece al usuario
-    if str(contact.user_id) != str(user.id):
+    # El contacto debe ser el suyo: es lo que acredita que el número le pertenece
+    if str(contact.user_id) != str(tg_user.id):
         await update.message.reply_text(
-            "El número de teléfono debe ser el tuyo para vincular tu cuenta.",
-            reply_markup=ReplyKeyboardRemove()
+            "Ese contacto no es el tuyo. Usa el botón «Compartir número de teléfono» "
+            "para enviarme el tuyo.",
+            reply_markup=contact_keyboard_markup(),
         )
         return
 
-    # Obtener o crear el chat
     chat, _ = await get_or_create_chat_async(chat_id)
-
-    # Registrar el mensaje recibido
     await create_message_async(
         chat,
         str(update.message.message_id),
@@ -1485,72 +1445,55 @@ async def handle_contact_shared(update: Update, context: ContextTypes.DEFAULT_TY
         "Contacto compartido"
     )
 
-    # Verificar si ya existe un usuario con este número de teléfono
-    existing_user = await get_user_by_phone_number_async(normalized_phone)
+    # Si este chat ya tiene cuenta y lo que falta es el teléfono, se completa
+    # esa cuenta: crear otra dejaría huérfanos sus gastos.
+    _, cuenta_del_chat = await get_chat_user_async(chat_id)
+    if cuenta_del_chat and not cuenta_del_chat.phone_number:
+        currency_code, timezone_code = infer_defaults_from_phone(phone_number)
+        await complete_existing_user_async(
+            cuenta_del_chat, phone_number, currency_code, timezone_code)
+
+        mensaje = (
+            "Listo, tu número quedó guardado. ✅\n\n"
+            "Ya puedes registrar gastos escribiéndome con normalidad."
+        )
+        await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove())
+        await create_message_async(
+            chat, "system", "outgoing", "Teléfono añadido a la cuenta del chat")
+        return
+
+    existing_user = await get_user_by_phone_number_async(phone_number)
 
     if existing_user:
-        # Si ya existe un usuario con este número, asociarlo a este chat
         await update_chat_user_async(chat, existing_user)
 
-        await update.message.reply_text(
-            f"¡Genial! Tu cuenta existente ha sido vinculada a este chat de Telegram.\n\n"
-            f"Moneda predeterminada: {existing_user.default_currency}\n\n"
-            f"Ahora puedes utilizar Tresqu tanto en WhatsApp como en Telegram con la misma cuenta.",
-            reply_markup=ReplyKeyboardRemove()
+        mensaje = (
+            f"¡Genial! Tu cuenta quedó vinculada a este chat de Telegram.\n\n"
+            f"Moneda por defecto: {existing_user.default_currency}\n\n"
+            f"Puedes usar Tresqu en WhatsApp y en Telegram con la misma cuenta."
         )
-
-        # Registrar respuesta
+        await update.message.reply_text(mensaje, reply_markup=ReplyKeyboardRemove())
         await create_message_async(
-            chat,
-            "system",
-            "outgoing",
-            "Cuenta existente vinculada al chat"
-        )
-    else:
-        # Si no existe un usuario con este número, informar que debe registrarse
-        await update.message.reply_text(
-            f"No encontramos una cuenta asociada al número {normalized_phone}.\n\n"
-            f"Para crear una nueva cuenta, usa el comando /registrar.",
-            reply_markup=ReplyKeyboardRemove()
-        )
+            chat, "system", "outgoing", "Cuenta existente vinculada al chat")
+        return
 
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "system",
-            "outgoing",
-            "No se encontró cuenta existente"
-        )
+    # No hay cuenta con ese número: se crea aquí mismo, sin más pasos
+    await create_account_from_contact(update, context, chat, tg_user, phone_number)
 
 
 def setup_bot():
-    """Configura la aplicación del bot con todos los manejadores"""
+    """Configura la aplicación del bot con todos los manejadores.
+
+    Esta Application se construye de nuevo en cada webhook, así que ningún
+    handler puede depender de estado guardado en memoria entre updates: el
+    registro se resuelve con el contacto y botones inline que llevan el dato en
+    el callback_data.
+    """
     # Configurar el token desde settings.py
     application = Application.builder().token(settings.TELEGRAM_BOT_TOKEN).build()
 
-    # Registrar el conversation handler para el registro
-    conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("registrar", register_user)],
-        states={
-            ESPERANDO_TELEFONO: [
-                MessageHandler(filters.CONTACT, handle_contact),
-            ],
-            ESPERANDO_MONEDA: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND,
-                               handle_currency_text),
-            ],
-            ESPERANDO_ZONA_HORARIA: [
-                CallbackQueryHandler(
-                    handle_timezone_selection, pattern=r"^tz:"),
-            ],
-        },
-        fallbacks=[CommandHandler("cancelar", cancel)],
-        name="registration_conversation",
-        persistent=False,
-    )
-    application.add_handler(conv_handler)
-
-    # Registrar el conversation handler para broadcast (admin)
+    # Broadcast (admin). Sigue siendo conversacional y arrastra la misma
+    # limitación de estado que tenía el registro: pendiente de migrar.
     broadcast_handler = ConversationHandler(
         entry_points=[CommandHandler("broadcast", start_broadcast)],
         states={
@@ -1563,26 +1506,15 @@ def setup_bot():
     )
     application.add_handler(broadcast_handler)
 
-    # Manejar el comando /timezone independientemente
-    timezone_handler = ConversationHandler(
-        entry_points=[CommandHandler("timezone", timezone_command)],
-        states={
-            ESPERANDO_ZONA_HORARIA: [
-                CallbackQueryHandler(
-                    handle_timezone_selection, pattern=r"^tz:"),
-            ],
-        },
-        fallbacks=[CommandHandler("cancelar", cancel)],
-    )
-    application.add_handler(timezone_handler)
-
     # Comandos básicos
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("moneda", register_user))
+    application.add_handler(CommandHandler("registrar", register_user))
+    application.add_handler(CommandHandler("moneda", currency_command))
+    application.add_handler(CommandHandler("timezone", timezone_command))
     application.add_handler(CommandHandler("help", start))
     application.add_handler(CommandHandler("ayuda", start))
 
-    # Manejar contactos compartidos fuera del flujo de registro
+    # Contacto compartido: crea o vincula la cuenta dentro del mismo update
     application.add_handler(MessageHandler(
         filters.CONTACT & ~filters.COMMAND, handle_contact_shared))
 
@@ -1594,11 +1526,8 @@ def setup_bot():
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND, handle_message))
 
-    # Agregar manejador de errores
-    application.add_error_handler(error_handler)
-
-    # Callbacks específicos de Wallbit (Confirmar / Cancelar) — debe ir
-    # ANTES del debug_callback global para que ese no los intercepte.
+    # Callbacks con patrón, siempre ANTES del debug_callback global (que
+    # atrapa cualquier cosa y dejaría sordos a los demás).
     from .wallbit_handlers import wallbit_callback_handler
     application.add_handler(
         CallbackQueryHandler(
@@ -1606,9 +1535,14 @@ def setup_bot():
             pattern=r"^wallbit_(confirm|cancel)_\d+$",
         )
     )
-
-    # Agregar manejador de callback query global para debugging
+    application.add_handler(
+        CallbackQueryHandler(handle_currency_callback, pattern=r"^cur:"))
+    application.add_handler(
+        CallbackQueryHandler(handle_timezone_selection, pattern=r"^tz:"))
     application.add_handler(CallbackQueryHandler(debug_callback))
+
+    # Agregar manejador de errores
+    application.add_error_handler(error_handler)
 
     return application
 
