@@ -11,7 +11,10 @@ minute — across gunicorn workers — instead of each hitting Wallbit on its ow
 Wallbit sits behind Cloudflare rate limiting: a dashboard load that fired
 ~12 requests in a burst (3 endpoints × checking/stocks/assets) tripped it
 ("You are being rate-limited by the website owner's configuration"), and the
-client's Retry-After sleeps then kept the block alive for minutes. The snapshot
+client's Retry-After sleeps then kept the block alive: that rule is Cloudflare
+error 1015 and it hands out `Retry-After: 3600`, so every knock renewed an hour.
+The measured ceiling is `X-RateLimit-Limit: 15` per minute (the docs advertise
+60) and the block follows the egress IP, not the API key. The snapshot
 is single-flight (concurrent callers wait for the in-flight fetch), falls back
 to the last-good copy marked ``stale`` when Wallbit fails, and after a 429
 stays away from Wallbit for a cooldown so the window can actually clear.
@@ -54,9 +57,17 @@ _SNAPSHOT_LOCK_TTL = 30
 _SNAPSHOT_WAIT_SECONDS = 20.0
 _SNAPSHOT_POLL_SECONDS = 0.25
 # After a 429 we stop calling Wallbit for this long (or Retry-After, capped).
-# Every request inside the blocked window would otherwise extend it.
+# Every request inside the blocked window would otherwise extend it. The cap is
+# an hour because that is what Wallbit's Cloudflare rule actually hands out
+# (``Retry-After: 3600``, error 1015, measured 2026-08-31): a shorter cap would
+# send us back into an open window and restart it. Last-good outlives it (24 h),
+# so the dashboard keeps showing numbers marked stale the whole time.
 _RATE_LIMIT_COOLDOWN_DEFAULT = 90
-_RATE_LIMIT_COOLDOWN_MAX = 600
+_RATE_LIMIT_COOLDOWN_MAX = 3600
+# The asset catalog (/assets) is not per-user data, so it is cached under the
+# query itself and shared by everyone. Prices move, hence the short live TTL.
+_ASSET_CATALOG_TTL = 300
+_ASSET_CATALOG_LASTGOOD_TTL = 24 * 3600
 
 # Wallbit's /balance/stocks returns cash balances as pseudo-positions whose
 # "symbol" is the currency code (e.g. USD). Those are NOT holdings — they are
@@ -178,6 +189,10 @@ def _cache_delete(key: str) -> None:
         _cache().delete(key)
     except Exception as exc:  # noqa: BLE001
         logger.warning("wallbit snapshot cache delete failed (%s)", exc)
+
+
+def _catalog_key(prefix: str, query: str, category: str, limit: int) -> str:
+    return f"wallbit:catalog:{prefix}:{category or '-'}:{query or '-'}:{limit}"
 
 
 def _snap_key(account_id: int) -> str:
@@ -1126,3 +1141,52 @@ def safe_get_holdings(user: User) -> list[Holding]:
         return get_holdings(user)
     except AccountNotConnected:
         return []
+
+
+def get_asset_catalog(
+    account: WallbitAccount,
+    *,
+    query: str = "",
+    category: str = "",
+    limit: int = 12,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Wallbit's asset catalog for the explorer, cached across users.
+
+    The catalog is the same for everyone (only the key used to read it is the
+    user's), yet every dashboard load asks for MOST_POPULAR, so an uncached
+    read spends one upstream request per load per user against a budget of 15
+    per minute. Cached 5 min in the shared cache, with a 24 h last-good so a
+    rate-limit block serves the previous list instead of a 502.
+
+    Returns ``(assets, stale)``. Raises ``WallbitError`` only when Wallbit
+    failed and there is nothing cached to fall back on.
+    """
+    live_key = _catalog_key("live", query, category, limit)
+    cached = _cache_get(live_key)
+    if cached is not None:
+        return list(cached), False
+
+    params: dict[str, Any] = {"page": 1, "limit": limit}
+    if query:
+        params["search"] = query
+    if category:
+        params["category"] = category
+
+    lastgood_key = _catalog_key("lastgood", query, category, limit)
+    try:
+        with WallbitClient(
+            decrypt_api_key(account.encrypted_api_key), retry_rate_limited=False
+        ) as client:
+            payload = client.get("/assets", params=params).data or {}
+    except WallbitError as exc:
+        last_good = _cache_get(lastgood_key)
+        if last_good is None:
+            raise
+        logger.warning("asset catalog fetch failed (%s); serving last-good", exc)
+        return list(last_good), True
+
+    items = payload.get("data") if isinstance(payload, dict) else payload
+    assets = [item for item in (items or []) if isinstance(item, dict)]
+    _cache_set(live_key, assets, _ASSET_CATALOG_TTL)
+    _cache_set(lastgood_key, assets, _ASSET_CATALOG_LASTGOOD_TTL)
+    return assets, False

@@ -10,6 +10,11 @@ fast on 429 and serve last-good marked stale, (3) stay away from Wallbit
 during the cooldown, (4) single-flight concurrent callers, and (5) refuse to
 report an empty portfolio when there is nothing to serve.
 
+Also covers the asset catalog (shared across users, so it must not cost a
+request per dashboard load) and the client's Retry-After policy: short waits
+are honored, but the hour-long Cloudflare block (`Retry-After: 3600`) is
+raised instead of retried, since knocking inside the window renews it.
+
     python -m wallbit.tests.test_portfolio_snapshot_smoke
 """
 
@@ -65,6 +70,10 @@ _ASSETS = {
     "NVDA": {"data": {"symbol": "NVDA", "name": "NVIDIA", "type": "STOCK", "price": "180.0"}},
     "SPCX": {"data": {"symbol": "SPCX", "name": "SpaceX", "type": "STOCK", "price": "50.0"}},
 }
+_CATALOG = {"data": [
+    {"symbol": "NVDA", "name": "NVIDIA", "price": "180.0"},
+    {"symbol": "META", "name": "Meta Platforms", "price": "600.0"},
+]}
 
 
 class _FakeClient:
@@ -101,6 +110,8 @@ class _FakeClient:
             return SimpleNamespace(data=_CHECKING)
         if path.startswith("/assets/"):
             return SimpleNamespace(data=_ASSETS[path.rsplit("/", 1)[1]])
+        if path == "/assets":
+            return SimpleNamespace(data=_CATALOG)
         raise AssertionError(f"unexpected path {path}")
 
     @classmethod
@@ -265,7 +276,7 @@ def _test_client_rate_limit_policy():
         _expect(False, "should have raised WallbitRateLimitError")
     _expect(len(seen) == 1, f"exactly one request (got {len(seen)})")
 
-    print("\n[client] default policy still retries a 429 up to max_attempts")
+    print("\n[client] background policy waits out a short Retry-After and retries")
     seen.clear()
     slept: list[float] = []
     client_mod.time.sleep = lambda s: slept.append(s)  # type: ignore[assignment]
@@ -273,12 +284,86 @@ def _test_client_rate_limit_policy():
     c2._client = httpx.Client(base_url="https://wallbit.test", transport=httpx.MockTransport(handler))
     _expect_raises(lambda: c2.get("/balance/stocks"), WallbitRateLimitError, "raises after retries")
     _expect(len(seen) == 3, f"three attempts (got {len(seen)})")
-    _expect(len(slept) == 2 and all(s <= client_mod.BACKOFF_CAP for s in slept), "slept between attempts, capped")
+    _expect(slept == [60.0, 60.0], f"slept the Retry-After it was given (got {slept})")
+
+    # The one that blanked the dashboard: Wallbit's Cloudflare rule answers
+    # `Retry-After: 3600`, and the old client capped the sleep at 8 s and kept
+    # knocking — every knock inside the window renewed the hour-long block.
+    print("\n[client] a Retry-After longer than we can wait is not retried at all")
+    seen.clear()
+    slept.clear()
+
+    def blocked(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        return httpx.Response(429, headers={"Retry-After": "3600"}, text="error code: 1015")
+
+    c3 = WallbitClient("k", base_url="https://wallbit.test", max_attempts=4)
+    c3._client = httpx.Client(base_url="https://wallbit.test", transport=httpx.MockTransport(blocked))
+    try:
+        c3.get("/balance/stocks")
+    except WallbitRateLimitError as exc:
+        _expect(exc.retry_after == 3600.0, "retry_after carries the full hour to the caller")
+    else:
+        _expect(False, "should have raised WallbitRateLimitError")
+    _expect(len(seen) == 1, f"exactly one request, no knocking (got {len(seen)})")
+    _expect(slept == [], f"never slept (got {slept})")
+
+
+def _test_asset_catalog():
+    """The explorer's catalog is shared across users, so it must not spend one
+    upstream request per dashboard load, and a block must show the last list
+    instead of a 502."""
+    from django.core.cache.backends.locmem import LocMemCache
+
+    from wallbit import portfolio
+    from wallbit.client import WallbitRateLimitError
+    from wallbit.portfolio import get_asset_catalog
+
+    shared = LocMemCache("wb-catalog-test", {})
+    shared.clear()
+    portfolio._cache = lambda: shared  # type: ignore[assignment]
+    portfolio.WallbitClient = _FakeClient  # type: ignore[assignment]
+    portfolio.decrypt_api_key = lambda token: "plain-key"  # type: ignore[assignment]
+
+    acct = _account(7)
+
+    print("\n[catalog] first read hits Wallbit once, second is served from cache")
+    _FakeClient.reset()
+    assets, stale = get_asset_catalog(acct, category="MOST_POPULAR", limit=6)
+    _expect([a["symbol"] for a in assets] == ["NVDA", "META"], "catalog unwrapped from {data: …}")
+    _expect(not stale, "fresh catalog is not stale")
+    _expect(_FakeClient.calls == ["/assets"], f"one upstream call (got {_FakeClient.calls})")
+
+    _FakeClient.reset()
+    again, stale = get_asset_catalog(acct, category="MOST_POPULAR", limit=6)
+    _expect(_FakeClient.calls == [], f"cache hit spends nothing upstream (got {_FakeClient.calls})")
+    _expect(again == assets and not stale, "same list, still fresh")
+
+    print("\n[catalog] a different query is cached apart")
+    _FakeClient.reset()
+    get_asset_catalog(acct, query="nvda", limit=6)
+    _expect(_FakeClient.calls == ["/assets"], "another query fetches on its own")
+
+    print("\n[catalog] rate-limited with a last-good → serves it stale instead of 502")
+    shared.delete(portfolio._catalog_key("live", "", "MOST_POPULAR", 6))
+    _FakeClient.reset("rate_limited")
+    blocked, stale = get_asset_catalog(acct, category="MOST_POPULAR", limit=6)
+    _expect(stale and [a["symbol"] for a in blocked] == ["NVDA", "META"], "last-good served, marked stale")
+
+    print("\n[catalog] rate-limited with nothing cached → raises so the view can 502")
+    shared.clear()
+    _FakeClient.reset("rate_limited")
+    _expect_raises(
+        lambda: get_asset_catalog(acct, category="MOST_POPULAR", limit=6),
+        WallbitRateLimitError,
+        "raises when there is nothing to serve",
+    )
 
 
 def main() -> int:
     _setup()
     _test_snapshot()
+    _test_asset_catalog()
     _test_client_rate_limit_policy()
     print()
     if failures:

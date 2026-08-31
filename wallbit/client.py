@@ -23,6 +23,14 @@ DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
 MAX_ATTEMPTS = 4
 BACKOFF_BASE = 0.5
 BACKOFF_CAP = 8.0
+# Longest ``Retry-After`` we are willing to sleep through inside a retry. Above
+# it we stop retrying and raise, because the block is not a burst we can wait
+# out: Wallbit sits behind a Cloudflare rate-limit rule that answers with error
+# 1015 and ``Retry-After: 3600``, and every request sent inside that window
+# keeps it open. Measured 2026-08-31; the docs still advertise 60 req/min and a
+# 30 s retry, the API caps at ``X-RateLimit-Limit: 15`` and punishes with an
+# hour. The block is per egress IP, not per API key.
+RETRY_AFTER_MAX_SLEEP = 120.0
 
 
 class WallbitError(Exception):
@@ -182,8 +190,11 @@ class WallbitClient:
             )
 
             if response.status_code == 429 and self._retry_rate_limited and attempt < max_attempts:
-                self._sleep_for_retry_after(response, attempt)
-                continue
+                if self._sleep_for_retry_after(response, attempt):
+                    continue
+                # Retry-After longer than we can sit on: fall through and raise
+                # so the caller sees the block (and its retry_after) instead of
+                # spending the remaining attempts renewing it.
 
             if 500 <= response.status_code < 600 and attempt < max_attempts:
                 self._sleep_backoff(attempt)
@@ -198,16 +209,25 @@ class WallbitClient:
         delay += random.uniform(0, BACKOFF_BASE)
         time.sleep(delay)
 
-    def _sleep_for_retry_after(self, response: httpx.Response, attempt: int) -> None:
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = BACKOFF_BASE * (2 ** (attempt - 1))
-            time.sleep(min(delay, BACKOFF_CAP))
-            return
-        self._sleep_backoff(attempt)
+    def _sleep_for_retry_after(self, response: httpx.Response, attempt: int) -> bool:
+        """Sleep the upstream ``Retry-After``. Returns whether to retry at all.
+
+        A ``Retry-After`` above ``RETRY_AFTER_MAX_SLEEP`` means we are inside a
+        long block, not a burst: sleeping a capped 8 s and retrying anyway (what
+        this did before) both stalls the caller and keeps the window open.
+        Answer False there so ``_request`` gives up and raises.
+        """
+        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+        if retry_after is None:
+            self._sleep_backoff(attempt)
+            return True
+        if retry_after > RETRY_AFTER_MAX_SLEEP:
+            logger.warning(
+                "wallbit rate-limited with Retry-After %.0fs; not retrying", retry_after
+            )
+            return False
+        time.sleep(retry_after)
+        return True
 
     def _build_response(self, response: httpx.Response, rate_limit: RateLimitState) -> WallbitResponse:
         payload: Any

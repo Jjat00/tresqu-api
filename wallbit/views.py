@@ -14,11 +14,12 @@ from .client import (
     WallbitError,
     WallbitPermissionError,
 )
-from .crypto import decrypt_api_key, encrypt_api_key
+from .crypto import encrypt_api_key
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
 from .portfolio import (
     WallbitUnavailableError,
+    get_asset_catalog,
     get_holdings,
     get_pnl_timeline,
     get_summary,
@@ -506,17 +507,11 @@ class AssetSearchView(APIView):
             limit = 12
         limit = max(1, min(limit, 50))
 
-        params = {"page": 1, "limit": limit}
-        if query:
-            params["search"] = query
-        if category:
-            params["category"] = category
-
         try:
             account = get_account_or_raise(request.user)
-            api_key = decrypt_api_key(account.encrypted_api_key)
-            with WallbitClient(api_key) as client:
-                response = client.get("/assets", params=params)
+            items, stale = get_asset_catalog(
+                account, query=query, category=category, limit=limit
+            )
         except AccountNotConnected:
             return Response(
                 {"detail": "Wallbit not connected", "connected": False},
@@ -529,7 +524,5 @@ class AssetSearchView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        payload = response.data or {}
-        items = payload.get("data", payload if isinstance(payload, list) else [])
-        assets = [_normalize_asset(a) for a in items if isinstance(a, dict)]
-        return Response({"assets": assets})
+        assets = [_normalize_asset(a) for a in items]
+        return Response({"assets": assets, "stale": stale})
