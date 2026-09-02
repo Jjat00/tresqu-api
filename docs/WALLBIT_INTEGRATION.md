@@ -169,6 +169,16 @@ Para las 5 tools que escriben (`place_trade`, `move_funds`, `deposit_chest`, `wi
 5. User tap "Confirmar" → callback handler ejecuta la tool con `confirmed=True` usando el `AgentDecision.id` como referencia
 6. Tool ejecuta contra Wallbit API, actualiza `AgentDecision(executed=True, wallbit_tx_uuid=...)`
 
+### 7.1 Escrituras: un solo intento, estado incierto y conciliación (desde 2026-09-02)
+
+Incidente: `POST /trades` tardó más de 15 s (Wallbit responde después del fill), el cliente lo reintentó 4 veces y una compra de 20 USD se ejecutó cuatro veces. Reglas que lo hacen imposible ahora:
+
+- **`WallbitClient` solo reintenta métodos idempotentes** (GET). POST/PATCH/DELETE tienen exactamente un intento, con timeout de lectura de 60 s. Un timeout o un 5xx en una escritura lanza `WallbitUncertainError`: *pudo* haberse aplicado.
+- **Una confirmación = un POST.** `execute_place_trade` ya no reintenta como LIMIT ni hace ningún segundo envío. Las órdenes LIMIT se dimensionan en `shares` (Wallbit lo exige), redondeadas hacia abajo.
+- **`AgentDecision.status`** manda el ciclo: `pending → executing → executed | failed | cancelled | uncertain`. Solo `pending` es confirmable y la transición a `executing` se toma con `SELECT … FOR UPDATE` (`claim_pending_decision`), así que una reentrega de webhook o un doble toque nunca ejecutan dos veces. Una decisión fallida **no** vuelve a ser confirmable.
+- **`uncertain` se concilia, no se reenvía.** `reconcile_uncertain_decision` sincroniza el mirror y busca la transacción (símbolo, monto ±2 %, ventana de 3 min, no vinculada a otra decisión); la enlaza como `executed` o, tras 4 intentos, marca `failed`, y avisa al usuario por su canal (`wallbit/notify.py`). El chat responde «verificando», nunca «rechazada», mientras dura.
+- El sync del mirror se dispara tras **cada** intento contra Wallbit, no solo tras un éxito, y `get_holdings`/`get_summary` cargan a break-even las acciones vivas que los trades sincronizados aún no explican (`cost_pending`), para no inventar ganancias entre el fill y el sync.
+
 ---
 
 ## 8. Endpoints REST (actualizado a lo implementado — fuente: `wallbit/urls.py`)
