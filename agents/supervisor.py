@@ -18,7 +18,7 @@ from langchain_openai import ChatOpenAI
 
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from users.models import User
-from whatsappbot.wallbit_handlers import extract_pending_confirmation
+from whatsappbot.wallbit_handlers import extract_pending_confirmations
 
 from . import risk_profiler_service
 from .subagents.analyst import build_analyst_subagent
@@ -247,7 +247,10 @@ def build_supervisor(
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
     analyst_agent = build_analyst_subagent(user)
 
-    pending_container: dict[str, dict | None] = {"confirmation": None}
+    # ``confirmation`` keeps the latest proposal (legacy readers);
+    # ``confirmations`` accumulates EVERY proposal of the turn, in order, so
+    # each one gets its own confirm/cancel buttons.
+    pending_container: dict[str, Any] = {"confirmation": None, "confirmations": []}
     # When the supervisor decides to start the risk profiler, it sets this flag
     # so the outer ``process_message`` knows to surface the first question
     # instead of the supervisor's recap (which would otherwise wrap it in chatter).
@@ -292,8 +295,11 @@ def build_supervisor(
                 {"messages": [{"role": "user", "content": instruction}]},
                 config={"recursion_limit": 20},
             )
-            pending = extract_pending_confirmation(result["messages"])
-            if pending:
+            for pending in extract_pending_confirmations(result["messages"]):
+                known = {p.get("confirmation_id") for p in pending_container["confirmations"]}
+                if pending.get("confirmation_id") in known:
+                    continue
+                pending_container["confirmations"].append(pending)
                 pending_container["confirmation"] = pending
             return result["messages"][-1].content or ""
         except Exception as exc:

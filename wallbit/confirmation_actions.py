@@ -52,18 +52,36 @@ def _coerce_payload(content: Any) -> Any:
     return None
 
 
-def extract_pending_confirmation(messages: list[Any]) -> dict[str, Any] | None:
-    """Return the latest tool result that requires confirmation, if any."""
-    for msg in reversed(messages):
+def extract_pending_confirmations(messages: list[Any]) -> list[dict[str, Any]]:
+    """Every tool result that requires confirmation, oldest first, one per decision.
+
+    A single turn can propose several writes ("compra 20 USD en Google y 20 en
+    Meta" → two decisions). Each one needs its own buttons: on 2026-09-02 only
+    the last proposal got buttons and the other was silently dropped.
+    """
+    found: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for msg in messages:
         if msg.__class__.__name__ != "ToolMessage":
             continue
         raw = getattr(msg, "content", None)
         if not raw:
             continue
         payload = _coerce_payload(raw)
-        if isinstance(payload, dict) and payload.get("requires_confirmation"):
-            return payload
-    return None
+        if not (isinstance(payload, dict) and payload.get("requires_confirmation")):
+            continue
+        key = payload.get("confirmation_id")
+        if key is not None and key in seen:
+            continue
+        seen.add(key)
+        found.append(payload)
+    return found
+
+
+def extract_pending_confirmation(messages: list[Any]) -> dict[str, Any] | None:
+    """Return the latest tool result that requires confirmation, if any."""
+    pending = extract_pending_confirmations(messages)
+    return pending[-1] if pending else None
 
 
 def summary_text(preview: dict[str, Any], two_step: bool) -> str:
@@ -163,6 +181,7 @@ __all__ = [
     "CANCEL_PREFIX",
     "CONFIRM_PREFIX",
     "UNCERTAIN_REPLY",
+    "extract_pending_confirmations",
     "cancel_pending_decision",
     "execute_confirmed_decision",
     "extract_pending_confirmation",

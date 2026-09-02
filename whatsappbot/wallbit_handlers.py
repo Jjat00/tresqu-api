@@ -19,6 +19,7 @@ from wallbit.confirmation_actions import (
     CANCEL_PREFIX,
     CONFIRM_PREFIX,
     extract_pending_confirmation,
+    extract_pending_confirmations,
     handle_button_press,
     summary_text,
 )
@@ -98,6 +99,7 @@ __all__ = [
     "CANCEL_PREFIX",
     "CONFIRM_PREFIX",
     "extract_pending_confirmation",
+    "extract_pending_confirmations",
     "handle_button_press",
     "handle_button_press_for_user",
     "send_confirmation_buttons",

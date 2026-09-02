@@ -831,17 +831,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         # Si la herramienta devolvió un preview pendiente de confirmación
         # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
         # justo después del recap textual.
-        pending = response.pending_confirmation
-        if pending:
+        pendings = response.pending_confirmations or (
+            [response.pending_confirmation] if response.pending_confirmation else []
+        )
+        if pendings:
             try:
                 from .wallbit_handlers import send_confirmation_buttons
-                await send_confirmation_buttons(
-                    bot=context.bot,
-                    chat_id=update.effective_chat.id,
-                    decision_id=pending["confirmation_id"],
-                    preview=pending.get("preview", {}),
-                    two_step=pending.get("two_step_required", False),
-                )
+                # One keyboard per proposed operation.
+                for pending in pendings:
+                    await send_confirmation_buttons(
+                        bot=context.bot,
+                        chat_id=update.effective_chat.id,
+                        decision_id=pending["confirmation_id"],
+                        preview=pending.get("preview", {}),
+                        two_step=pending.get("two_step_required", False),
+                    )
             except Exception as exc:
                 logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
 
@@ -1277,7 +1281,10 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                             pass
                         return
                     response_text = agent_response.text
-                    pending = agent_response.pending_confirmation
+                    pending = agent_response.pending_confirmations or (
+                        [agent_response.pending_confirmation]
+                        if agent_response.pending_confirmation else []
+                    )
                 else:
                     response_text = "Lo siento, no pude entender el audio. Por favor, intenta de nuevo con un mensaje de texto o un audio más claro."
             except Exception as e:
@@ -1295,13 +1302,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
             if pending:
                 try:
                     from .wallbit_handlers import send_confirmation_buttons
-                    await send_confirmation_buttons(
-                        bot=context.bot,
-                        chat_id=update.effective_chat.id,
-                        decision_id=pending["confirmation_id"],
-                        preview=pending.get("preview", {}),
-                        two_step=pending.get("two_step_required", False),
-                    )
+                    for item in pending:
+                        await send_confirmation_buttons(
+                            bot=context.bot,
+                            chat_id=update.effective_chat.id,
+                            decision_id=item["confirmation_id"],
+                            preview=item.get("preview", {}),
+                            two_step=item.get("two_step_required", False),
+                        )
                 except Exception as exc:
                     logger.exception(f"send_confirmation_buttons (telegram voice) failed: {exc}")
 
