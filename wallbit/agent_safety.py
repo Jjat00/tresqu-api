@@ -183,20 +183,58 @@ def create_pending_decision(
     )
 
 
-def get_pending_decision(user: User, decision_id: int) -> AgentDecision:
-    return AgentDecision.objects.get(
+def _pending_qs(user: User, decision_id: int):
+    """Decisions that can still be acted on: never confirmed, never resolved.
+
+    ``confirmed_at__isnull=True`` and ``status=PENDING`` are both required. Before
+    2026-09-02 the filter was only ``executed=False``, so a decision whose
+    execution had FAILED (or been cancelled) stayed confirmable: tapping the old
+    "Confirmar" button in the chat placed the order again.
+    """
+    return AgentDecision.objects.filter(
         id=decision_id,
         user=user,
         requires_confirmation=True,
         executed=False,
+        confirmed_at__isnull=True,
+        status=AgentDecision.PENDING,
     )
+
+
+def get_pending_decision(user: User, decision_id: int) -> AgentDecision:
+    return _pending_qs(user, decision_id).get()
+
+
+@transaction.atomic
+def claim_pending_decision(user: User, decision_id: int) -> AgentDecision:
+    """Atomically take a PENDING decision into EXECUTING.
+
+    Row-locked (``SELECT ... FOR UPDATE``): with two concurrent confirmations
+    (Meta redelivering a webhook, a Celery redelivery after a lost worker, a
+    double tap) the second one waits for the lock, re-evaluates the filter on
+    the updated row and gets ``AgentDecision.DoesNotExist``. Exactly one
+    caller ever reaches Wallbit for a given decision.
+    """
+    decision = _pending_qs(user, decision_id).select_for_update().get()
+    decision.status = AgentDecision.EXECUTING
+    decision.confirmed_at = timezone.now()
+    decision.save(update_fields=["status", "confirmed_at"])
+    return decision
+
+
+def _stamp_confirmed(decision: AgentDecision, fields: list[str]) -> None:
+    if decision.confirmed_at is None:
+        decision.confirmed_at = timezone.now()
+        fields.append("confirmed_at")
 
 
 @transaction.atomic
 def mark_executed(decision: AgentDecision, *, wallbit_tx_uuid: str = "") -> None:
     decision.executed = True
-    decision.confirmed_at = timezone.now()
-    fields = ["executed", "confirmed_at"]
+    decision.status = AgentDecision.EXECUTED
+    decision.error = ""
+    fields = ["executed", "status", "error"]
+    _stamp_confirmed(decision, fields)
     if wallbit_tx_uuid:
         decision.wallbit_tx_uuid = wallbit_tx_uuid
         fields.append("wallbit_tx_uuid")
@@ -205,9 +243,36 @@ def mark_executed(decision: AgentDecision, *, wallbit_tx_uuid: str = "") -> None
 
 @transaction.atomic
 def mark_failed(decision: AgentDecision, *, error: str) -> None:
+    """Definitive failure: Wallbit rejected it (4xx) or a pre-flight check did."""
     decision.error = (error or "")[:8000]
-    decision.confirmed_at = timezone.now()
-    decision.save(update_fields=["error", "confirmed_at"])
+    decision.status = AgentDecision.FAILED
+    fields = ["error", "status"]
+    _stamp_confirmed(decision, fields)
+    decision.save(update_fields=fields)
+
+
+@transaction.atomic
+def mark_cancelled(decision: AgentDecision) -> None:
+    decision.error = "cancelled_by_user"
+    decision.status = AgentDecision.CANCELLED
+    fields = ["error", "status"]
+    _stamp_confirmed(decision, fields)
+    decision.save(update_fields=fields)
+
+
+@transaction.atomic
+def mark_uncertain(decision: AgentDecision, *, error: str) -> None:
+    """The write reached (or may have reached) Wallbit and we got no answer.
+
+    The decision is NOT re-executable and NOT failed: ``executed`` stays False
+    until ``wallbit.tasks.reconcile_uncertain_decision`` finds (or rules out)
+    the transaction in Wallbit's history.
+    """
+    decision.error = (error or "")[:8000]
+    decision.status = AgentDecision.UNCERTAIN
+    fields = ["error", "status"]
+    _stamp_confirmed(decision, fields)
+    decision.save(update_fields=fields)
 
 
 # --------------------------------------------------------------------------- #

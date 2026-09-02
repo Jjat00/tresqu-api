@@ -6,7 +6,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .agent_safety import AccountNotConnected, get_account_or_raise, get_pending_decision
+from .agent_safety import (
+    AccountNotConnected,
+    claim_pending_decision,
+    get_account_or_raise,
+    get_pending_decision,
+    mark_failed,
+)
 from .confirmation_actions import cancel_pending_decision
 from .client import (
     WallbitAuthError,
@@ -227,17 +233,20 @@ class AgentConfirmView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, decision_id: int):
+        # Row-locked claim: a concurrent confirm of the same decision gets 404
+        # here and never reaches Wallbit (see agent_safety.claim_pending_decision).
         try:
-            decision = get_pending_decision(request.user, decision_id)
+            decision = claim_pending_decision(request.user, decision_id)
         except AgentDecision.DoesNotExist:
             return Response(
-                {"detail": "Decision not found or already resolved."},
+                {"detail": "Decision not found, in progress or already resolved."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         try:
             account = get_account_or_raise(request.user)
         except Exception as exc:
+            mark_failed(decision, error=str(exc))
             return Response(
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
@@ -249,6 +258,7 @@ class AgentConfirmView(APIView):
             and account.kill_switch_until
             and account.kill_switch_until > timezone.now()
         ):
+            mark_failed(decision, error="kill_switch_active")
             return Response(
                 {"detail": "Kill switch active — cannot execute."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -257,17 +267,26 @@ class AgentConfirmView(APIView):
         try:
             result = execute_decision(decision, account)
         except UnknownTool as exc:
+            mark_failed(decision, error=str(exc))
             return Response(
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
 
         decision.refresh_from_db()
+        if result.get("ok"):
+            http_status = status.HTTP_200_OK
+        elif result.get("uncertain"):
+            # Wallbit gave no answer: the order may have filled. Not an error
+            # and not a success — the decision is being reconciled.
+            http_status = status.HTTP_202_ACCEPTED
+        else:
+            http_status = status.HTTP_502_BAD_GATEWAY
         return Response(
             {
                 "result": result,
                 "decision": AgentDecisionSerializer(decision).data,
             },
-            status=status.HTTP_200_OK if result.get("ok") else status.HTTP_502_BAD_GATEWAY,
+            status=http_status,
         )
 
 

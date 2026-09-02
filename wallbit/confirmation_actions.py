@@ -26,8 +26,10 @@ from users.models import User
 
 from .agent_safety import (
     AccountNotConnected,
+    claim_pending_decision,
     get_account_or_raise,
     get_pending_decision,
+    mark_cancelled,
     mark_failed,
 )
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
@@ -94,11 +96,21 @@ def handle_button_press(button_id: str, user: User) -> str:
     return ""
 
 
+UNCERTAIN_REPLY = (
+    "⏳ Wallbit no confirmó la operación a tiempo. NO la reintenté, para no "
+    "duplicarla. Estoy verificando en tu historial de Wallbit si se ejecutó y "
+    "te aviso en un par de minutos. Mientras tanto no la vuelvas a pedir."
+)
+
+
 def execute_confirmed_decision(user: User, decision_id: int) -> str:
+    # Claim under a row lock: a second confirmation of the same decision (double
+    # tap, Meta redelivery, Celery redelivery) gets DoesNotExist and never
+    # reaches Wallbit.
     try:
-        decision = get_pending_decision(user, decision_id)
+        decision = claim_pending_decision(user, decision_id)
     except AgentDecision.DoesNotExist:
-        return "Esa operación ya fue resuelta o no existe."
+        return "Esa operación ya fue resuelta, está en proceso o no existe."
 
     try:
         account = get_account_or_raise(user)
@@ -129,6 +141,11 @@ def execute_confirmed_decision(user: User, decision_id: int) -> str:
         suffix = f"\n\n🧾 Tx: `{tx_uuid}`" if tx_uuid else ""
         return f"✅ Operación ejecutada en Wallbit.{suffix}"
 
+    if result.get("uncertain"):
+        # Never call this "rechazada": on 2026-09-02 four fills were reported
+        # as a rejection and the user kept re-ordering.
+        return UNCERTAIN_REPLY
+
     err = result.get("error") or "error desconocido"
     return f"❌ Wallbit rechazó la operación: {err}"
 
@@ -138,13 +155,14 @@ def cancel_pending_decision(user: User, decision_id: int) -> str:
         decision = get_pending_decision(user, decision_id)
     except AgentDecision.DoesNotExist:
         return "Esa operación ya fue resuelta o no existe."
-    mark_failed(decision, error="cancelled_by_user")
+    mark_cancelled(decision)
     return "🚫 Operación cancelada."
 
 
 __all__ = [
     "CANCEL_PREFIX",
     "CONFIRM_PREFIX",
+    "UNCERTAIN_REPLY",
     "cancel_pending_decision",
     "execute_confirmed_decision",
     "extract_pending_confirmation",
