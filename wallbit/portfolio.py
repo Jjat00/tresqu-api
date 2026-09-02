@@ -432,23 +432,47 @@ class PnLTimelinePoint:
     invested_total_usd: Decimal
 
 
-def _cost_basis_for_symbol(user: User, symbol: str) -> tuple[Decimal, Decimal]:
-    """Return (net_shares, net_cost) for a STOCK/ETF/BOND symbol.
+def _cost_basis_for_symbol(user: User, symbol: str) -> tuple[Decimal, Decimal, int]:
+    """Return (net_shares, net_cost, n_trades) for a STOCK/ETF/BOND symbol.
 
     BUY contributes +shares / +amount_usd; SELL contributes -shares / -amount_usd.
-    Average cost = net_cost / net_shares (when shares > 0).
+    Average cost = net_cost / net_shares (when shares > 0). ``n_trades`` is the
+    number of settled rows, used to size the share-rounding tolerance.
     """
     qs = Investment.objects.filter(user=user, symbol__iexact=symbol).filter(
         _settled_q()
     ).only("action", "amount_usd", "shares")
     net_shares = Decimal(0)
     net_cost = Decimal(0)
+    n_trades = 0
     for inv in qs:
         sign = 1 if inv.action == Investment.BUY else -1
         if inv.shares is not None:
             net_shares += Decimal(sign) * inv.shares
         net_cost += Decimal(sign) * inv.amount_usd
-    return net_shares, net_cost
+        n_trades += 1
+    return net_shares, net_cost, n_trades
+
+
+# Wallbit's /transactions reports filled shares rounded to 2 decimals, so the
+# synced share count legitimately trails the live balance by up to 0.01 per
+# trade. Anything beyond that is stock we hold but have NO cost for yet: a fill
+# the mirror hasn't synced — including one the agent believed had failed
+# (2026-09-02: 4 unsynced SPCX fills made 233 USD of cost look like the cost of
+# 2.06 shares, i.e. a phantom +57 USD gain on a position that was losing 23).
+_SHARE_ROUNDING_PER_TRADE = Decimal("0.01")
+
+
+def _untracked_shares(live_shares: Decimal, net_shares: Decimal, n_trades: int) -> Decimal:
+    """Live shares we hold beyond what settled trades account for, or 0.
+
+    Differences inside the per-trade rounding tolerance are treated as noise;
+    larger ones are untracked stock to be carried at break-even (cost = value)
+    and flagged ``cost_pending`` until the sync lands their real cost.
+    """
+    tolerance = _SHARE_ROUNDING_PER_TRADE * max(n_trades, 1) + Decimal("0.001")
+    extra = live_shares - max(net_shares, Decimal(0))
+    return extra if extra > tolerance else Decimal(0)
 
 
 def get_holdings(user: User) -> list[Holding]:
@@ -468,11 +492,15 @@ def get_holdings(user: User) -> list[Holding]:
         kind = (asset.get("type") or asset.get("kind") or "").upper()
         name = asset.get("name") or asset.get("description") or ""
 
-        net_shares, net_cost = _cost_basis_for_symbol(user, symbol)
+        net_shares, net_cost, n_trades = _cost_basis_for_symbol(user, symbol)
         # Prefer Wallbit's reported shares; fall back to what we computed
         effective_shares = shares if shares > 0 else max(net_shares, Decimal(0))
         market_value = current_price * effective_shares
-        if net_cost > 0:
+        untracked = (
+            _untracked_shares(effective_shares, net_shares, n_trades)
+            if net_cost > 0 else Decimal(0)
+        )
+        if net_cost > 0 and untracked == 0:
             # Cost basis = the real USD put into the position (net_cost). We
             # use it directly instead of avg_cost * shares: amount_usd is
             # recorded exactly, while the stored share counts may have been
@@ -483,6 +511,16 @@ def get_holdings(user: User) -> list[Holding]:
             pnl_usd = market_value - cost_basis
             pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
             cost_pending = False
+        elif net_cost > 0:
+            # Partial cost: we know the cost of ``net_shares`` but hold more.
+            # Dividing the known cost by ALL the live shares would understate
+            # the average and invent a gain, so the untracked shares are carried
+            # at break-even and the row is flagged until the sync catches up.
+            cost_basis = net_cost + untracked * current_price
+            avg_cost = net_cost / net_shares if net_shares > 0 else Decimal(0)
+            pnl_usd = market_value - cost_basis
+            pnl_pct = float(pnl_usd / cost_basis * 100) if cost_basis > 0 else 0.0
+            cost_pending = True
         else:
             # We hold shares (live balance) but have NO settled cost for them
             # yet — typically a buy made in the Wallbit app that hasn't synced
@@ -579,9 +617,13 @@ def get_summary(user: User) -> PortfolioSummary:
         market_value = price * shares
         current_value += market_value
         holdings_count += 1
-        _, net_cost = _cost_basis_for_symbol(user, symbol)
+        net_shares, net_cost, n_trades = _cost_basis_for_symbol(user, symbol)
         if net_cost <= 0:
             untracked_cost += market_value
+        else:
+            # Same partial-cost rule as get_holdings: shares beyond what settled
+            # trades explain are carried at break-even, not as free gain.
+            untracked_cost += _untracked_shares(shares, net_shares, n_trades) * price
 
     # Fold the break-even placeholder for untracked holdings into invested so the
     # three hero cards stay coherent (net = bruto − retirado, pnl = value − net)

@@ -46,6 +46,7 @@ class AgentDecisionSerializer(serializers.ModelSerializer):
             "requires_confirmation",
             "confirmed_at",
             "executed",
+            "status",
             "wallbit_tx_uuid",
             "error",
             "created_at",

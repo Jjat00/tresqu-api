@@ -26,8 +26,10 @@ from users.models import User
 
 from .agent_safety import (
     AccountNotConnected,
+    claim_pending_decision,
     get_account_or_raise,
     get_pending_decision,
+    mark_cancelled,
     mark_failed,
 )
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
@@ -50,18 +52,36 @@ def _coerce_payload(content: Any) -> Any:
     return None
 
 
-def extract_pending_confirmation(messages: list[Any]) -> dict[str, Any] | None:
-    """Return the latest tool result that requires confirmation, if any."""
-    for msg in reversed(messages):
+def extract_pending_confirmations(messages: list[Any]) -> list[dict[str, Any]]:
+    """Every tool result that requires confirmation, oldest first, one per decision.
+
+    A single turn can propose several writes ("compra 20 USD en Google y 20 en
+    Meta" → two decisions). Each one needs its own buttons: on 2026-09-02 only
+    the last proposal got buttons and the other was silently dropped.
+    """
+    found: list[dict[str, Any]] = []
+    seen: set[Any] = set()
+    for msg in messages:
         if msg.__class__.__name__ != "ToolMessage":
             continue
         raw = getattr(msg, "content", None)
         if not raw:
             continue
         payload = _coerce_payload(raw)
-        if isinstance(payload, dict) and payload.get("requires_confirmation"):
-            return payload
-    return None
+        if not (isinstance(payload, dict) and payload.get("requires_confirmation")):
+            continue
+        key = payload.get("confirmation_id")
+        if key is not None and key in seen:
+            continue
+        seen.add(key)
+        found.append(payload)
+    return found
+
+
+def extract_pending_confirmation(messages: list[Any]) -> dict[str, Any] | None:
+    """Return the latest tool result that requires confirmation, if any."""
+    pending = extract_pending_confirmations(messages)
+    return pending[-1] if pending else None
 
 
 def summary_text(preview: dict[str, Any], two_step: bool) -> str:
@@ -94,11 +114,21 @@ def handle_button_press(button_id: str, user: User) -> str:
     return ""
 
 
+UNCERTAIN_REPLY = (
+    "⏳ Wallbit no confirmó la operación a tiempo. NO la reintenté, para no "
+    "duplicarla. Estoy verificando en tu historial de Wallbit si se ejecutó y "
+    "te aviso en un par de minutos. Mientras tanto no la vuelvas a pedir."
+)
+
+
 def execute_confirmed_decision(user: User, decision_id: int) -> str:
+    # Claim under a row lock: a second confirmation of the same decision (double
+    # tap, Meta redelivery, Celery redelivery) gets DoesNotExist and never
+    # reaches Wallbit.
     try:
-        decision = get_pending_decision(user, decision_id)
+        decision = claim_pending_decision(user, decision_id)
     except AgentDecision.DoesNotExist:
-        return "Esa operación ya fue resuelta o no existe."
+        return "Esa operación ya fue resuelta, está en proceso o no existe."
 
     try:
         account = get_account_or_raise(user)
@@ -129,6 +159,11 @@ def execute_confirmed_decision(user: User, decision_id: int) -> str:
         suffix = f"\n\n🧾 Tx: `{tx_uuid}`" if tx_uuid else ""
         return f"✅ Operación ejecutada en Wallbit.{suffix}"
 
+    if result.get("uncertain"):
+        # Never call this "rechazada": on 2026-09-02 four fills were reported
+        # as a rejection and the user kept re-ordering.
+        return UNCERTAIN_REPLY
+
     err = result.get("error") or "error desconocido"
     return f"❌ Wallbit rechazó la operación: {err}"
 
@@ -138,13 +173,15 @@ def cancel_pending_decision(user: User, decision_id: int) -> str:
         decision = get_pending_decision(user, decision_id)
     except AgentDecision.DoesNotExist:
         return "Esa operación ya fue resuelta o no existe."
-    mark_failed(decision, error="cancelled_by_user")
+    mark_cancelled(decision)
     return "🚫 Operación cancelada."
 
 
 __all__ = [
     "CANCEL_PREFIX",
     "CONFIRM_PREFIX",
+    "UNCERTAIN_REPLY",
+    "extract_pending_confirmations",
     "cancel_pending_decision",
     "execute_confirmed_decision",
     "extract_pending_confirmation",

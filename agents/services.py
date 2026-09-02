@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytz
@@ -25,7 +25,7 @@ from categories.utils import (
 )
 from telegrambot.config import AGENT_MAX_ITERATIONS, AGENT_EXECUTION_TIMEOUT, ERROR_MESSAGES
 from users.models import User
-from whatsappbot.wallbit_handlers import extract_pending_confirmation
+from whatsappbot.wallbit_handlers import extract_pending_confirmations
 
 from . import relevance_guard, risk_profiler_service
 from .conversation_memory import get_semantic_context
@@ -51,6 +51,9 @@ class AgentResponse:
 
     text: str
     pending_confirmation: dict[str, Any] | None = None
+    # All proposals of the turn (oldest first). ``pending_confirmation`` is
+    # the last one, kept for readers that only handle one.
+    pending_confirmations: list[dict[str, Any]] = field(default_factory=list)
     silent: bool = False
 
 
@@ -267,7 +270,11 @@ async def _run_supervisor(
     if first_step and not first_step.get("done"):
         return AgentResponse(text=first_step.get("question") or text)
 
-    pending = pending_container.get("confirmation") or extract_pending_confirmation(
+    pendings = pending_container.get("confirmations") or extract_pending_confirmations(
         result["messages"]
     )
-    return AgentResponse(text=text, pending_confirmation=pending)
+    return AgentResponse(
+        text=text,
+        pending_confirmation=pendings[-1] if pendings else None,
+        pending_confirmations=list(pendings),
+    )

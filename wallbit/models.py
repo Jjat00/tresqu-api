@@ -167,6 +167,28 @@ class AgentDecision(models.Model):
     executed = models.BooleanField(default=False)
     wallbit_tx_uuid = models.CharField(max_length=64, null=True, blank=True)
     error = models.TextField(blank=True)
+    # Lifecycle. Only PENDING decisions can be confirmed, and the transition
+    # PENDING → EXECUTING is taken under a row lock (``claim_pending_decision``)
+    # so a duplicated webhook or a second tap can never execute twice.
+    # UNCERTAIN = the write to Wallbit got no answer; it is NOT retried, a
+    # reconciliation task settles it to EXECUTED or FAILED from /transactions.
+    PENDING = "pending"
+    EXECUTING = "executing"
+    EXECUTED = "executed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    UNCERTAIN = "uncertain"
+    STATUS_CHOICES = [
+        (PENDING, "Pending"),
+        (EXECUTING, "Executing"),
+        (EXECUTED, "Executed"),
+        (FAILED, "Failed"),
+        (CANCELLED, "Cancelled"),
+        (UNCERTAIN, "Uncertain"),
+    ]
+    status = models.CharField(
+        max_length=12, choices=STATUS_CHOICES, default=PENDING, db_index=True
+    )
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
