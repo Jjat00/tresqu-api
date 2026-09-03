@@ -26,6 +26,8 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from django.utils import timezone
+
 from users.models import User
 
 from .models import RiskAssessment, RiskProfile
@@ -221,6 +223,26 @@ def _combine(
     )
 
 
+def _mark_stale(eff: EffectiveProfile, inferred: RiskAssessment) -> EffectiveProfile:
+    """Flag that the inference backing this profile is past its TTL.
+
+    We prefer an old inference over telling the user they have no profile,
+    but the consumer (and the user) must know it wasn't recomputed recently.
+    """
+
+    if eff.inferred is None:
+        return eff
+    age_days = max(0, (timezone.now() - inferred.created_at).days)
+    eff.inferred = {**eff.inferred, "stale": True, "age_days": age_days}
+    if eff.source in ("inferred", "safety_cap", "agreement"):
+        note = (
+            f"Este perfil se infirió hace {age_days} días a partir de tu actividad "
+            "y puede estar desactualizado; se recalculará pronto."
+        )
+        eff.warning = f"{eff.warning} {note}" if eff.warning else note
+    return eff
+
+
 def _sync_profile_row(user: User, eff: EffectiveProfile, inferred_dimensions: dict[str, Any] | None) -> None:
     """Mirror the effective profile into ``RiskProfile`` for legacy readers.
 
@@ -228,7 +250,14 @@ def _sync_profile_row(user: User, eff: EffectiveProfile, inferred_dimensions: di
     directly. Keep that row aligned with the effective view so they see the
     same answer. Do not clobber ``dimensions`` if the user set them manually
     via the dashboard (``user_override``).
+
+    A ``default`` effective profile carries no information — it just means we
+    had nothing to read. Writing it would *downgrade* a real profile to a
+    generic moderate/50, so a read never persists that case.
     """
+
+    if eff.source == "default":
+        return
 
     profile = RiskProfile.objects.filter(user=user).first()
     if profile is None:
@@ -252,24 +281,35 @@ def get_effective_profile(
 
     By default this refreshes the auto-inference if the cached one is older
     than ``max_age_days``. Pass ``refresh_inference=False`` for read-only
-    paths (e.g. listing endpoints) where computing a new inference would be
-    surprising — those still get the latest cached inference if any exists.
+    paths (chat tools, safety gates) where recomputing inline would add
+    latency — those fall back to the latest inference *whatever its age*
+    rather than reporting no profile. Keeping it fresh is the job of
+    ``agents.tasks.refresh_stale_inferences``.
     """
 
     declared = _latest_declared(user)
+    stale = False
     if refresh_inference:
         try:
             inferred = get_or_create_inference(user, max_age_days=max_age_days)
         except Exception as exc:
             logger.exception("inference failed for user=%s: %s", user.id, exc)
-            inferred = latest_inference(user, max_age_days=max_age_days * 4)
+            inferred = latest_inference(user, max_age_days=None)
+            stale = inferred is not None
     else:
         inferred = latest_inference(user, max_age_days=max_age_days)
+        if inferred is None:
+            # Past its TTL is not the same as non-existent: an old inference
+            # still describes this user far better than the generic default.
+            inferred = latest_inference(user, max_age_days=None)
+            stale = inferred is not None
 
     profile = RiskProfile.objects.filter(user=user).first()
     user_override = bool(profile and profile.user_override)
 
     effective = _combine(declared, inferred, user_override=user_override)
+    if stale and inferred is not None:
+        effective = _mark_stale(effective, inferred)
     _sync_profile_row(
         user,
         effective,
