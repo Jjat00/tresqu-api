@@ -488,19 +488,23 @@ def _get_or_create_profile(user: User) -> RiskProfile:
     return profile
 
 
-def latest_inference(user: User, max_age_days: int = DEFAULT_MAX_AGE_DAYS) -> RiskAssessment | None:
-    """Return the most recent cached auto-inference if it's still fresh."""
+def latest_inference(
+    user: User, max_age_days: int | None = DEFAULT_MAX_AGE_DAYS
+) -> RiskAssessment | None:
+    """Return the most recent cached auto-inference.
 
-    cutoff = timezone.now() - timedelta(days=max_age_days)
-    return (
-        RiskAssessment.objects.filter(
-            profile__user=user,
-            triggered_by=RiskAssessment.AUTO_INFERENCE,
-            created_at__gte=cutoff,
-        )
-        .order_by("-created_at")
-        .first()
+    ``max_age_days=None`` drops the freshness filter and returns the latest
+    inference whatever its age — used by read-only paths that prefer an old
+    inference over pretending the user has no profile at all.
+    """
+
+    qs = RiskAssessment.objects.filter(
+        profile__user=user,
+        triggered_by=RiskAssessment.AUTO_INFERENCE,
     )
+    if max_age_days is not None:
+        qs = qs.filter(created_at__gte=timezone.now() - timedelta(days=max_age_days))
+    return qs.order_by("-created_at").first()
 
 
 def get_or_create_inference(
