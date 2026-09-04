@@ -133,3 +133,96 @@ class GetOrCreateUserIncomeCategoryTests(TransactionTestCase):
         self.assertEqual(category.name, "Consultorías Express")
         self.assertEqual(category.color, "#123456")
         self.assertEqual(category.description, "Trabajos cortos de asesoría")
+
+
+class IncomeCategoryApiTests(TransactionTestCase):
+    """La web debe poder crear/editar/borrar categorías de ingresos."""
+
+    def setUp(self):
+        from rest_framework.test import APIClient
+        from rest_framework_simplejwt.tokens import RefreshToken
+
+        self.user = User.objects.create(
+            username="cat-api",
+            platform="web",
+            external_id="cat-api-ext",
+            default_currency="COP",
+        )
+        # El proyecto no usa AUTH_USER_MODEL: la autenticación real pasa por
+        # CustomJWTAuthentication, así que el test usa un JWT de verdad en
+        # vez de force_authenticate (que dejaría el User sin is_authenticated).
+        refresh = RefreshToken()
+        refresh["user_id"] = self.user.id
+        self.client = APIClient()
+        self.client.credentials(
+            HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+    def test_crea_categoria_de_ingreso(self):
+        response = self.client.post(
+            "/api/categories/incomes/",
+            {
+                "name": "clases particulares",
+                "description": "Tutorías por hora",
+                "example": "Clase de matemáticas",
+                "color": "#123456",
+            },
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 201, response.data)
+        self.assertEqual(response.data["name"], "Clases Particulares")
+        self.assertFalse(response.data["is_default"])
+        self.assertTrue(
+            UserIncomeCategory.objects.filter(
+                user=self.user, name="Clases Particulares").exists()
+        )
+
+    def test_rechaza_duplicado_de_predefinida(self):
+        response = self.client.post(
+            "/api/categories/incomes/",
+            {"name": "salario o trabajo fijo"},
+            format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("name", response.data)
+
+    def test_lista_solo_las_del_usuario(self):
+        otro = User.objects.create(
+            username="otro", platform="web", external_id="otro-ext")
+        UserIncomeCategory.objects.create(user=otro, name="Ajena")
+
+        response = self.client.get("/api/categories/incomes/")
+
+        self.assertEqual(response.status_code, 200)
+        nombres = [c["name"] for c in response.data]
+        self.assertNotIn("Ajena", nombres)
+        self.assertIn("Salario o Trabajo Fijo", nombres)
+
+    def test_edita_y_elimina_categoria_personalizada(self):
+        creada = self.client.post(
+            "/api/categories/incomes/", {"name": "Rifas"}, format="json"
+        ).data
+
+        editada = self.client.patch(
+            f"/api/categories/incomes/{creada['id']}/",
+            {"color": "#00FF00"},
+            format="json",
+        )
+        self.assertEqual(editada.status_code, 200)
+        self.assertEqual(editada.data["color"], "#00FF00")
+
+        borrada = self.client.delete(f"/api/categories/incomes/{creada['id']}/")
+        self.assertEqual(borrada.status_code, 204)
+        self.assertFalse(
+            UserIncomeCategory.objects.filter(id=creada["id"]).exists())
+
+    def test_endpoint_custom_solo_devuelve_personalizadas(self):
+        self.client.post(
+            "/api/categories/incomes/", {"name": "Rifas"}, format="json")
+
+        response = self.client.get("/api/categories/incomes/custom/")
+
+        self.assertEqual(response.status_code, 200)
+        nombres = [c["name"] for c in response.data["categories"]]
+        self.assertEqual(nombres, ["Rifas"])
