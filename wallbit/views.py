@@ -470,9 +470,10 @@ class PortfolioTimelineView(APIView):
 class PortfolioPnLTimelineView(APIView):
     """GET /api/wallbit/portfolio/pnl-timeline — gains/losses (P&L) over time.
 
-    Periods: 1w, 1m, 1y, ytd, all. The last point is anchored to the live
-    summary so it matches the hero P&L. ``stale`` flags an approximated series
-    (missing price history or legacy rows without precise share counts).
+    Periods: 1d (intraday), 1w, 1m, 2m, 6m, 1y, ytd, all. The last point is
+    anchored to the live summary so it matches the hero P&L. ``stale`` flags an
+    approximated series (missing price history or legacy rows without precise
+    share counts).
     """
 
     permission_classes = [permissions.IsAuthenticated]

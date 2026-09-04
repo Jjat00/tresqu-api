@@ -753,6 +753,10 @@ def _pnl_window_start(period: str, first_date: date, today: date) -> date:
         s = today - timedelta(days=7)
     elif p == "1m":
         s = today - timedelta(days=30)
+    elif p == "2m":
+        s = today - timedelta(days=60)
+    elif p == "6m":
+        s = today - timedelta(days=180)
     elif p == "1y":
         s = today - timedelta(days=365)
     elif p == "ytd":
