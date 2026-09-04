@@ -2,7 +2,7 @@ from django.shortcuts import render
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action
 from rest_framework.response import Response
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from datetime import datetime, timedelta
 from django.utils import timezone
 import logging
@@ -338,6 +338,87 @@ class IncomeViewSet(viewsets.ModelViewSet):
             'end_date': resp_end,
             'summary': transformed_summary,
             'total': total
+        })
+
+    @action(detail=False, methods=['get'])
+    def month_summary(self, request):
+        """Ingresos de UN mes con el detalle completo de cada movimiento.
+
+        GET /api/incomes/month_summary/?month=9&year=2026
+
+        Espeja `/api/expenses/summary/?month&year`: la tabla del dashboard
+        necesita cada ingreso con su id, nota, moneda y fecha para poder
+        editarlo. El endpoint `summary` agrega por categoría y pierde esos
+        datos, así que la tabla mostraba "Ingreso por <categoría>" y no podía
+        editar nada.
+
+        Los totales van separados por moneda: no se convierte entre monedas
+        (no inventamos una tasa de cambio).
+        """
+        user_timezone = self._get_user_timezone(request)
+        local_now = self._get_local_datetime(request)
+
+        try:
+            month = int(request.query_params.get(
+                'month', local_now.month))
+            year = int(request.query_params.get('year', local_now.year))
+        except (TypeError, ValueError):
+            return Response(
+                {"error": "Mes y año deben ser números enteros"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if month < 1 or month > 12:
+            return Response(
+                {"error": "El mes debe estar entre 1 y 12"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        first_day = datetime(year, month, 1).date()
+        if month == 12:
+            next_first_day = datetime(year + 1, 1, 1).date()
+        else:
+            next_first_day = datetime(year, month + 1, 1).date()
+        last_day = next_first_day - timedelta(days=1)
+
+        # `received_at` es la fecha real del ingreso; `timestamp` (fecha de
+        # registro) solo se usa para las filas antiguas que no la tienen.
+        queryset = self.get_queryset().filter(
+            Q(received_at__gte=first_day, received_at__lte=last_day) |
+            (Q(received_at__isnull=True) & Q(
+                timestamp__gte=self._convert_to_utc(
+                    first_day, False, user_timezone),
+                timestamp__lte=self._convert_to_utc(
+                    last_day, True, user_timezone)))
+        )
+
+        # `order_by()` vacío es obligatorio: el queryset base ordena por
+        # -timestamp y ese campo entraría en el GROUP BY, devolviendo una fila
+        # por ingreso en vez de una por categoría/moneda.
+        by_category = {}
+        for item in queryset.order_by().values(
+            'user_income_category__name', 'category__name'
+        ).annotate(total=Sum('amount')).order_by('-total'):
+            name = (item['user_income_category__name']
+                    or item['category__name'] or 'Otros')
+            by_category[name] = by_category.get(name, 0) + float(item['total'])
+
+        totals_by_currency = {
+            item['currency']: float(item['total'])
+            for item in queryset.order_by().values('currency').annotate(total=Sum('amount'))
+        }
+
+        incomes = self.get_serializer(
+            queryset.order_by('-received_at', '-timestamp'), many=True
+        ).data
+
+        return Response({
+            'month': month,
+            'year': year,
+            'by_category': by_category,
+            'total': float(queryset.aggregate(total=Sum('amount'))['total'] or 0),
+            'totals_by_currency': totals_by_currency,
+            'incomes': incomes,
         })
 
     @action(detail=False, methods=['get'])
