@@ -1,6 +1,7 @@
 # /categories/serializers.py
 from rest_framework import serializers
 from .models import Category, UserExpenseCategory, UserIncomeCategory
+from .utils import normalize_category_name
 
 
 class CategorySerializer(serializers.ModelSerializer):
@@ -24,7 +25,7 @@ class UserExpenseCategorySerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         """Validar que el nombre no esté duplicado para el usuario (case-insensitive)"""
         user = self.context['request'].user
-        normalized_name = value.strip().title()
+        normalized_name = normalize_category_name(value)
 
         if self.instance:
             # En actualización, excluir la instancia actual
@@ -63,7 +64,7 @@ class UserIncomeCategorySerializer(serializers.ModelSerializer):
     def validate_name(self, value):
         """Validar que el nombre no esté duplicado para el usuario (case-insensitive)"""
         user = self.context['request'].user
-        normalized_name = value.strip().title()
+        normalized_name = normalize_category_name(value)
 
         if self.instance:
             # En actualización, excluir la instancia actual

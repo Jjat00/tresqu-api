@@ -121,7 +121,8 @@ class ExpensesToolsCurrencyTests(SimpleTestCase):
             return "ok"
 
         @tool
-        def fake_get_or_create_income_category(
+        def fake_get_or_create_user_category_for_income(
+            user_external_id: str,
             name: str,
             description: str | None = None,
             example: str | None = None,
@@ -133,11 +134,15 @@ class ExpensesToolsCurrencyTests(SimpleTestCase):
         self._originals = {
             "create_income": subagent.create_income,
             "create_expense": subagent.create_expense,
-            "get_or_create_income_category": subagent.get_or_create_income_category,
+            "get_or_create_user_category_for_income": (
+                subagent.get_or_create_user_category_for_income
+            ),
         }
         subagent.create_income = fake_create_income
         subagent.create_expense = fake_create_expense
-        subagent.get_or_create_income_category = fake_get_or_create_income_category
+        subagent.get_or_create_user_category_for_income = (
+            fake_get_or_create_user_category_for_income
+        )
 
     def tearDown(self):
         for name, original in self._originals.items():

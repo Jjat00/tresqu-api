@@ -13,7 +13,11 @@ from expenses.models import Expense
 from income.models import Income, IncomeCategory
 from users.models import User
 from categories.models import Category, UserExpenseCategory, UserIncomeCategory
-from categories.utils import get_or_create_user_expense_category, get_or_create_user_income_category
+from categories.utils import (
+    get_or_create_user_expense_category,
+    get_or_create_user_income_category,
+    normalize_category_name,
+)
 from agents.run_context import record_created_transaction
 # serializasers
 from .serializasers import ExpenseData, IncomeData
@@ -654,7 +658,7 @@ def create_expense(
         date = _user_today(user)
 
     # Normalizar el nombre de la categoría para mostrar (capitalizar cada palabra)
-    display_category_name = category.strip().title()
+    display_category_name = normalize_category_name(category)
 
     # NUEVO: Buscar o crear categoría por usuario
     try:
@@ -777,7 +781,7 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
                 category_name = user_category.name
             else:
                 # Fallback: buscar por el nombre normalizado
-                normalized_name = category.strip().title()
+                normalized_name = normalize_category_name(category)
                 user_category = UserExpenseCategory.objects.filter(
                     user=user, name__iexact=normalized_name).first()
                 category_name = user_category.name if user_category else normalized_name
@@ -1288,9 +1292,9 @@ def create_income(
         else:
             currency = currency.upper()  # Asegurar que la moneda válida esté en mayúsculas
 
-        # Normalizar el nombre de la categoría (primera letra mayúscula de cada palabra)
-        normalized_category = " ".join(word.capitalize()
-                                       for word in category.strip().split())
+        # Normalizar el nombre de la categoría respetando los conectores
+        # ("salario o trabajo fijo" → "Salario o Trabajo Fijo").
+        normalized_category = normalize_category_name(category)
 
         # NUEVO: Buscar o crear categoría de ingreso por usuario
         try:
@@ -1301,11 +1305,31 @@ def create_income(
             })
 
             if result["status"] in ["success", "info"]:
-                # Obtener la categoría del usuario recién creada/encontrada
-                user_income_category = UserIncomeCategory.objects.get(
+                # Búsqueda case-insensitive: el nombre guardado puede diferir en
+                # mayúsculas del normalizado (categorías predefinidas, o creadas
+                # desde la web antes de unificar la normalización).
+                user_income_category = UserIncomeCategory.objects.filter(
                     user=user,
-                    name=normalized_category
-                )
+                    name__iexact=normalized_category
+                ).first()
+
+                if not user_income_category:
+                    # Fallback: alguna categoría que contenga lo que pidió el usuario
+                    user_income_category = UserIncomeCategory.objects.filter(
+                        user=user,
+                        name__icontains=category.strip()
+                    ).first()
+
+                if not user_income_category:
+                    logger.warning(
+                        f"No se encontró categoría de ingreso '{normalized_category}' "
+                        f"para usuario {user.external_id}, usando 'Otros Ingresos'")
+                    user_income_category, created = get_or_create_user_income_category(
+                        user=user,
+                        name="Otros Ingresos",
+                        description="Categoría por defecto para ingresos sin clasificar",
+                        example="Ingresos varios, misceláneos"
+                    )
             else:
                 # Si hubo un error al crear la categoría, crear una por defecto
                 logger.error(f"Error al crear categoría de ingreso: {result}")
@@ -1403,7 +1427,7 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
                 category_name = user_category.name
             else:
                 # Fallback: buscar por el nombre normalizado
-                normalized_name = category.strip().title()
+                normalized_name = normalize_category_name(category)
                 user_category = UserIncomeCategory.objects.filter(
                     user=user, name__iexact=normalized_name).first()
                 category_name = user_category.name if user_category else normalized_name
