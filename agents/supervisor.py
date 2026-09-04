@@ -21,6 +21,7 @@ from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmations
 
 from . import risk_profiler_service
+from .currency_guard import conversation_texts
 from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
 from .subagents.wallbit import build_wallbit_subagent
@@ -80,6 +81,11 @@ CUÁNDO USAR `start_risk_profiler`:
 - El usuario pide armar / rehacer / actualizar su perfil de riesgo: "haz mi perfil de inversión", "evalúa mi tolerancia al riesgo", "quiero hacer el cuestionario".
 - O cuando consultaste `get_my_risk_profile` y `has_profile=false` y el usuario quiere uno.
 - NO la uses para consultar el perfil actual (eso es `get_my_risk_profile`). Solo úsala para INICIAR una nueva evaluación.
+
+REGLA DE MONEDA (CRÍTICA — no la rompas):
+- NUNCA inventes ni infieras la moneda de un gasto o un ingreso. Si el usuario no nombró una moneda de forma explícita e inequívoca (código ISO, o "dólares", "euros", "pesos colombianos"...), la instrucción al subagente NO debe llevar moneda: escribe "registra un ingreso de 6.000.000 por Frostbyte", nunca "6.000.000 USD". El sistema aplicará la moneda por defecto del usuario.
+- "Pesos" a secas, "$" o "plata" NO son una moneda explícita: no los traduzcas a ningún código.
+- Al confirmar el registro al usuario, di la moneda que el subagente reportó haber guardado, nunca una que hayas supuesto tú.
 
 REGLA DE MONTOS Y SÍMBOLOS:
 - Cuando delegues una operación con dinero, pasa los montos, símbolos y porcentajes EXACTOS que dio el usuario. NUNCA los redondees, recortes ni "ajustes" por tu cuenta. Si el usuario dice "compra 50 USD de AAPL", la instrucción al subagente debe contener "50 USD" y "AAPL" textualmente.
@@ -225,6 +231,7 @@ def build_supervisor(
     income_categories_str: str,
     current_date: str,
     semantic_context: str | None = None,
+    history: list | None = None,
 ):
     """Builds the main Tresqu supervisor with subagents and risk-profiler wired as tools.
 
@@ -241,8 +248,18 @@ def build_supervisor(
       supervisor's wrapped recap.
     """
 
+    # Textos reales de la conversación: el subagente los usa para descartar
+    # monedas que nadie mencionó (``agents.currency_guard``). El supervisor
+    # delega en lenguaje natural, así que sin esto una moneda alucinada en la
+    # instrucción llega a la tool de creación como si el usuario la hubiera dicho.
+    conversation_context = conversation_texts(user_message, history)
+
     expenses_agent = build_expenses_subagent(
-        user, expense_categories_str, income_categories_str, current_date
+        user,
+        expense_categories_str,
+        income_categories_str,
+        current_date,
+        conversation_context,
     )
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
     analyst_agent = build_analyst_subagent(user)
@@ -261,9 +278,11 @@ def build_supervisor(
         """Delega al subagente que registra, edita, elimina o consulta gastos e ingresos del usuario, así como resúmenes mensuales y categorías.
 
         Pasa una instrucción autocontenida en lenguaje natural. Ej: "Crea un
-        gasto de 50 USD en café hoy" o "Dame el resumen del mes de mayo".
+        gasto de 50 en café hoy" o "Dame el resumen del mes de mayo".
         El subagente no recuerda turnos anteriores — incluye todo el contexto
         necesario (IDs, fechas resueltas, etc.) en la instrucción.
+        Incluye la moneda SOLO si el usuario la dijo explícitamente ("50 dólares");
+        si no la dijo, no la menciones y se usará la moneda por defecto del usuario.
         """
         try:
             result = await expenses_agent.ainvoke(

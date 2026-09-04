@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from django.conf import settings
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
+from agents.currency_guard import mentioned_currency, resolve_currency
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from telegrambot.tools import (
     create_expense,
@@ -100,16 +101,29 @@ def build_expenses_tools(
     user: User,
     expense_categories_str: str = "",
     income_categories_str: str = "",
+    conversation_context: Sequence[str] = (),
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
     Las categorías existentes del usuario se pasan a los parsers para que
     clasifiquen reutilizando una categoría existente en vez de inventar una nueva
     por cada gasto/ingreso.
+
+    ``conversation_context`` son los textos reales del turno (mensaje del
+    usuario + últimos mensajes del hilo). Se usan para descartar monedas que
+    ningún humano mencionó: ver ``agents.currency_guard``.
     """
 
     external_id = user.external_id
     default_currency = user.default_currency or "USD"
+
+    def _currency(requested: str | None) -> str:
+        """Moneda a registrar: descarta la que nadie mencionó en la conversación.
+
+        Devuelve "" cuando hay que usar la moneda por defecto del usuario; las
+        tools base ya interpretan la moneda vacía de esa forma.
+        """
+        return resolve_currency(requested, default_currency, conversation_context)
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -185,7 +199,7 @@ def build_expenses_tools(
         return _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": currency,
+            "currency": _currency(currency),
             "category": category,
             "spent_at": spent_at,
             "note": note,
@@ -214,7 +228,47 @@ def build_expenses_tools(
         return _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": currency,
+            "currency": _currency(currency),
+            "category": category,
+            "received_at": received_at,
+            "note": note,
+        })
+
+    @tool("update_expense")
+    def update_expense_for_user(
+        expense_id: str,
+        amount: float,
+        category: str,
+        currency: str = "",
+        spent_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Actualiza un gasto existente. Deja `currency` vacío salvo que el usuario pida
+        explícitamente cambiar de moneda: el gasto conserva la moneda con la que se registró."""
+        return _invoke_strict(update_expense, {
+            "expense_id": expense_id,
+            "amount": amount,
+            "currency": mentioned_currency(currency, conversation_context),
+            "category": category,
+            "spent_at": spent_at,
+            "note": note,
+        })
+
+    @tool("update_income")
+    def update_income_for_user(
+        income_id: str,
+        amount: float,
+        category: str,
+        currency: str = "",
+        received_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Actualiza un ingreso existente. Deja `currency` vacío salvo que el usuario pida
+        explícitamente cambiar de moneda: el ingreso conserva la moneda con la que se registró."""
+        return _invoke_strict(update_income, {
+            "income_id": income_id,
+            "amount": amount,
+            "currency": mentioned_currency(currency, conversation_context),
             "category": category,
             "received_at": received_at,
             "note": note,
@@ -413,8 +467,8 @@ def build_expenses_tools(
         create_expense_for_user,
         create_income_for_user,
         get_or_create_category,
-        update_expense,
-        update_income,
+        update_expense_for_user,
+        update_income_for_user,
         delete_expense,
         delete_income,
         get_expense_by_id,
@@ -520,11 +574,12 @@ def build_expenses_subagent(
     expense_categories_str: str,
     income_categories_str: str,
     current_date: str,
+    conversation_context: Sequence[str] = (),
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
-        user, expense_categories_str, income_categories_str)
+        user, expense_categories_str, income_categories_str, conversation_context)
     return create_agent(
         model=_model(),
         tools=tools,

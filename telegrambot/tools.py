@@ -751,7 +751,10 @@ def create_expense(
 
 @tool
 def update_expense(expense_id: str, amount: float, currency: str, category: str, spent_at: str | None = None, note: str | None = ""):
-    """Actualiza un gasto en la base de datos usando categorías por usuario."""
+    """Actualiza un gasto en la base de datos usando categorías por usuario.
+
+    ``currency`` vacío (o no ISO) conserva la moneda con la que ya está
+    registrado el gasto."""
     try:
         expense = Expense.objects.get(id=expense_id)
         user = expense.user
@@ -797,7 +800,12 @@ def update_expense(expense_id: str, amount: float, currency: str, category: str,
 
         # Actualizar el gasto
         expense.amount = amount
-        expense.currency = currency
+        # Moneda vacía o inválida = "no la toques": editar el monto o la
+        # categoría de un gasto no debe cambiar la moneda con la que se
+        # registró (ni por una inventada por el modelo ni por la por defecto).
+        if currency and is_valid_currency(currency):
+            expense.currency = currency.upper()
+        currency = expense.currency
         expense.user_expense_category = user_category
         expense.category_str = category_name  # Mantener por compatibilidad
 
@@ -1362,6 +1370,9 @@ def create_income(
 def update_income(income_id: str, amount: float, currency: str, category: str, received_at: str | None = None, note: str | None = ""):
     """
     Actualiza un ingreso existente usando categorías por usuario.
+
+    ``currency`` vacío (o no ISO) conserva la moneda con la que ya está
+    registrado el ingreso.
     """
     try:
         from income.models import Income
@@ -1415,7 +1426,10 @@ def update_income(income_id: str, amount: float, currency: str, category: str, r
 
         # Actualizar el ingreso
         income.amount = amount
-        income.currency = currency
+        # Moneda vacía o inválida = "no la toques" (ver update_expense).
+        if currency and is_valid_currency(currency):
+            income.currency = currency.upper()
+        currency = income.currency
         income.user_income_category = user_category
         income.category_str = category_name  # Mantener por compatibilidad
 

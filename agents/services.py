@@ -235,6 +235,7 @@ async def _run_supervisor(
         income_categories_str=income_categories_str,
         current_date=current_date,
         semantic_context=semantic_context,
+        history=history,
     )
 
     messages = list(history) + [HumanMessage(content=raw_text)]
