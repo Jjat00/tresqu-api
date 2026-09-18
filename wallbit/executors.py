@@ -8,11 +8,16 @@ If you add a new write tool, register it in EXECUTORS below.
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from typing import Any, Callable
 
-from .agent_safety import mark_executed, mark_failed
-from .client import WallbitClient, WallbitError
+from .agent_safety import mark_executed, mark_failed, mark_uncertain
+from .client import (
+    WallbitClient,
+    WallbitError,
+    WallbitUncertainError,
+    WallbitValidationError,
+)
 from .crypto import decrypt_api_key
 from .models import AgentDecision, Investment, WallbitAccount, WallbitTxMirror
 
@@ -63,20 +68,9 @@ def _record_investment(
     )
 
 
-def _fetch_current_price(client: WallbitClient, symbol: str) -> Decimal | None:
-    """Current price for ``symbol`` from Wallbit, or None on any failure."""
-    try:
-        resp = client.get(f"/assets/{symbol}")
-    except WallbitError:
-        return None
-    data = resp.data.get("data") if isinstance(resp.data, dict) else None
-    if not isinstance(data, dict):
-        return None
-    raw = data.get("price")
-    try:
-        return Decimal(str(raw)) if raw is not None else None
-    except (ArithmeticError, ValueError, TypeError):
-        return None
+# Wallbit accepts fractional shares; LIMIT orders are sized in shares, so we
+# derive them from the confirmed USD amount at this precision, rounding DOWN.
+_LIMIT_SHARES_STEP = Decimal("0.0001")
 
 
 def execute_place_trade(
@@ -93,58 +87,39 @@ def execute_place_trade(
         "direction": direction,
         "currency": currency,
         "order_type": order_type,
-        "amount": float(amount_usd),
     }
-    # LIMIT orders carry a price ceiling/floor and a validity window. Some
-    # freshly-listed assets (e.g. SPCX) ONLY accept LIMIT — the preview resolves
-    # those fields and persists them in tool_args, so we just forward them.
     if order_type == "LIMIT":
-        body["limit_price"] = float(Decimal(str(args["limit_price"])))
-        body["time_in_force"] = (args.get("time_in_force") or "DAY").upper()
-    with _client(account) as client:
-        try:
-            response = client.post("/trades", json=body)
-        except WallbitError as exc:
-            # Some freshly-listed assets (e.g. SPCX right after its IPO) reject
-            # MARKET orders with an opaque error because they only accept LIMIT,
-            # and Wallbit no longer flags that restriction in the asset metadata
-            # — so we can't catch it up front. Fall back ONCE to a LIMIT order at
-            # (near) the current price. The USD amount is unchanged, so the user's
-            # spend and all pre-flight limits still hold; only the fill mechanism
-            # changes. A LIMIT order already gets the same retry → no re-fallback.
-            price = None if order_type != "MARKET" else _fetch_current_price(client, symbol)
-            if price is None or price <= 0:
-                raise
-            # BUY caps a hair above market, SELL a hair below, so it still fills.
-            buffer = Decimal("1.02") if direction == "BUY" else Decimal("0.98")
-            limit_price = (price * buffer).quantize(Decimal("0.01"))
-            body = {
-                **body,
-                "order_type": "LIMIT",
-                "limit_price": float(limit_price),
-                "time_in_force": "DAY",
-            }
-            logger.info(
-                "place_trade MARKET rejected for %s (%s); retrying as LIMIT @ %s",
-                symbol, exc, limit_price,
+        # Wallbit sizes LIMIT orders in shares, not USD ("The shares field is
+        # required when order type is LIMIT"). Derive them from the confirmed
+        # amount, rounded DOWN so the spend can never exceed what the user saw.
+        limit_price = Decimal(str(args["limit_price"]))
+        shares = (amount_usd / limit_price).quantize(_LIMIT_SHARES_STEP, rounding=ROUND_DOWN)
+        if shares <= 0:
+            raise WallbitValidationError(
+                f"USD {amount_usd} no alcanza ni una fracción mínima de {symbol} "
+                f"a {limit_price} USD."
             )
-            response = client.post("/trades", json=body)
+        body["shares"] = float(shares)
+        body["limit_price"] = float(limit_price)
+        body["time_in_force"] = (args.get("time_in_force") or "DAY").upper()
+    else:
+        body["amount"] = float(amount_usd)
+
+    # ONE request, no fallback. This used to retry a rejected MARKET order as a
+    # LIMIT order with a second POST — after a *timeout*, i.e. when the first
+    # order may already have filled — and the client itself retried the POST up
+    # to 4 times. On 2026-09-02 that placed the same 20 USD SPCX order 4 times.
+    # A transport error / 5xx now surfaces as WallbitUncertainError and is
+    # settled by reconciliation, never by resending.
+    with _client(account) as client:
+        response = client.post("/trades", json=body)
 
     tx_uuid = _extract_tx_uuid(response.data)
     mark_executed(decision, wallbit_tx_uuid=tx_uuid)
     # Don't create an optimistic Investment here. A freshly placed trade is
     # often still PENDING upstream (and Wallbit may not return its uuid on the
-    # POST, so we couldn't link it). An unlinked, pre-settlement row both
-    # duplicates the row the sync later creates AND inflates "capital invertido"
-    # against a live value that excludes pending trades → false loss. Instead,
-    # let the sync be the single source of truth and trigger it immediately so
-    # the trade shows up (with real shares + status) within seconds.
-    try:
-        from .tasks import sync_wallbit_transactions
-
-        sync_wallbit_transactions.delay(account.id)
-    except Exception as exc:  # noqa: BLE001 — never fail the trade on a dispatch hiccup
-        logger.warning("post-trade wallbit sync dispatch failed: %s", exc)
+    # POST, so we couldn't link it). The sync (dispatched by execute_decision
+    # for every attempt) is the single source of truth for shares + status.
     return {"ok": True, "wallbit_tx_uuid": tx_uuid, "data": response.data}
 
 
@@ -277,6 +252,38 @@ EXECUTORS: dict[str, Callable[..., dict[str, Any]]] = {
 }
 
 
+def _dispatch_sync(account_id: int) -> None:
+    """Refresh the mirror right away so the dashboard reconciles within seconds.
+
+    Runs after EVERY attempt against Wallbit — success, rejection or unknown —
+    because a fill can exist upstream even when we think the order failed.
+    """
+    try:
+        from .tasks import sync_wallbit_transactions
+
+        sync_wallbit_transactions.delay(account_id)
+    except Exception as exc:  # noqa: BLE001 — never fail the trade on a dispatch hiccup
+        logger.warning("post-trade wallbit sync dispatch failed: %s", exc)
+
+
+# Seconds before the first reconciliation attempt. Wallbit's fill shows up in
+# /transactions shortly after the (slow) POST returns upstream.
+RECONCILE_FIRST_DELAY_SECONDS = 20
+
+
+def _schedule_reconciliation(decision: AgentDecision) -> None:
+    try:
+        from .tasks import reconcile_uncertain_decision
+
+        reconcile_uncertain_decision.apply_async(
+            args=(decision.id,), countdown=RECONCILE_FIRST_DELAY_SECONDS
+        )
+    except Exception:  # noqa: BLE001 — the beat-driven sync still picks up the fill
+        logger.exception(
+            "could not schedule reconciliation", extra={"decision_id": decision.id}
+        )
+
+
 def execute_decision(
     decision: AgentDecision, account: WallbitAccount
 ) -> dict[str, Any]:
@@ -289,8 +296,21 @@ def execute_decision(
     if executor is None:
         raise UnknownTool(f"no executor for {tool_name}")
 
+    touches_wallbit = tool_name not in LOCAL_ONLY_TOOLS
     try:
         return executor(decision, account, args)
+    except WallbitUncertainError as exc:
+        # The request may have been applied. Do NOT retry, do NOT report it as
+        # rejected: freeze the decision and let the reconciliation task settle
+        # it against Wallbit's own transaction history.
+        logger.error(
+            "wallbit write in unknown state",
+            exc_info=exc,
+            extra={"decision_id": decision.id, "tool": tool_name},
+        )
+        mark_uncertain(decision, error=str(exc))
+        _schedule_reconciliation(decision)
+        return {"ok": False, "uncertain": True, "error": str(exc)}
     except WallbitError as exc:
         logger.warning(
             "wallbit execute failed",
@@ -303,3 +323,6 @@ def execute_decision(
         logger.exception("wallbit execute crash", extra={"decision_id": decision.id})
         mark_failed(decision, error=str(exc))
         return {"ok": False, "error": str(exc)}
+    finally:
+        if touches_wallbit:
+            _dispatch_sync(account.id)

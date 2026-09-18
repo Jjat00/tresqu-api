@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 
 from django.conf import settings
 from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
+from agents.currency_guard import mentioned_currency, resolve_currency
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from telegrambot.tools import (
     create_expense,
@@ -35,8 +36,8 @@ from telegrambot.tools import (
     get_incomes_by_category,
     get_incomes_by_user,
     get_monthly_insights,
-    get_or_create_category,
-    get_or_create_income_category,
+    get_or_create_user_category_for_expense,
+    get_or_create_user_category_for_income,
     get_top_categories,
     get_top_income_categories,
     is_greeting,
@@ -100,16 +101,29 @@ def build_expenses_tools(
     user: User,
     expense_categories_str: str = "",
     income_categories_str: str = "",
+    conversation_context: Sequence[str] = (),
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
     Las categorías existentes del usuario se pasan a los parsers para que
     clasifiquen reutilizando una categoría existente en vez de inventar una nueva
     por cada gasto/ingreso.
+
+    ``conversation_context`` son los textos reales del turno (mensaje del
+    usuario + últimos mensajes del hilo). Se usan para descartar monedas que
+    ningún humano mencionó: ver ``agents.currency_guard``.
     """
 
     external_id = user.external_id
     default_currency = user.default_currency or "USD"
+
+    def _currency(requested: str | None) -> str:
+        """Moneda a registrar: descarta la que nadie mencionó en la conversación.
+
+        Devuelve "" cuando hay que usar la moneda por defecto del usuario; las
+        tools base ya interpretan la moneda vacía de esa forma.
+        """
+        return resolve_currency(requested, default_currency, conversation_context)
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -173,19 +187,79 @@ def build_expenses_tools(
             return datetime.now().strftime("%Y-%m-%d")
 
     @tool
+    def create_expense_category(
+        name: str,
+        description: str | None = None,
+        examples: str | None = None,
+        color: str | None = None,
+    ) -> Dict[str, Any]:
+        """Crea (o recupera) una categoría de GASTOS del usuario.
+
+        Úsala solo cuando ninguna categoría existente encaje. `color` en formato
+        #RRGGBB, coherente con la temática. Escribe todo en el idioma del usuario."""
+        try:
+            return _invoke_strict(get_or_create_user_category_for_expense, {
+                "user_external_id": external_id,
+                "name": name,
+                "description": description,
+                "examples": examples,
+                "color": color,
+            })
+        except Exception as exc:
+            logger.error(f"create_expense_category: {exc}")
+            return {"status": "error", "message": str(exc)}
+
+    @tool
+    def create_income_category(
+        name: str,
+        description: str | None = None,
+        example: str | None = None,
+        color: str | None = None,
+    ) -> Dict[str, Any]:
+        """Crea (o recupera) una categoría de INGRESOS del usuario.
+
+        Úsala solo cuando ninguna categoría existente encaje. `color` en formato
+        #RRGGBB, coherente con la temática. Escribe todo en el idioma del usuario."""
+        try:
+            return _invoke_strict(get_or_create_user_category_for_income, {
+                "user_external_id": external_id,
+                "name": name,
+                "description": description,
+                "example": example,
+                "color": color,
+            })
+        except Exception as exc:
+            logger.error(f"create_income_category: {exc}")
+            return {"status": "error", "message": str(exc)}
+
+    @tool
     def create_expense_for_user(
         amount: float,
         category: str,
         currency: str = "",
         spent_at: str | None = None,
         note: str | None = "",
+        category_description: str | None = None,
+        category_examples: str | None = None,
+        category_color: str | None = None,
     ) -> str:
-        """Registra un gasto del usuario. Deja `currency` vacío si el usuario no la dijo
-        explícitamente (NO la infieras): la tool usará la moneda por defecto del usuario."""
+        """Registra un gasto del usuario. Si la categoría no existe, la crea. Deja `currency`
+        vacío si el usuario no la dijo explícitamente (NO la infieras): la tool usará la moneda
+        por defecto del usuario."""
+        # Solo cuando el modelo propone metadatos: la tool base ya crea la
+        # categoría del usuario, pero sin descripción/ejemplos/color propios.
+        if category_description or category_examples or category_color:
+            _invoke_strict(get_or_create_user_category_for_expense, {
+                "user_external_id": external_id,
+                "name": category,
+                "description": category_description,
+                "examples": category_examples,
+                "color": category_color,
+            })
         return _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": currency,
+            "currency": _currency(currency),
             "category": category,
             "spent_at": spent_at,
             "note": note,
@@ -205,16 +279,60 @@ def build_expenses_tools(
         """Registra un ingreso del usuario. Si la categoría no existe, la crea. Deja `currency`
         vacío si el usuario no la dijo explícitamente (NO la infieras): la tool usará la moneda
         por defecto del usuario."""
-        _invoke_strict(get_or_create_income_category, {
-            "name": category,
-            "description": category_description,
-            "example": category_example,
-            "color": category_color,
-        })
+        # Solo cuando el modelo propone metadatos: la tool base ya crea la
+        # categoría del usuario, pero sin descripción/ejemplo/color propios.
+        if category_description or category_example or category_color:
+            _invoke_strict(get_or_create_user_category_for_income, {
+                "user_external_id": external_id,
+                "name": category,
+                "description": category_description,
+                "example": category_example,
+                "color": category_color,
+            })
         return _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": currency,
+            "currency": _currency(currency),
+            "category": category,
+            "received_at": received_at,
+            "note": note,
+        })
+
+    @tool("update_expense")
+    def update_expense_for_user(
+        expense_id: str,
+        amount: float,
+        category: str,
+        currency: str = "",
+        spent_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Actualiza un gasto existente. Deja `currency` vacío salvo que el usuario pida
+        explícitamente cambiar de moneda: el gasto conserva la moneda con la que se registró."""
+        return _invoke_strict(update_expense, {
+            "expense_id": expense_id,
+            "amount": amount,
+            "currency": mentioned_currency(currency, conversation_context),
+            "category": category,
+            "spent_at": spent_at,
+            "note": note,
+        })
+
+    @tool("update_income")
+    def update_income_for_user(
+        income_id: str,
+        amount: float,
+        category: str,
+        currency: str = "",
+        received_at: str | None = None,
+        note: str | None = "",
+    ) -> str:
+        """Actualiza un ingreso existente. Deja `currency` vacío salvo que el usuario pida
+        explícitamente cambiar de moneda: el ingreso conserva la moneda con la que se registró."""
+        return _invoke_strict(update_income, {
+            "income_id": income_id,
+            "amount": amount,
+            "currency": mentioned_currency(currency, conversation_context),
             "category": category,
             "received_at": received_at,
             "note": note,
@@ -412,9 +530,10 @@ def build_expenses_tools(
         is_greeting,
         create_expense_for_user,
         create_income_for_user,
-        get_or_create_category,
-        update_expense,
-        update_income,
+        create_expense_category,
+        create_income_category,
+        update_expense_for_user,
+        update_income_for_user,
         delete_expense,
         delete_income,
         get_expense_by_id,
@@ -460,10 +579,11 @@ REGLAS DE OPERACIÓN:
 - ESCALA DE MONTOS COLOQUIALES: La moneda por defecto del usuario es {default_currency}. En monedas de alta denominación (COP, CLP, PYG, VES...) la gente omite los miles al hablar: "gasté 90 en una camisa" significa 90.000, no 90 pesos. Las tools parse_*_for_user ya aplican esta regla; si registras o editas un monto SIN pasar por ellas, aplícala tú: determina la moneda en juego (la explícita del mensaje, o si no hay, la por defecto) y, si es de alta denominación y el monto literal es implausiblemente bajo para lo descrito (camisa de 90 COP, cena de 20 COP, proyecto pagado a 200 COP), interprétalo como MILES (90 → 90000). Si el monto ya es plausible (4500 un café) o el usuario fue explícito ("90 mil", "90k", "90.000"), no lo toques. En USD/EUR y similares NO aplica: 90 USD son 90 dólares. Esta regla ajusta SOLO el monto, nunca la moneda.
 
 CLASIFICACIÓN:
-- PRIMERO intenta usar una categoría existente de la lista.
-- Solo crea nueva con get_or_create_category / get_or_create_income_category si ninguna existente encaja.
-- Para nueva categoría provee: name, description, example, color (#RRGGBB) coherente con la temática.
+- PRIMERO intenta usar una categoría existente de la lista. Escríbela EXACTAMENTE como aparece (mismas tildes y mayúsculas), sin el prefijo "Gastos:"/"Ingresos:".
+- Solo si ninguna existente encaja, crea una nueva con create_expense_category (gastos) / create_income_category (ingresos).
+- Para nueva categoría provee: name, description, examples/example, color (#RRGGBB) coherente con la temática.
 - Crea las categorías en el mismo idioma del usuario.
+- Las categorías son PERSONALES de cada usuario: nunca asumas que existe una que no esté en la lista de arriba.
 
 EDICIÓN / ELIMINACIÓN:
 - Si hay ID, verifica con get_expense_by_id / get_income_by_id.
@@ -520,11 +640,12 @@ def build_expenses_subagent(
     expense_categories_str: str,
     income_categories_str: str,
     current_date: str,
+    conversation_context: Sequence[str] = (),
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
-        user, expense_categories_str, income_categories_str)
+        user, expense_categories_str, income_categories_str, conversation_context)
     return create_agent(
         model=_model(),
         tools=tools,

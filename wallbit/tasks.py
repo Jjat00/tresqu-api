@@ -10,7 +10,7 @@ from POST /api/wallbit/sync.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -19,9 +19,11 @@ from django.conf import settings
 from django.utils import timezone
 from langchain_openai import OpenAIEmbeddings
 
+from .agent_safety import mark_executed, mark_failed
 from .client import WallbitClient, WallbitError
 from .crypto import decrypt_api_key
-from .models import Investment, WallbitAccount, WallbitTxMirror
+from .models import AgentDecision, Investment, WallbitAccount, WallbitTxMirror
+from .notify import notify_decision_user
 
 logger = logging.getLogger(__name__)
 
@@ -328,3 +330,165 @@ def sync_all_connected_accounts() -> dict[str, Any]:
         sync_wallbit_transactions.delay(account_id)
         queued += 1
     return {"queued": queued}
+
+
+# --------------------------------------------------------------------------- #
+# Reconciliation of UNCERTAIN decisions
+#
+# A write to Wallbit that got no answer (timeout / 5xx) is frozen as UNCERTAIN
+# by ``executors.execute_decision``. It is never resent. This task syncs the
+# mirror and looks for the transaction Wallbit would have created, then settles
+# the decision to EXECUTED (linking the tx) or FAILED, and tells the user.
+# --------------------------------------------------------------------------- #
+
+RECONCILE_MAX_ATTEMPTS = 4
+RECONCILE_RETRY_SECONDS = 45
+# How far before the confirmation we look: Wallbit's ``created_at`` for a fill
+# has been observed a few seconds *before* our webhook log line (clock skew).
+RECONCILE_LOOKBACK = timedelta(minutes=3)
+# Fees: an API fill has shown source_amount == amount (fee null) and app fills
+# amount + ~0.3 %. Accept either.
+_AMOUNT_ABS_TOLERANCE = Decimal("0.10")
+_AMOUNT_REL_TOLERANCE = Decimal("0.02")
+
+
+def _amount_matches(observed: Decimal | None, expected: Decimal) -> bool:
+    if observed is None:
+        return False
+    tolerance = max(_AMOUNT_ABS_TOLERANCE, expected * _AMOUNT_REL_TOLERANCE)
+    return abs(Decimal(observed) - expected) <= tolerance
+
+
+_MOVE_TX_TYPES = ("INTERNAL", "INVESTMENT_DEPOSIT", "INVESTMENT_WITHDRAW")
+_CHEST_TX_TYPES = {
+    "wallbit_deposit_chest": ("ROBOADVISOR_DEPOSIT",),
+    "wallbit_withdraw_chest": ("ROBOADVISOR_WITHDRAW",),
+}
+
+
+def find_transaction_for_decision(
+    decision: AgentDecision, account: WallbitAccount
+) -> WallbitTxMirror | None:
+    """Earliest mirrored tx that matches the decision and isn't claimed by another.
+
+    Returns None when the tool leaves no transaction trail (card status) or
+    nothing matches yet.
+    """
+    call = (decision.tools_called or [{}])[0]
+    tool = call.get("tool") or ""
+    args = call.get("args") or {}
+    since = (decision.confirmed_at or decision.created_at) - RECONCILE_LOOKBACK
+
+    claimed = set(
+        AgentDecision.objects.exclude(id=decision.id)
+        .exclude(wallbit_tx_uuid__isnull=True)
+        .exclude(wallbit_tx_uuid="")
+        .values_list("wallbit_tx_uuid", flat=True)
+    )
+    candidates = WallbitTxMirror.objects.filter(
+        account=account, created_at_wallbit__gte=since
+    ).order_by("created_at_wallbit")
+
+    if tool == "wallbit_place_trade":
+        symbol = str(args.get("symbol", "")).upper()
+        amount = Decimal(str(args.get("amount_usd", "0")))
+        direction = str(args.get("action", "BUY")).upper()
+        candidates = candidates.filter(tx_type__iexact="TRADE")
+        for tx in candidates:
+            if tx.wallbit_uuid in claimed:
+                continue
+            info = (tx.raw or {}).get("trade_info") or {}
+            if str(info.get("direction") or direction).upper() != direction:
+                continue
+            if direction == "BUY":
+                ok = (tx.dest_currency or "").upper() == symbol and _amount_matches(
+                    tx.source_amount, amount
+                )
+            else:
+                ok = (tx.source_currency or "").upper() == symbol and _amount_matches(
+                    tx.dest_amount, amount
+                )
+            if ok:
+                return tx
+        return None
+
+    if tool == "wallbit_move_funds":
+        amount = Decimal(str(args.get("amount", "0")))
+        for tx in candidates.filter(tx_type__in=_MOVE_TX_TYPES):
+            if tx.wallbit_uuid not in claimed and _amount_matches(tx.source_amount, amount):
+                return tx
+        return None
+
+    if tool in _CHEST_TX_TYPES:
+        amount = Decimal(str(args.get("amount_usd", "0")))
+        for tx in candidates.filter(tx_type__in=_CHEST_TX_TYPES[tool]):
+            if tx.wallbit_uuid not in claimed and (
+                _amount_matches(tx.source_amount, amount)
+                or _amount_matches(tx.dest_amount, amount)
+            ):
+                return tx
+        return None
+
+    return None
+
+
+def _decision_summary(decision: AgentDecision) -> str:
+    call = (decision.tools_called or [{}])[0]
+    return (call.get("preview") or {}).get("summary") or "la operación"
+
+
+@shared_task(bind=True, max_retries=RECONCILE_MAX_ATTEMPTS)
+def reconcile_uncertain_decision(self, decision_id: int) -> dict[str, Any]:
+    """Settle an UNCERTAIN decision from Wallbit's transaction history.
+
+    Retries a few times (the fill can take a minute to show up), then gives a
+    definitive answer either way and notifies the user on their channel.
+    """
+    decision = (
+        AgentDecision.objects.select_related("user").filter(id=decision_id).first()
+    )
+    if decision is None or decision.status != AgentDecision.UNCERTAIN:
+        return {"ok": True, "skipped": True, "decision_id": decision_id}
+
+    account = WallbitAccount.objects.filter(user_id=decision.user_id).first()
+    if account is None:
+        mark_failed(decision, error="reconcile: wallbit account missing")
+        return {"ok": False, "error": "account_missing"}
+
+    sync = run_wallbit_sync(account.id)
+    if not sync.get("ok"):
+        logger.warning(
+            "reconcile: sync failed for decision %s: %s", decision_id, sync.get("error")
+        )
+
+    match = find_transaction_for_decision(decision, account)
+    summary = _decision_summary(decision)
+    if match is not None:
+        mark_executed(decision, wallbit_tx_uuid=match.wallbit_uuid)
+        notify_decision_user(
+            decision,
+            f"✅ Verifiqué en Wallbit: {summary} SÍ se ejecutó aunque no hubo "
+            f"respuesta a tiempo. No se repitió.\n\n🧾 Tx: {match.wallbit_uuid}",
+        )
+        return {"ok": True, "executed": True, "tx": match.wallbit_uuid}
+
+    if self.request.retries < RECONCILE_MAX_ATTEMPTS - 1:
+        raise self.retry(countdown=RECONCILE_RETRY_SECONDS)
+
+    tool = (decision.tools_called or [{}])[0].get("tool") or ""
+    if tool == "wallbit_set_card_status":
+        mark_failed(decision, error="reconcile: no transaction trail for card status")
+        notify_decision_user(
+            decision,
+            "⚠️ Wallbit no respondió al cambio de estado de la tarjeta y no puedo "
+            "verificarlo desde aquí. Revisa el estado en la app de Wallbit.",
+        )
+        return {"ok": False, "unverifiable": True}
+
+    mark_failed(decision, error="reconcile: not found in Wallbit history after retries")
+    notify_decision_user(
+        decision,
+        f"❌ Verifiqué en Wallbit y {summary} NO se ejecutó. "
+        "Si quieres, pídemela de nuevo.",
+    )
+    return {"ok": True, "executed": False}

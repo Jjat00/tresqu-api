@@ -6,7 +6,13 @@ from rest_framework.pagination import PageNumberPagination
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
-from .agent_safety import AccountNotConnected, get_account_or_raise, get_pending_decision
+from .agent_safety import (
+    AccountNotConnected,
+    claim_pending_decision,
+    get_account_or_raise,
+    get_pending_decision,
+    mark_failed,
+)
 from .confirmation_actions import cancel_pending_decision
 from .client import (
     WallbitAuthError,
@@ -14,10 +20,18 @@ from .client import (
     WallbitError,
     WallbitPermissionError,
 )
-from .crypto import decrypt_api_key, encrypt_api_key
+from .crypto import encrypt_api_key
 from .executors import LOCAL_ONLY_TOOLS, UnknownTool, execute_decision
 from .models import AgentDecision, AgentLimits, Investment, WallbitAccount
-from .portfolio import get_holdings, get_pnl_timeline, get_summary, get_timeline
+from .portfolio import (
+    WallbitUnavailableError,
+    get_asset_catalog,
+    get_holdings,
+    get_pnl_timeline,
+    get_summary,
+    get_timeline,
+    invalidate_snapshot,
+)
 from .serializers import (
     AgentDecisionSerializer,
     AgentLimitsSerializer,
@@ -78,6 +92,8 @@ class WallbitConnectView(APIView):
                 "kill_switch_until": None,
             },
         )
+        # A (re)connected key must not serve the previous key's cached snapshot.
+        invalidate_snapshot(account.id)
         return Response(WallbitStatusSerializer(account).data, status=status.HTTP_200_OK)
 
 
@@ -217,17 +233,20 @@ class AgentConfirmView(APIView):
     permission_classes = [permissions.IsAuthenticated]
 
     def post(self, request, decision_id: int):
+        # Row-locked claim: a concurrent confirm of the same decision gets 404
+        # here and never reaches Wallbit (see agent_safety.claim_pending_decision).
         try:
-            decision = get_pending_decision(request.user, decision_id)
+            decision = claim_pending_decision(request.user, decision_id)
         except AgentDecision.DoesNotExist:
             return Response(
-                {"detail": "Decision not found or already resolved."},
+                {"detail": "Decision not found, in progress or already resolved."},
                 status=status.HTTP_404_NOT_FOUND,
             )
 
         try:
             account = get_account_or_raise(request.user)
         except Exception as exc:
+            mark_failed(decision, error=str(exc))
             return Response(
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
@@ -239,6 +258,7 @@ class AgentConfirmView(APIView):
             and account.kill_switch_until
             and account.kill_switch_until > timezone.now()
         ):
+            mark_failed(decision, error="kill_switch_active")
             return Response(
                 {"detail": "Kill switch active — cannot execute."},
                 status=status.HTTP_403_FORBIDDEN,
@@ -247,17 +267,26 @@ class AgentConfirmView(APIView):
         try:
             result = execute_decision(decision, account)
         except UnknownTool as exc:
+            mark_failed(decision, error=str(exc))
             return Response(
                 {"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST
             )
 
         decision.refresh_from_db()
+        if result.get("ok"):
+            http_status = status.HTTP_200_OK
+        elif result.get("uncertain"):
+            # Wallbit gave no answer: the order may have filled. Not an error
+            # and not a success — the decision is being reconciled.
+            http_status = status.HTTP_202_ACCEPTED
+        else:
+            http_status = status.HTTP_502_BAD_GATEWAY
         return Response(
             {
                 "result": result,
                 "decision": AgentDecisionSerializer(decision).data,
             },
-            status=status.HTTP_200_OK if result.get("ok") else status.HTTP_502_BAD_GATEWAY,
+            status=http_status,
         )
 
 
@@ -379,6 +408,13 @@ class PortfolioSummaryView(APIView):
                 {"detail": "Wallbit not connected", "connected": False},
                 status=status.HTTP_424_FAILED_DEPENDENCY,
             )
+        except WallbitUnavailableError as exc:
+            # Wallbit is down / rate-limiting us and there is no last-good
+            # snapshot yet: say so instead of rendering a $0 portfolio.
+            return Response(
+                {"detail": str(exc), "unavailable": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
         except WallbitError as exc:
             logger.warning("portfolio summary upstream failure", exc_info=exc)
             return Response(
@@ -400,6 +436,11 @@ class PortfolioHoldingsView(APIView):
             return Response(
                 {"detail": "Wallbit not connected", "connected": False},
                 status=status.HTTP_424_FAILED_DEPENDENCY,
+            )
+        except WallbitUnavailableError as exc:
+            return Response(
+                {"detail": str(exc), "unavailable": True},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
         except WallbitError as exc:
             logger.warning("portfolio holdings upstream failure", exc_info=exc)
@@ -429,9 +470,10 @@ class PortfolioTimelineView(APIView):
 class PortfolioPnLTimelineView(APIView):
     """GET /api/wallbit/portfolio/pnl-timeline — gains/losses (P&L) over time.
 
-    Periods: 1w, 1m, 1y, ytd, all. The last point is anchored to the live
-    summary so it matches the hero P&L. ``stale`` flags an approximated series
-    (missing price history or legacy rows without precise share counts).
+    Periods: 1d (intraday), 1w, 1m, 2m, 6m, 1y, ytd, all. The last point is
+    anchored to the live summary so it matches the hero P&L. ``stale`` flags an
+    approximated series (missing price history or legacy rows without precise
+    share counts).
     """
 
     permission_classes = [permissions.IsAuthenticated]
@@ -485,17 +527,11 @@ class AssetSearchView(APIView):
             limit = 12
         limit = max(1, min(limit, 50))
 
-        params = {"page": 1, "limit": limit}
-        if query:
-            params["search"] = query
-        if category:
-            params["category"] = category
-
         try:
             account = get_account_or_raise(request.user)
-            api_key = decrypt_api_key(account.encrypted_api_key)
-            with WallbitClient(api_key) as client:
-                response = client.get("/assets", params=params)
+            items, stale = get_asset_catalog(
+                account, query=query, category=category, limit=limit
+            )
         except AccountNotConnected:
             return Response(
                 {"detail": "Wallbit not connected", "connected": False},
@@ -508,7 +544,5 @@ class AssetSearchView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        payload = response.data or {}
-        items = payload.get("data", payload if isinstance(payload, list) else [])
-        assets = [_normalize_asset(a) for a in items if isinstance(a, dict)]
-        return Response({"assets": assets})
+        assets = [_normalize_asset(a) for a in items]
+        return Response({"assets": assets, "stale": stale})

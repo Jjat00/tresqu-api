@@ -11,6 +11,35 @@ from income.models import IncomeCategory
 from users.models import User
 
 
+# Conectores que en español van en minúscula dentro de un nombre propio.
+# ``str.title()`` los mayusculiza ("Salario o Trabajo Fijo" → "Salario O Trabajo
+# Fijo"), lo que rompía cualquier comparación exacta contra las categorías
+# predefinidas y ensuciaba las creadas por el agente.
+_CATEGORY_NAME_LOWERCASE_WORDS = {
+    'a', 'al', 'con', 'de', 'del', 'e', 'el', 'en', 'la', 'las', 'lo', 'los',
+    'o', 'para', 'por', 'sin', 'sobre', 'u', 'un', 'una', 'y',
+}
+
+
+def normalize_category_name(name: str) -> str:
+    """Normaliza el nombre de una categoría respetando los conectores.
+
+    Capitaliza cada palabra salvo los conectores en español, que quedan en
+    minúscula cuando no abren el nombre. Así "salario o trabajo fijo" y
+    "SALARIO O TRABAJO FIJO" producen ambos "Salario o Trabajo Fijo", que es
+    exactamente como se guardan las categorías predefinidas.
+    """
+    words = (name or "").strip().split()
+    normalized = []
+    for index, word in enumerate(words):
+        lowered = word.lower()
+        if index > 0 and lowered in _CATEGORY_NAME_LOWERCASE_WORDS:
+            normalized.append(lowered)
+        else:
+            normalized.append(lowered[:1].upper() + lowered[1:])
+    return " ".join(normalized)
+
+
 # FUNCIONES PRINCIPALES PARA CATEGORÍAS POR USUARIO
 
 def get_user_expense_categories(user: User) -> List[str]:
@@ -142,7 +171,7 @@ def get_or_create_user_expense_category(
     """
     try:
         # Normalizar el nombre manteniendo el formato título para consistencia
-        normalized_name = name.strip().title()
+        normalized_name = normalize_category_name(name)
 
         # Intentar obtener la categoría existente (case-insensitive)
         try:
@@ -223,7 +252,7 @@ def get_or_create_user_income_category(
     """
     try:
         # Normalizar el nombre manteniendo el formato título para consistencia
-        normalized_name = name.strip().title()
+        normalized_name = normalize_category_name(name)
 
         # Intentar obtener la categoría existente (case-insensitive)
         try:

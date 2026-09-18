@@ -194,17 +194,22 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
         logger.info(f"Mensaje silenciado por el guardrail de tema (usuario {user.id})")
         return None
 
-    pending = response.pending_confirmation
-    if pending and sender_phone:
+    pendings = response.pending_confirmations or (
+        [response.pending_confirmation] if response.pending_confirmation else []
+    )
+    if pendings and sender_phone:
         try:
             from .wallbit_handlers import send_confirmation_buttons
 
-            send_confirmation_buttons(
-                phone=sender_phone,
-                decision_id=pending["confirmation_id"],
-                preview=pending.get("preview", {}),
-                two_step=pending.get("two_step_required", False),
-            )
+            # One interactive message per proposed operation: each decision
+            # must be confirmed (or cancelled) on its own.
+            for pending in pendings:
+                send_confirmation_buttons(
+                    phone=sender_phone,
+                    decision_id=pending["confirmation_id"],
+                    preview=pending.get("preview", {}),
+                    two_step=pending.get("two_step_required", False),
+                )
             return response.text or "Te envié la propuesta — confirma con el botón."
         except Exception as exc:
             logger.exception(f"send_confirmation_buttons failed: {exc}")

@@ -446,6 +446,12 @@ CELERY_BEAT_SCHEDULE = {
         "task": "composio_integration.tasks.retry_failed_connections",
         "schedule": 60 * 60,  # every 1 hour
     },
+    # El perfil de riesgo inferido cachea 7 días; sin esto solo se recalculaba
+    # al abrir el dashboard y el chat reportaba "no tengo tu perfil".
+    "agents-refresh-stale-inferences": {
+        "task": "agents.tasks.refresh_stale_inferences",
+        "schedule": 24 * 60 * 60,  # daily
+    },
 }
 
 # Wallbit

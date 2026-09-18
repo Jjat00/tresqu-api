@@ -20,9 +20,27 @@ logger = logging.getLogger(__name__)
 
 API_PREFIX = "/api/public/v1"
 DEFAULT_TIMEOUT = httpx.Timeout(15.0, connect=5.0)
+# Writes (POST/PATCH/DELETE) get a longer read timeout: Wallbit answers
+# ``POST /trades`` only after the order fills, which took 15–28 s in practice
+# (measured 2026-09-02). A read timeout on a write is NOT a failure — the order
+# may well have been placed — so it is never retried (see IDEMPOTENT_METHODS).
+WRITE_TIMEOUT = httpx.Timeout(60.0, connect=5.0)
 MAX_ATTEMPTS = 4
+# Only these methods are ever retried. On 2026-09-02 a POST /trades that timed
+# out was resent 4 times and placed the same 20 USD order four times (real
+# money). A write that got no answer is in an UNKNOWN state: record it and
+# reconcile against Wallbit's transaction history, never resend it.
+IDEMPOTENT_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 BACKOFF_BASE = 0.5
 BACKOFF_CAP = 8.0
+# Longest ``Retry-After`` we are willing to sleep through inside a retry. Above
+# it we stop retrying and raise, because the block is not a burst we can wait
+# out: Wallbit sits behind a Cloudflare rate-limit rule that answers with error
+# 1015 and ``Retry-After: 3600``, and every request sent inside that window
+# keeps it open. Measured 2026-08-31; the docs still advertise 60 req/min and a
+# 30 s retry, the API caps at ``X-RateLimit-Limit: 15`` and punishes with an
+# hour. The block is per egress IP, not per API key.
+RETRY_AFTER_MAX_SLEEP = 120.0
 
 
 class WallbitError(Exception):
@@ -55,11 +73,28 @@ class WallbitValidationError(WallbitError):
 
 
 class WallbitRateLimitError(WallbitError):
-    """429 — rate limit exceeded after retries are exhausted."""
+    """429 — rate limit exceeded (after retries, or immediately when the
+    client was built with ``retry_rate_limited=False``).
+
+    ``retry_after`` carries the upstream ``Retry-After`` seconds when present
+    so callers can size a cooldown instead of hammering the blocked window.
+    """
+
+    retry_after: float | None = None
 
 
 class WallbitServerError(WallbitError):
     """5xx."""
+
+
+class WallbitUncertainError(WallbitError):
+    """A non-idempotent request (POST/PATCH/DELETE) got no usable answer.
+
+    Raised on a transport error (timeout, connection drop) or a 5xx for a
+    write. The request MAY have been applied upstream — e.g. Wallbit filled
+    the trade but the response arrived after our timeout. Callers must NOT
+    retry it: persist the unknown state and reconcile against ``/transactions``.
+    """
 
 
 @dataclass(frozen=True)
@@ -84,10 +119,32 @@ class WallbitClient:
     httpx.Client closes.
     """
 
-    def __init__(self, api_key: str, *, base_url: str | None = None, timeout: httpx.Timeout = DEFAULT_TIMEOUT) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        *,
+        base_url: str | None = None,
+        timeout: httpx.Timeout = DEFAULT_TIMEOUT,
+        write_timeout: httpx.Timeout = WRITE_TIMEOUT,
+        max_attempts: int = MAX_ATTEMPTS,
+        retry_rate_limited: bool = True,
+    ) -> None:
+        """
+        ``max_attempts`` bounds transport/5xx/429 retries **of idempotent
+        requests only** (GET). Writes always get exactly one attempt and use
+        ``write_timeout``. ``retry_rate_limited``
+        controls whether a 429 is retried after sleeping ``Retry-After``: keep
+        it on for background jobs, turn it OFF on request-path reads — the
+        dashboard would otherwise block for up to ``BACKOFF_CAP × attempts``
+        seconds while every retry keeps the upstream (Cloudflare) rate-limit
+        window open. Callers should fail fast and serve a cached snapshot.
+        """
         if not api_key:
             raise WallbitAuthError("API key is required")
         self._api_key = api_key
+        self._max_attempts = max(1, int(max_attempts))
+        self._write_timeout = write_timeout
+        self._retry_rate_limited = retry_rate_limited
         self._client = httpx.Client(
             base_url=(base_url or settings.WALLBIT_API_BASE_URL).rstrip("/"),
             timeout=timeout,
@@ -129,16 +186,33 @@ class WallbitClient:
         url = f"{API_PREFIX}{path}" if not path.startswith(API_PREFIX) else path
         headers = {"X-API-Key": self._api_key}
 
-        for attempt in range(1, MAX_ATTEMPTS + 1):
+        # Writes get exactly ONE attempt: a retried POST /trades is a second
+        # order, not a second try. They also get the longer write timeout.
+        idempotent = method.upper() in IDEMPOTENT_METHODS
+        max_attempts = self._max_attempts if idempotent else 1
+        timeout = httpx.USE_CLIENT_DEFAULT if idempotent else self._write_timeout
+
+        for attempt in range(1, max_attempts + 1):
             try:
                 response = self._client.request(
-                    method, url, params=params, json=json, headers=headers
+                    method, url, params=params, json=json, headers=headers, timeout=timeout
                 )
             except httpx.RequestError as exc:
-                if attempt == MAX_ATTEMPTS:
-                    logger.error(
-                        "wallbit transport error", extra={"method": method, "path": url, "attempt": attempt, "error": str(exc)}
-                    )
+                # Log EVERY failed attempt. Before 2026-09-02 only the last one
+                # was logged and four silent retries hid the duplicate orders.
+                logger.warning(
+                    "wallbit transport error",
+                    extra={
+                        "method": method, "path": url, "attempt": attempt,
+                        "max_attempts": max_attempts, "error": str(exc),
+                    },
+                )
+                if not idempotent:
+                    raise WallbitUncertainError(
+                        f"{method.upper()} {path}: Wallbit no respondió "
+                        f"({exc.__class__.__name__}); la operación pudo haberse ejecutado"
+                    ) from exc
+                if attempt == max_attempts:
                     raise WallbitError(f"Transport error after {attempt} attempts: {exc}") from exc
                 self._sleep_backoff(attempt)
                 continue
@@ -155,13 +229,27 @@ class WallbitClient:
                 },
             )
 
-            if response.status_code == 429 and attempt < MAX_ATTEMPTS:
-                self._sleep_for_retry_after(response, attempt)
-                continue
+            if response.status_code == 429 and self._retry_rate_limited and attempt < max_attempts:
+                if self._sleep_for_retry_after(response, attempt):
+                    continue
+                # Retry-After longer than we can sit on: fall through and raise
+                # so the caller sees the block (and its retry_after) instead of
+                # spending the remaining attempts renewing it.
 
-            if 500 <= response.status_code < 600 and attempt < MAX_ATTEMPTS:
-                self._sleep_backoff(attempt)
-                continue
+            if 500 <= response.status_code < 600:
+                if not idempotent:
+                    # A 5xx on a write may have landed after the side effect
+                    # (or never reached Wallbit). Unknown either way.
+                    payload = _decode_payload(response)
+                    raise WallbitUncertainError(
+                        _extract_message(payload)
+                        or f"Wallbit responded with status {response.status_code}",
+                        status=response.status_code,
+                        payload=payload,
+                    )
+                if attempt < max_attempts:
+                    self._sleep_backoff(attempt)
+                    continue
 
             return self._build_response(response, rate_limit)
 
@@ -172,29 +260,44 @@ class WallbitClient:
         delay += random.uniform(0, BACKOFF_BASE)
         time.sleep(delay)
 
-    def _sleep_for_retry_after(self, response: httpx.Response, attempt: int) -> None:
-        retry_after = response.headers.get("Retry-After")
-        if retry_after:
-            try:
-                delay = float(retry_after)
-            except ValueError:
-                delay = BACKOFF_BASE * (2 ** (attempt - 1))
-            time.sleep(min(delay, BACKOFF_CAP))
-            return
-        self._sleep_backoff(attempt)
+    def _sleep_for_retry_after(self, response: httpx.Response, attempt: int) -> bool:
+        """Sleep the upstream ``Retry-After``. Returns whether to retry at all.
+
+        A ``Retry-After`` above ``RETRY_AFTER_MAX_SLEEP`` means we are inside a
+        long block, not a burst: sleeping a capped 8 s and retrying anyway (what
+        this did before) both stalls the caller and keeps the window open.
+        Answer False there so ``_request`` gives up and raises.
+        """
+        retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+        if retry_after is None:
+            self._sleep_backoff(attempt)
+            return True
+        if retry_after > RETRY_AFTER_MAX_SLEEP:
+            logger.warning(
+                "wallbit rate-limited with Retry-After %.0fs; not retrying", retry_after
+            )
+            return False
+        time.sleep(retry_after)
+        return True
 
     def _build_response(self, response: httpx.Response, rate_limit: RateLimitState) -> WallbitResponse:
-        payload: Any
-        try:
-            payload = response.json() if response.content else None
-        except ValueError:
-            payload = response.text
+        payload = _decode_payload(response)
 
         status = response.status_code
         if status >= 400:
-            raise _error_for_status(status, payload)
+            error = _error_for_status(status, payload)
+            if isinstance(error, WallbitRateLimitError):
+                error.retry_after = _parse_retry_after(response.headers.get("Retry-After"))
+            raise error
 
         return WallbitResponse(status=status, data=payload, rate_limit=rate_limit)
+
+
+def _decode_payload(response: httpx.Response) -> Any:
+    try:
+        return response.json() if response.content else None
+    except ValueError:
+        return response.text
 
 
 def _parse_rate_limit(headers) -> RateLimitState:
@@ -212,6 +315,15 @@ def _parse_rate_limit(headers) -> RateLimitState:
         remaining=_int("X-RateLimit-Remaining"),
         reset_at=_int("X-RateLimit-Reset"),
     )
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        return None
 
 
 def _error_for_status(status: int, payload: Any) -> WallbitError:
