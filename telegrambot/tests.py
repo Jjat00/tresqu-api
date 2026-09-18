@@ -151,6 +151,40 @@ class TelegramRegistrationTests(TransactionTestCase):
             Chat.objects.get(platform_chat_id="8926044722").user_id, existente.id)
         self.assertIn("vinculada", " ".join(self._respuestas(update)))
 
+    def test_cuenta_mexicana_de_whatsapp_se_vincula_aunque_falte_el_1(self):
+        """El caso real del 17-09: alguien con cuenta de WhatsApp en México.
+
+        WhatsApp guarda el móvil mexicano como "521..." y el contacto de
+        Telegram llega como "52...". Buscando solo por la forma exacta se le
+        crearía una segunda cuenta y sus gastos quedarían partidos en dos.
+        """
+        de_whatsapp = User.objects.create(
+            external_id="wa_5214812413697", platform="WHATSAPP",
+            phone_number="5214812413697", default_currency="MXN",
+        )
+        update = self._update_con_contacto(phone="+524812413697")
+
+        async_to_sync(bot.handle_contact_shared)(update, self._contexto())
+
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(
+            Chat.objects.get(platform_chat_id="8926044722").user_id, de_whatsapp.id)
+        self.assertIn("vinculada", " ".join(self._respuestas(update)))
+
+    def test_cuenta_antigua_guardada_sin_el_1_tambien_se_encuentra(self):
+        """Las cuentas mexicanas creadas antes (sin el "1") siguen siendo suyas."""
+        antigua = User.objects.create(
+            external_id="52481241369", platform="telegram",
+            phone_number="524812413697", default_currency="MXN",
+        )
+        update = self._update_con_contacto(phone="+5214812413697")
+
+        async_to_sync(bot.handle_contact_shared)(update, self._contexto())
+
+        self.assertEqual(User.objects.count(), 1)
+        self.assertEqual(
+            Chat.objects.get(platform_chat_id="8926044722").user_id, antigua.id)
+
     def test_contacto_ajeno_no_crea_cuenta(self):
         update = self._update_con_contacto(contact_owner=111222333)
 

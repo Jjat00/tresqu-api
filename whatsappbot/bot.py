@@ -11,6 +11,7 @@ from users.models import User, Chat, Message, TrackingLink
 from agents.run_context import start_transaction_tracking
 from .services import process_message
 from .utils import normalize_phone_number
+from users.phone import phone_variants
 import re
 
 # Configuración de logging
@@ -114,10 +115,16 @@ def get_user_by_external_id(external_id):
 
 
 def get_user_by_phone_number(phone_number):
-    """Busca un usuario por número de teléfono"""
-    # Normalizar el número de teléfono (eliminar el signo + si existe)
-    normalized_phone = normalize_phone_number(phone_number)
-    return User.objects.filter(phone_number=normalized_phone).first()
+    """Busca un usuario por número de teléfono.
+
+    Busca por todas las formas equivalentes del número (México se guarda con y
+    sin el "1"): quien se dio de alta por Telegram tiene que encontrarse desde
+    WhatsApp y al revés, o se le crea una segunda cuenta.
+    """
+    variantes = phone_variants(phone_number)
+    if not variantes:
+        return None
+    return User.objects.filter(phone_number__in=variantes).first()
 
 
 def create_user(external_id, platform, first_name, username=None, phone_number=None, default_currency='USD', source_tracking_link=None):

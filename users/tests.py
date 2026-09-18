@@ -5,6 +5,7 @@ from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken, RefreshToken
 
 from users.models import MonthlyUsage, SubscriptionPlan, User
+from users.phone import normalize_phone_number, phone_variants
 from users.plan_limits import get_max_expenses, get_max_incomes, is_unlimited_plan
 
 
@@ -164,3 +165,38 @@ class PlanEnforcementApiTests(TransactionTestCase):
         self.assertEqual(r.status_code, 201, r.content)
 
         self.assertEqual(MonthlyUsage.get_current_usage(user).expenses_count, before + 1)
+
+
+class PhoneNormalizationTests(TestCase):
+    """El mismo número escrito de dos formas tiene que ser la misma persona.
+
+    México marca el móvil con o sin un "1" tras el código de país. WhatsApp
+    entrega "521...", el contacto de Telegram llega como "52...", y si cada
+    canal busca solo por su forma se crean dos cuentas para la misma persona.
+    """
+
+    def test_mexico_se_guarda_en_la_forma_de_whatsapp(self):
+        for entrada in ("+52 481 241 3697", "524812413697", "5214812413697"):
+            with self.subTest(entrada=entrada):
+                self.assertEqual(
+                    normalize_phone_number(entrada), "5214812413697")
+
+    def test_el_resto_de_paises_solo_pierde_el_mas_y_los_separadores(self):
+        self.assertEqual(normalize_phone_number("+56 9 4247 9733"), "56942479733")
+        self.assertEqual(normalize_phone_number("+57 (300) 123-4567"), "573001234567")
+        self.assertIsNone(normalize_phone_number(None))
+        self.assertIsNone(normalize_phone_number(""))
+
+    def test_las_dos_formas_mexicanas_son_variantes_la_una_de_la_otra(self):
+        self.assertCountEqual(
+            phone_variants("+52 481 241 3697"),
+            ["5214812413697", "524812413697"],
+        )
+        self.assertCountEqual(
+            phone_variants("5214812413697"),
+            ["5214812413697", "524812413697"],
+        )
+
+    def test_un_numero_sin_ambiguedad_tiene_una_sola_variante(self):
+        self.assertEqual(phone_variants("+56942479733"), ["56942479733"])
+        self.assertEqual(phone_variants(None), [])
