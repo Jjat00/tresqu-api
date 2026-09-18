@@ -1,5 +1,6 @@
 from asgiref.sync import sync_to_async
 from users.models import Message
+from users.phone import normalize_phone_number as _normalize_phone_number
 from langchain_core.messages import HumanMessage, AIMessage
 from categories.models import Category
 from income.models import IncomeCategory
@@ -39,82 +40,9 @@ def normalize_category_name(name: str) -> str:
     return name.strip().lower()
 
 
-def normalize_phone_number(phone_number):
-    """
-    Normaliza un número de teléfono eliminando el signo + al inicio y todos los espacios.
-    Maneja casos especiales como números mexicanos, añadiendo el "1" requerido por WhatsApp.
-
-    Args:
-        phone_number (str): El número de teléfono a normalizar
-
-    Returns:
-        str: El número normalizado sin el signo + y sin espacios, o None si el input era None
-
-    Examples:
-        "+52 55 2899 5412" -> "5215528995412" (México móvil)
-        "+5215528995412" -> "5215528995412" (ya correcto)
-        "525528995412" -> "5215528995412" (añade el 1)
-        "5215528995412" -> "5215528995412" (ya correcto)
-        "+52 33 1234 5678" -> "5213312345678" (Guadalajara)
-
-    Nota: Para números mexicanos, WhatsApp requiere el formato 521XXXXXXXXXX
-    """
-    if not phone_number:
-        return None
-
-    # Eliminar espacios al inicio y final primero
-    normalized = phone_number.strip()
-
-    # Eliminar el signo + al inicio si existe
-    normalized = normalized.lstrip('+')
-
-    # Eliminar todos los espacios, guiones y otros caracteres
-    normalized = normalized.replace(' ', '').replace(
-        '-', '').replace('(', '').replace(')', '')
-
-    # Caso especial para México: números móviles
-    # WhatsApp requiere el formato 521XXXXXXXXXX para números mexicanos
-    if normalized.startswith('52'):
-        # Lista extendida de códigos de área móviles mexicanos
-        mobile_area_codes = [
-            '55', '33', '81', '22', '44', '66', '99', '77', '61', '64', '65',
-            '67', '68', '69', '21', '24', '25', '26', '27', '28', '29', '31',
-            '32', '34', '35', '36', '37', '38', '43', '45', '46', '47', '48',
-            '49', '52', '53', '56', '58', '59', '62', '63', '71', '72', '73',
-            '74', '75', '76', '78', '83', '84', '86', '87', '88', '89', '92',
-            '93', '94', '95', '96', '97', '98'
-        ]
-
-        # Caso 1: Número de 12 dígitos sin el "1" (525528995412)
-        if len(normalized) == 12:
-            area_codes = normalized[2:4]
-            # Log específico para debug del número real
-            if normalized == '525559177302':
-                print(
-                    f"🔍 DEBUG: Procesando tu número específico {normalized}, código de área: {area_codes}")
-            if area_codes in mobile_area_codes:
-                # Insertar el "1" después del código de país para números móviles
-                old_normalized = normalized
-                normalized = '521' + normalized[2:]
-                if old_normalized == '525559177302':
-                    print(
-                        f"🎯 DEBUG: Tu número transformado de {old_normalized} a {normalized}")
-
-        # Caso 2: Número de 13 dígitos que ya tiene el "1" (5215528995412)
-        elif len(normalized) == 13 and normalized[2] == '1':
-            area_codes = normalized[3:5]
-            if area_codes in mobile_area_codes:
-                # Ya está en el formato correcto
-                pass
-
-        # Caso 3: Número de 13 dígitos pero sin el "1" en la posición correcta
-        elif len(normalized) == 13 and normalized[2] != '1':
-            area_codes = normalized[2:4]
-            if area_codes in mobile_area_codes:
-                # Reformatear: 52 + área + resto -> 521 + área + resto
-                normalized = '521' + normalized[2:]
-
-    return normalized
+# La normalización vive en users/phone.py: Telegram, WhatsApp y la web tienen
+# que escribir el mismo número igual o la misma persona acaba con dos cuentas.
+normalize_phone_number = _normalize_phone_number
 
 
 @sync_to_async

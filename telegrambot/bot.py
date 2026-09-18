@@ -13,6 +13,10 @@ import pytz
 from django.conf import settings
 from django.core.cache import cache
 from users.models import User, Chat, Message, TrackingLink
+from users.phone import (
+    normalize_phone_number as _normalize_phone_number,
+    phone_variants,
+)
 from .services import process_message
 from .currencies import (
     COMMON_CURRENCIES,
@@ -36,47 +40,9 @@ logger = logging.getLogger(__name__)
 ESPERANDO_MENSAJE_BROADCAST = 2
 
 
-# Función de utilidad para normalizar números de teléfono
-def normalize_phone_number(phone_number):
-    """
-    Normaliza un número de teléfono eliminando el signo + al inicio y todos los espacios.
-    Maneja casos especiales como números mexicanos.
-
-    Args:
-        phone_number (str): El número de teléfono a normalizar
-
-    Returns:
-        str: El número normalizado sin el signo + y sin espacios, o None si el input era None
-    """
-    if not phone_number:
-        return None
-
-    # Eliminar espacios al inicio y final primero
-    normalized = phone_number.strip()
-
-    # Eliminar el signo + al inicio si existe
-    normalized = normalized.lstrip('+')
-
-    # Eliminar todos los espacios, guiones y otros caracteres
-    normalized = normalized.replace(' ', '').replace(
-        '-', '').replace('(', '').replace(')', '')
-
-    # Caso especial para México: números móviles
-    # Si el número empieza con 52 y tiene 12 dígitos, pero no tiene el "1" después del código de país
-    # Ejemplo: 525528995412 debería ser 5215528995412
-    if normalized.startswith('52') and len(normalized) == 12:
-        # Verificar si es un número móvil mexicano (códigos de área móviles comunes)
-        # Los códigos de área móviles en México incluyen: 55, 33, 81, 222, etc.
-        # Obtener los primeros 2 dígitos después de 52
-        area_codes = normalized[2:4]
-        mobile_area_codes = ['55', '33', '81', '22', '44',
-                             '66', '99', '77', '61', '64', '65', '67', '68', '69']
-
-        if area_codes in mobile_area_codes:
-            # Insertar el "1" después del código de país para números móviles
-            normalized = '521' + normalized[2:]
-
-    return normalized
+# El teléfono se escribe igual en todos los canales (users/phone.py): es lo
+# único que identifica a la misma persona en Telegram, WhatsApp y la web.
+normalize_phone_number = _normalize_phone_number
 
 
 # Funciones síncronas para operaciones de base de datos
@@ -172,10 +138,17 @@ def get_user_by_external_id(external_id):
 
 
 def get_user_by_phone_number(phone_number):
-    """Busca un usuario por número de teléfono"""
-    # Normalizar el número de teléfono (eliminar el signo + si existe)
-    normalized_phone = normalize_phone_number(phone_number)
-    return User.objects.filter(phone_number=normalized_phone).first()
+    """Busca un usuario por número de teléfono.
+
+    Busca por todas las formas equivalentes del número. Un mexicano dado de
+    alta por WhatsApp está guardado como "521..." y su contacto de Telegram
+    llega como "52...": con una búsqueda exacta se le crearía otra cuenta en
+    vez de vincular la suya.
+    """
+    variantes = phone_variants(phone_number)
+    if not variantes:
+        return None
+    return User.objects.filter(phone_number__in=variantes).first()
 
 
 def create_user(external_id, platform, first_name, username, phone_number=None,
