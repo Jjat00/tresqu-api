@@ -48,6 +48,9 @@ ISO_4217_CODES = {
     "CRC": "Colón costarricense",
     "DOP": "Peso dominicano",
     "GTQ": "Quetzal guatemalteco",
+    "PYG": "Guaraní paraguayo",
+    "NIO": "Córdoba nicaragüense",
+    "HNL": "Lempira hondureño",
     "INR": "Rupia india",
     "RUB": "Rublo ruso",
     "ZAR": "Rand sudafricano",
@@ -90,3 +93,52 @@ def get_currency_name(code):
 def format_currency_option(currency):
     """Formatea una opción de moneda para mostrar al usuario"""
     return f"{currency['flag']} {currency['code']} - {currency['name']}"
+
+
+# Prefijo telefónico internacional (E.164, sin el +) -> moneda y zona horaria.
+# Con esto una cuenta nueva queda usable desde el primer mensaje sin pedir nada:
+# son valores provisionales que el usuario ajusta con los botones del registro
+# o, más tarde, con /moneda y /timezone.
+PHONE_PREFIX_DEFAULTS = {
+    "1809": ("DOP", "America/Santo_Domingo"),
+    "1829": ("DOP", "America/Santo_Domingo"),
+    "1849": ("DOP", "America/Santo_Domingo"),
+    "34": ("EUR", "Europe/Madrid"),
+    "51": ("PEN", "America/Lima"),
+    "52": ("MXN", "America/Mexico_City"),
+    "54": ("ARS", "America/Argentina/Buenos_Aires"),
+    "55": ("BRL", "America/Sao_Paulo"),
+    "56": ("CLP", "America/Santiago"),
+    "57": ("COP", "America/Bogota"),
+    "58": ("VES", "America/Caracas"),
+    "502": ("GTQ", "America/Guatemala"),
+    "503": ("USD", "America/El_Salvador"),
+    "504": ("HNL", "America/Tegucigalpa"),
+    "505": ("NIO", "America/Managua"),
+    "506": ("CRC", "America/Costa_Rica"),
+    "507": ("USD", "America/Panama"),
+    "591": ("BOB", "America/La_Paz"),
+    "593": ("USD", "America/Guayaquil"),
+    "595": ("PYG", "America/Asuncion"),
+    "598": ("UYU", "America/Montevideo"),
+    "1": ("USD", "America/New_York"),
+}
+
+
+def infer_defaults_from_phone(phone_number, fallback=("USD", "America/Bogota")):
+    """Deduce (moneda, zona horaria) a partir del prefijo del teléfono.
+
+    El número llega ya normalizado (sin + ni espacios). Se prueban los prefijos
+    de más largo a más corto para que 1809 (Rep. Dominicana) gane sobre 1 (EE. UU.).
+    Si el prefijo no está en el mapa se devuelve el fallback, que coincide con los
+    valores por defecto del modelo User.
+    """
+    if not phone_number:
+        return fallback
+
+    digits = "".join(c for c in str(phone_number) if c.isdigit())
+    for prefix in sorted(PHONE_PREFIX_DEFAULTS, key=len, reverse=True):
+        if digits.startswith(prefix):
+            return PHONE_PREFIX_DEFAULTS[prefix]
+
+    return fallback
