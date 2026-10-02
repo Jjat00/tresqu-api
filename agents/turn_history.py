@@ -111,7 +111,12 @@ async def _acquire_in_order(client, user_id, token: str, lock, deadline: float) 
     while True:
         await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
         if await _is_head(client, user_id, token) and await lock.acquire(blocking=False):
-            return True
+            # Entre comprobar la cabeza y tomar el candado pudo entrar un id
+            # menor: con el candado ya tomado se vuelve a mirar, y si se perdió
+            # el puesto se suelta y se reintenta.
+            if await _is_head(client, user_id, token):
+                return True
+            await lock.release()
         if loop.time() >= deadline:
             return False
         await asyncio.sleep(_POLL_SECONDS)

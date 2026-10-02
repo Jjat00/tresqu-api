@@ -38,11 +38,17 @@ class _FakeLock:
         self.blocking_timeout, self.sleep = blocking_timeout, sleep
         self.token = object()
 
+    # Gancho que corre dentro de la adquisición, para abrir a voluntad la
+    # ventana entre "soy la cabeza" y "tengo el candado".
+    hook = None
+
     async def acquire(self, blocking=None) -> bool:
         if blocking is False:
             if self.name in self.store:
                 return False
             self.store[self.name] = self.token
+            if _FakeLock.hook:
+                await _FakeLock.hook()
             return True
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.blocking_timeout
@@ -223,6 +229,32 @@ async def _run_lock() -> None:
     )
     _check(
         "un id menor que entra tarde a la fila recupera su puesto",
+        [e for e in order if e.endswith(":in")] == ["20:in", "10:in", "11:in"],
+    )
+
+    # Codex, caso 3: el 11 comprobó que era la cabeza y, justo al tomar el
+    # candado tras terminar el 20, entra el 10. Con el candado en la mano debe
+    # notar que perdió el puesto y cederlo.
+    order.clear()
+    queue = turn_history._queue_key(7)
+    late: list[asyncio.Task] = []
+
+    async def _enter_ten_mid_acquire():
+        if "20:out" in order and not late:
+            _FakeLock.hook = None
+            late.append(asyncio.create_task(ordered("10", 10, 0.0, 0.0)))
+            while 10 not in _FakeRedis.zsets.get(queue, {}).values():
+                await asyncio.sleep(0)
+
+    _FakeLock.hook = _enter_ten_mid_acquire
+    try:
+        await asyncio.gather(ordered("20", 20, 0.0, 0.1), ordered("11", 11, 0.02, 0.0))
+        await asyncio.gather(*late)
+    finally:
+        _FakeLock.hook = None
+    _check("el 10 entró a mitad de la adquisición del 11", bool(late))
+    _check(
+        "y aun así va antes que el 11",
         [e for e in order if e.endswith(":in")] == ["20:in", "10:in", "11:in"],
     )
 
