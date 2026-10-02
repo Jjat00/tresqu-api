@@ -135,6 +135,8 @@ def build_expenses_tools(
         viene del registro guardado."""
         from telegrambot.tools import _user_tz
 
+        # ``user_context`` se lee en cada llamada, no se copia: el supervisor le
+        # agrega lo que encuentre en la memoria durante el turno.
         if user_context is None:
             return value  # sin lo que dijo el usuario no hay base para corregir
         today = datetime.now(_user_tz(user)).date()

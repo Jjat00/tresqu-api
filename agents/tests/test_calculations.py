@@ -148,6 +148,55 @@ def _run_date_guard() -> None:
     )
 
 
+def _run_date_guard_in_tool() -> None:
+    """El caso de punta a punta: la fecha la dio el usuario en un mensaje viejo
+    que el agente recuperó de la memoria a mitad del turno."""
+    from types import SimpleNamespace
+    from unittest import mock
+
+    from agents.subagents import expenses as subagent
+
+    print("\n[año de las fechas, en la tool]")
+    user = SimpleNamespace(external_id="x", default_currency="COP", timezone="America/Bogota")
+    date_context = ["Registra también el taxi del viaje a Lima que te conté"]
+    tools = {t.name: t for t in subagent.build_expenses_tools(user, "", "", (), date_context)}
+    sent = {}
+
+    def fake_invoke(tool, payload):
+        sent.update(payload)
+        return "ok"
+
+    with mock.patch.object(subagent, "_invoke_strict", fake_invoke):
+        # La búsqueda en la memoria agrega el mensaje viejo durante el turno.
+        date_context.append("[2024-03-16] Usuario: Viajé a Lima el 15/03/2024; el taxi costó 12000")
+        tools["create_expense_for_user"].invoke(
+            {"amount": 12000, "category": "Transporte", "spent_at": "2024-03-15"}
+        )
+        _check("una fecha recuperada de la memoria se respeta", sent.get("spent_at") == "2024-03-15")
+
+        sent.clear()
+        tools_real = {t.name: t for t in subagent.build_expenses_tools(user, "", "", (), ["12000 gaseosa"])}
+        tools_real["create_expense_for_user"].invoke(
+            {"amount": 12000, "category": "Alimentación", "spent_at": "2023-10-01"}
+        )
+        from datetime import datetime
+
+        import pytz
+
+        this_year = datetime.now(pytz.timezone("America/Bogota")).year
+        _check(
+            "el caso real se corrige al año actual",
+            sent.get("spent_at", "")[:4] in (str(this_year), str(this_year - 1)),
+        )
+
+        sent.clear()
+        tools_none = {t.name: t for t in subagent.build_expenses_tools(user, "", "", (), None)}
+        tools_none["create_expense_for_user"].invoke(
+            {"amount": 1, "category": "x", "spent_at": "2023-10-01"}
+        )
+        _check("sin textos del usuario no corrige", sent.get("spent_at") == "2023-10-01")
+
+
 def main() -> int:
     import django
     import os
@@ -156,6 +205,7 @@ def main() -> int:
     django.setup()
     _run_calculator()
     _run_date_guard()
+    _run_date_guard_in_tool()
     print()
     if _FAILURES:
         print(f"❌ {len(_FAILURES)} comprobaciones fallaron:")

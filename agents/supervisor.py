@@ -268,13 +268,21 @@ def build_supervisor(
     # instrucción llega a la tool de creación como si el usuario la hubiera dicho.
     conversation_context = conversation_texts(user_message, history)
 
+    # Lo que puede contener una fecha dada por el usuario y que el agente ve:
+    # sus mensajes, la memoria semántica inyectada en el prompt y lo que
+    # devuelva search_conversation_history (se agrega al vuelo, por eso es una
+    # lista compartida). ``date_guard`` no corrige un año que esté aquí.
+    date_context = user_texts(user_message, history)
+    if semantic_context:
+        date_context.append(semantic_context)
+
     expenses_agent = build_expenses_subagent(
         user,
         expense_categories_str,
         income_categories_str,
         current_date,
         conversation_context,
-        user_texts(user_message, history),
+        date_context,
     )
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
     analyst_agent = build_analyst_subagent(user)
@@ -385,6 +393,7 @@ def build_supervisor(
                 "No encontré mensajes anteriores relacionados con eso. "
                 "Dile al usuario que no recuerdas haberlo hablado y pídele más detalles."
             )
+        date_context.extend(results)
         return results
 
     @tool("get_my_risk_profile")
