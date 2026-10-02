@@ -19,13 +19,16 @@ from langchain.agents import create_agent
 from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 
+from agents.calculator import calculate_tool
 from agents.currency_guard import mentioned_currency, resolve_currency
+from agents.date_guard import resolve_year
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from telegrambot.tools import (
     create_expense,
     create_income,
     delete_expense,
     delete_income,
+    get_balance,
     get_current_date,
     get_expense_by_id,
     get_expense_totals,
@@ -102,6 +105,7 @@ def build_expenses_tools(
     expense_categories_str: str = "",
     income_categories_str: str = "",
     conversation_context: Sequence[str] = (),
+    user_context: Sequence[str] | None = None,
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
@@ -124,6 +128,19 @@ def build_expenses_tools(
         tools base ya interpretan la moneda vacía de esa forma.
         """
         return resolve_currency(requested, default_currency, conversation_context)
+
+    def _date(value: str | None) -> str | None:
+        """Fecha de un registro NUEVO: corrige un año que nadie mencionó
+        (``agents.date_guard``). Las ediciones no pasan por aquí: su fecha
+        viene del registro guardado."""
+        from telegrambot.tools import _user_tz
+
+        # ``user_context`` se lee en cada llamada, no se copia: el supervisor le
+        # agrega lo que encuentre en la memoria durante el turno.
+        if user_context is None:
+            return value  # sin lo que dijo el usuario no hay base para corregir
+        today = datetime.now(_user_tz(user)).date()
+        return resolve_year(value, today, user_context)
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -261,7 +278,7 @@ def build_expenses_tools(
             "amount": amount,
             "currency": _currency(currency),
             "category": category,
-            "spent_at": spent_at,
+            "spent_at": _date(spent_at),
             "note": note,
         })
 
@@ -294,7 +311,7 @@ def build_expenses_tools(
             "amount": amount,
             "currency": _currency(currency),
             "category": category,
-            "received_at": received_at,
+            "received_at": _date(received_at),
             "note": note,
         })
 
@@ -366,6 +383,58 @@ def build_expenses_tools(
         except Exception as exc:
             logger.error(f"get_income_totals_for_user: {exc}")
             return {"error": str(exc)}
+
+    @tool
+    def get_balance_for_user(
+        start_date: str | None = None,
+        end_date: str | None = None,
+        whole_history: bool = False,
+    ) -> Dict[str, Any]:
+        """Saldo EXACTO (ingresos − gastos) por moneda, calculado en base de datos.
+        Sin fechas ("cuánto me queda", "mi saldo", "cuánto tengo"): desde el
+        último saldo inicial que declaró el usuario, o todo lo registrado si no
+        lo declaró. whole_history=True solo si pide explícitamente todo el
+        historial. Con fechas YYYY-MM-DD: ese período ("cómo voy este mes").
+        Úsala SIEMPRE para cualquier saldo o balance: nunca restes tú."""
+        try:
+            return _invoke_strict(get_balance, {
+                "user_external_id": external_id,
+                "start_date": start_date,
+                "end_date": end_date,
+                "whole_history": whole_history,
+            })
+        except Exception as exc:
+            logger.error(f"get_balance_for_user: {exc}")
+            return {"error": str(exc)}
+
+    @tool
+    def set_initial_balance_for_user(amount: float, currency: str = "") -> Dict[str, Any]:
+        """Registra el SALDO INICIAL: cuánta plata tiene el usuario para empezar
+        a contar desde ahora ("tengo 1.660.000", "empieza desde cero"). Acepta 0.
+        Deja `currency` vacío si el usuario no la dijo. Úsala solo cuando el
+        usuario confirme que quiere fijar su saldo; nunca borra nada."""
+        from decimal import Decimal, InvalidOperation
+
+        from expenses.balance import set_initial_balance
+
+        try:
+            value = Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            return {"status": "error", "message": "monto inválido"}
+        try:
+            income = set_initial_balance(user, value, _currency(currency) or None)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            logger.error(f"set_initial_balance_for_user: {exc}")
+            return {"status": "error", "message": str(exc)}
+        return {
+            "status": "success",
+            "income_id": income.id,
+            "amount": float(income.amount),
+            "currency": income.currency,
+            "date": income.received_at.isoformat(),
+        }
 
     @tool
     def get_user_expenses(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
@@ -540,6 +609,9 @@ def build_expenses_tools(
         get_income_by_id,
         get_expense_totals_for_user,
         get_income_totals_for_user,
+        get_balance_for_user,
+        set_initial_balance_for_user,
+        calculate_tool,
         get_user_expenses,
         get_user_incomes,
         search_expenses,
@@ -607,6 +679,9 @@ CONSULTAS:
 - Por categoría + período: get_category_expenses / get_category_incomes.
 - Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
 - Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
+- SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user sin fechas (cuenta desde el último saldo inicial del usuario). Si nombra un período, pasa sus fechas. Reporta por moneda ingresos, gastos y saldo tal como los devuelve, y di desde cuándo cuenta: since_initial_balance (p. ej. "desde tu saldo inicial del 30 de septiembre") o, si viene vacío, "con todo lo registrado".
+- SALDO DECLARADO: cuando el usuario dice cuánta plata tiene para empezar a contar desde ahí ("tengo 1.660.000", "mi saldo es…", "empieza desde cero") y confirma que quiere fijarlo, usa set_initial_balance_for_user (acepta 0). Así el saldo arranca desde ese punto. NO lo registres con create_income_for_user y nunca borres otros movimientos por eso. Si dice que arranca debiendo, fija 0 y ofrece registrar la deuda como gasto.
+- CUENTAS: nunca sumes, restes, multipliques ni saques porcentajes de cabeza. Si la respuesta necesita una cuenta que ninguna tool trae hecha (diferencia entre dos totales, un porcentaje, un promedio simple), usa calculate con los números exactos de las tools.
 - TOTALES ("cuánto gasté", "cuánto llevo este mes", "total de ingresos de julio"): get_expense_totals_for_user / get_income_totals_for_user con el rango de fechas del período. Devuelven el total exacto por moneda, calculado igual que el dashboard; reporta cada moneda por separado, tal cual.
 - Listar movimientos: get_user_expenses / get_user_incomes, SIEMPRE con rango de fechas para consultas de período (devuelven máx. 300). Sirven para detallar, no para sumar.
 
@@ -632,6 +707,8 @@ FUERA DE TU ESPECIALIDAD:
 QUÉ NO HACER:
 - ❌ Inventar promedios, días pico o patrones sin llamar get_user_monthly_insights.
 - ❌ Sumar categorías a ojo.
+- ❌ Restar ingresos y gastos para dar un saldo: el saldo sale de get_balance_for_user.
+- ❌ Hacer cualquier cuenta de cabeza: usa calculate.
 - ❌ Calcular un total sumando movimientos uno a uno a partir de una lista: usa get_expense_totals_for_user / get_income_totals_for_user.
 - ❌ Crear categoría nueva si hay una existente que encaje.
 - ❌ Inferir o adivinar la moneda de un gasto/ingreso cuando el usuario no la dijo explícitamente.
@@ -646,11 +723,12 @@ def build_expenses_subagent(
     income_categories_str: str,
     current_date: str,
     conversation_context: Sequence[str] = (),
+    user_context: Sequence[str] | None = None,
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
-        user, expense_categories_str, income_categories_str, conversation_context)
+        user, expense_categories_str, income_categories_str, conversation_context, user_context)
     return create_agent(
         model=_model(),
         tools=tools,
