@@ -15,17 +15,22 @@ from categories.utils import (
 )
 
 
-async def fetch_last_messages(user_id: int, window: int = 10):
-    """
-    Recupera los últimos mensajes para un usuario específico y los convierte
-    al formato adecuado para LangChain.
+async def fetch_last_messages(user_id: int, window: int = 10, current_message_id: int | None = None):
+    """Últimos mensajes del usuario en formato LangChain, del más viejo al más nuevo.
+
+    ``current_message_id`` es el mensaje entrante que se está procesando: el
+    canal lo guarda antes de correr el agente, y sin excluirlo el modelo lo
+    veía dos veces y registraba el gasto dos veces. También se excluyen los
+    entrantes posteriores a él, que esperan su propio turno: no son contexto
+    de este, y el modelo los tomaría como pedidos ya atendidos o por atender.
     """
     def _query():
-        return list(
-            Message.objects
-            .filter(chat__user_id=user_id)
-            .order_by("-created_at")[:window]
-        )
+        qs = Message.objects.filter(chat__user_id=user_id)
+        if current_message_id is not None:
+            qs = qs.exclude(id=current_message_id).exclude(
+                message_type="incoming", id__gt=current_message_id
+            )
+        return list(qs.order_by("-created_at")[:window])
     records = await sync_to_async(_query, thread_sensitive=True)()
     # del más viejo al más nuevo
     for r in reversed(records):

@@ -1131,22 +1131,41 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         # run, para vincularlas luego al mensaje de confirmación saliente.
         tracked_transactions = start_transaction_tracking()
 
-        response_text = await process_message(user, effective_message_text, sender_phone=sender_number)
+        # Un turno a la vez por usuario, con la respuesta guardada dentro: si
+        # llegan dos mensajes seguidos, el segundo ve en el historial que el
+        # primero ya se atendió en vez de registrarlo otra vez.
+        from agents.turn_history import user_turn
 
-        # 8b. Silencio del guardrail de tema: ni respuesta ni registro saliente.
-        if response_text is None:
-            return True, ""
+        # El entrante ya está guardado (texto, voz transcrita o gastos de una
+        # imagen, siempre con el wamid): se excluye del historial por su id.
+        current_message_id = await sync_to_async(
+            lambda: Message.objects.filter(
+                chat=chat, platform_message_id=message_id, message_type="incoming"
+            ).order_by("-id").values_list("id", flat=True).first()
+        )()
 
-        # 9. Guardar la respuesta en la base de datos
-        outgoing_msg = await sync_to_async(create_message)(
-            chat, f"response_{message_id}", "outgoing", response_text
-        )
-
-        # 9b. Vincular los registros creados en este run al mensaje saliente
-        if tracked_transactions and outgoing_msg:
-            await sync_to_async(_link_transactions_to_message)(
-                tracked_transactions, outgoing_msg
+        async with user_turn(user.id, order=current_message_id):
+            response_text = await process_message(
+                user,
+                effective_message_text,
+                sender_phone=sender_number,
+                current_message_id=current_message_id,
             )
+
+            # 8b. Silencio del guardrail de tema: ni respuesta ni registro saliente.
+            if response_text is None:
+                return True, ""
+
+            # 9. Guardar la respuesta en la base de datos
+            outgoing_msg = await sync_to_async(create_message)(
+                chat, f"response_{message_id}", "outgoing", response_text
+            )
+
+            # 9b. Vincular los registros creados en este run al mensaje saliente
+            if tracked_transactions and outgoing_msg:
+                await sync_to_async(_link_transactions_to_message)(
+                    tracked_transactions, outgoing_msg
+                )
 
         # 10. Enviar la respuesta usando Meta API
         success = await send_whatsapp_response(

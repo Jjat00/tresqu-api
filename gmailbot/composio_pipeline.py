@@ -438,8 +438,14 @@ def process_composio_email(pe: ProcessedEmail) -> None:
     is_valid_txn = (
         transaction_type in ("expense", "income") and is_purchase
     )
+    # Un correo sin monto (confirmación de pedido, envío) volvía como 0.0 y se
+    # registraba una compra de "0.0 USD" con su aviso por WhatsApp.
+    try:
+        has_amount = float(ai_result.get("amount") or 0) > 0
+    except (TypeError, ValueError):
+        has_amount = False
 
-    if payment_status == "failed" or not is_valid_txn or confidence < 0.6:
+    if payment_status == "failed" or not is_valid_txn or not has_amount or confidence < 0.6:
         pe.processing_status = "skipped"
         pe.is_purchase = False
         pe.transaction_type = transaction_type or ""

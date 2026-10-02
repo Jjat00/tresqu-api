@@ -899,7 +899,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Usuario existente por ID de Telegram asociado al chat: {existing_user.id}")
 
     # Registrar el mensaje recibido
-    await create_message_async(
+    incoming_record = await create_message_async(
         chat,
         str(update.message.message_id),
         "incoming",
@@ -943,61 +943,70 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Procesar el mensaje para extraer información y generar embedding
-    try:
-        # Procesar mensaje
-        response = await process_message(chat_user, user_message_text)
+    # Un turno a la vez por usuario, y la respuesta se guarda dentro: si llegan
+    # dos mensajes seguidos, el segundo ve en el historial que el primero ya
+    # se atendió en vez de registrarlo otra vez (agents/turn_history).
+    from agents.turn_history import user_turn
 
-        # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
-        # bucle automático): no se responde ni se registra nada.
-        if response.silent:
-            logger.info(
-                f"Mensaje silenciado por el guardrail de tema (usuario {chat_user.id})"
+    async with user_turn(chat_user.id, order=getattr(incoming_record, "id", None)):
+        try:
+            # Procesar mensaje
+            response = await process_message(
+                chat_user,
+                user_message_text,
+                current_message_id=getattr(incoming_record, "id", None),
             )
-            return
 
-        await update.message.reply_text(response.text, parse_mode="Markdown")
+            # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
+            # bucle automático): no se responde ni se registra nada.
+            if response.silent:
+                logger.info(
+                    f"Mensaje silenciado por el guardrail de tema (usuario {chat_user.id})"
+                )
+                return
 
-        # Si la herramienta devolvió un preview pendiente de confirmación
-        # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
-        # justo después del recap textual.
-        pendings = response.pending_confirmations or (
-            [response.pending_confirmation] if response.pending_confirmation else []
-        )
-        if pendings:
-            try:
-                from .wallbit_handlers import send_confirmation_buttons
-                # One keyboard per proposed operation.
-                for pending in pendings:
-                    await send_confirmation_buttons(
-                        bot=context.bot,
-                        chat_id=update.effective_chat.id,
-                        decision_id=pending["confirmation_id"],
-                        preview=pending.get("preview", {}),
-                        two_step=pending.get("two_step_required", False),
-                    )
-            except Exception as exc:
-                logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
+            await update.message.reply_text(response.text, parse_mode="Markdown")
 
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "ai_response",
-            "outgoing",
-            response.text
-        )
-    except Exception as e:
-        logger.error(f"Error al procesar mensaje: {e}")
-        error_message = "Lo siento, hubo un error al procesar tu mensaje. Por favor, intenta de nuevo más tarde."
-        await update.message.reply_text(error_message)
+            # Si la herramienta devolvió un preview pendiente de confirmación
+            # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
+            # justo después del recap textual.
+            pendings = response.pending_confirmations or (
+                [response.pending_confirmation] if response.pending_confirmation else []
+            )
+            if pendings:
+                try:
+                    from .wallbit_handlers import send_confirmation_buttons
+                    # One keyboard per proposed operation.
+                    for pending in pendings:
+                        await send_confirmation_buttons(
+                            bot=context.bot,
+                            chat_id=update.effective_chat.id,
+                            decision_id=pending["confirmation_id"],
+                            preview=pending.get("preview", {}),
+                            two_step=pending.get("two_step_required", False),
+                        )
+                except Exception as exc:
+                    logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
 
-        # Registrar error
-        await create_message_async(
-            chat,
-            "error",
-            "outgoing",
-            error_message
-        )
+            # Registrar respuesta
+            await create_message_async(
+                chat,
+                "ai_response",
+                "outgoing",
+                response.text
+            )
+        except Exception as e:
+            logger.error(f"Error al procesar mensaje: {e}")
+            error_message = "Lo siento, hubo un error al procesar tu mensaje. Por favor, intenta de nuevo más tarde."
+            await update.message.reply_text(error_message)
+
+            # Registrar error
+            await create_message_async(
+                chat,
+                "error",
+                "outgoing",
+                error_message
+            )
 
 
 async def create_account_from_contact(update: Update, context: ContextTypes.DEFAULT_TYPE,
@@ -1189,16 +1198,33 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 # Guardar la transcripción en la base de datos
                 response_text = ""
                 pending = None
+                voice_response_saved = False
                 if transcription:
-                    await create_message_async(
+                    incoming_record = await create_message_async(
                         chat,
                         f"transcription_{update.message.message_id}",
                         "incoming",
                         transcription
                     )
 
-                    # Procesar el mensaje con la transcripción
-                    agent_response = await process_message(chat_user, transcription)
+                    # Procesar el mensaje con la transcripción. En fila con
+                    # los demás turnos del usuario, y la respuesta se guarda
+                    # dentro (ver agents/turn_history).
+                    from agents.turn_history import user_turn
+
+                    async with user_turn(
+                        chat_user.id, order=getattr(incoming_record, "id", None)
+                    ):
+                        agent_response = await process_message(
+                            chat_user,
+                            transcription,
+                            current_message_id=getattr(incoming_record, "id", None),
+                        )
+                        if not agent_response.silent:
+                            await create_message_async(
+                                chat, "ai_response", "outgoing", agent_response.text
+                            )
+                            voice_response_saved = True
                     if agent_response.silent:
                         logger.info(
                             f"Nota de voz silenciada por el guardrail de tema "
@@ -1245,13 +1271,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception as exc:
                     logger.exception(f"send_confirmation_buttons (telegram voice) failed: {exc}")
 
-            # Registrar respuesta
-            await create_message_async(
-                chat,
-                "ai_response",
-                "outgoing",
-                response_text
-            )
+            # Registrar respuesta (la del agente ya se guardó dentro del turno)
+            if not voice_response_saved:
+                await create_message_async(
+                    chat,
+                    "ai_response",
+                    "outgoing",
+                    response_text
+                )
 
         # Eliminar el archivo temporal
         try:
