@@ -38,7 +38,12 @@ class _FakeLock:
         self.blocking_timeout, self.sleep = blocking_timeout, sleep
         self.token = object()
 
-    async def acquire(self) -> bool:
+    async def acquire(self, blocking=None) -> bool:
+        if blocking is False:
+            if self.name in self.store:
+                return False
+            self.store[self.name] = self.token
+            return True
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.blocking_timeout
         while True:
@@ -65,14 +70,15 @@ class _FakeRedis:
     zsets: dict = {}
     keys: dict = {}
 
-    def lock(self, name, timeout, sleep, blocking_timeout, thread_local):
+    def lock(self, name, timeout, sleep, thread_local, blocking_timeout=0):
         return _FakeLock(self.store, name, blocking_timeout, sleep)
 
     async def set(self, key, value, ex=None):
-        self.keys[key] = value
+        now = asyncio.get_running_loop().time()
+        self.keys[key] = now + ex if ex else float("inf")
 
     async def exists(self, key):
-        return int(key in self.keys)
+        return int(self.keys.get(key, 0) > asyncio.get_running_loop().time())
 
     async def delete(self, key):
         self.keys.pop(key, None)
@@ -205,6 +211,37 @@ async def _run_lock() -> None:
     _check(
         "con tres mensajes seguidos se atienden en orden de llegada",
         [e for e in order if e.endswith(":in")] == ["A:in", "B:in", "C:in"],
+    )
+
+    # Codex, caso 1: el 20 está corriendo, entra el 11 y después el 10. Al
+    # terminar el 20, el 10 va primero aunque el 11 llegara antes a la fila.
+    order.clear()
+    await asyncio.gather(
+        ordered("20", 20, 0.0, 0.2),
+        ordered("11", 11, 0.03, 0.0),
+        ordered("10", 10, 0.08, 0.0),
+    )
+    _check(
+        "un id menor que entra tarde a la fila recupera su puesto",
+        [e for e in order if e.endswith(":in")] == ["20:in", "10:in", "11:in"],
+    )
+
+    # Codex, caso 2: un turno vivo que espera más que el TTL del latido no se
+    # da por muerto (el latido se renueva durante la espera).
+    order.clear()
+    original_ttl = turn_history._LOCK_TTL
+    turn_history._LOCK_TTL = 0.1
+    try:
+        await asyncio.gather(
+            ordered("12", 12, 0.0, 0.4),
+            ordered("11", 11, 0.03, 0.0),
+            ordered("13", 13, 0.06, 0.0),
+        )
+    finally:
+        turn_history._LOCK_TTL = original_ttl
+    _check(
+        "un turno que espera más que el latido conserva su puesto",
+        [e for e in order if e.endswith(":in")] == ["12:in", "11:in", "13:in"],
     )
 
     # Un turno que murió sin salir de la fila (latido caducado) no la bloquea.

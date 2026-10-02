@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 import uuid
 from contextlib import asynccontextmanager, suppress
 
@@ -69,31 +70,48 @@ def _alive_key(user_id, token: str) -> str:
     return f"tresqu:agents:alive:{user_id}:{token}"
 
 
-# Puesto en la fila de un turno sin mensaje guardado: al final.
+# Puesto en la fila de un turno sin mensaje guardado: después de todos los que
+# sí tienen id, y entre ellos por hora de llegada.
 _NO_ORDER = 10**15
 
 
-async def _wait_for_head(client, user_id, token: str, deadline: float) -> bool:
-    """Espera a que ``token`` sea el primero de la fila. ``False`` si se agota.
+async def _is_head(client, user_id, token: str) -> bool:
+    """``True`` si ``token`` es el primero vivo de la fila.
 
     La fila va ordenada por el id del mensaje entrante, que es el orden real de
-    llegada. Un candado solo no basta: quien despierta primero de su espera se
-    lo lleva, y un tercer mensaje podía adelantarse al segundo. Los turnos que
-    murieron sin salir de la fila se reconocen porque su latido caducó.
+    llegada. Los turnos que murieron sin salir de la fila se reconocen porque
+    su latido caducó, y se sacan.
+    """
+
+    queue = _queue_key(user_id)
+    rank = await client.zrank(queue, token)
+    if rank is None or rank == 0:
+        return True
+    alive_ahead = False
+    for member in await client.zrange(queue, 0, rank - 1):
+        member = member.decode() if isinstance(member, bytes) else member
+        if await client.exists(_alive_key(user_id, member)):
+            alive_ahead = True
+        else:
+            await client.zrem(queue, member)
+    return not alive_ahead
+
+
+async def _acquire_in_order(client, user_id, token: str, lock, deadline: float) -> bool:
+    """Toma el candado solo siendo la cabeza de la fila. ``False`` si se agota.
+
+    Un candado solo no basta: quien despierta primero de su espera se lo lleva,
+    y un tercer mensaje podía adelantarse al segundo. Por eso la cabeza se
+    vuelve a comprobar en cada intento (un id menor puede entrar tarde a la
+    fila) y el latido se renueva durante toda la espera (si no, un turno vivo
+    que espera mucho parecería muerto y lo sacarían de la fila).
     """
 
     loop = asyncio.get_running_loop()
-    queue = _queue_key(user_id)
     while True:
         await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
-        rank = await client.zrank(queue, token)
-        if rank is None or rank == 0:
+        if await _is_head(client, user_id, token) and await lock.acquire(blocking=False):
             return True
-        ahead = await client.zrange(queue, 0, rank - 1)
-        for member in ahead:
-            member = member.decode() if isinstance(member, bytes) else member
-            if not await client.exists(_alive_key(user_id, member)):
-                await client.zrem(queue, member)
         if loop.time() >= deadline:
             return False
         await asyncio.sleep(_POLL_SECONDS)
@@ -131,21 +149,19 @@ async def user_turn(user_id, order=None):
         client = _redis_client()
         queue = _queue_key(user_id)
         await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
-        await client.zadd(queue, {token: order if order is not None else _NO_ORDER})
+        await client.zadd(queue, {token: order if order is not None else _NO_ORDER + time.time()})
         await client.expire(queue, _WAIT_SECONDS + _LOCK_TTL)
         queued = True
-        in_order = await _wait_for_head(client, user_id, token, deadline)
         # La fila ordena; el candado garantiza la exclusión aunque un turno
         # entre tarde a la fila con un id menor que el que ya está corriendo.
         lock = client.lock(
             _lock_key(user_id),
             timeout=_LOCK_TTL,
             sleep=_POLL_SECONDS,
-            blocking_timeout=max(0.0, deadline - loop.time()),
             thread_local=False,
         )
-        acquired = bool(await lock.acquire())
-        if not (in_order and acquired):
+        acquired = await _acquire_in_order(client, user_id, token, lock, deadline)
+        if not acquired:
             logger.warning(
                 "turno en fila: el usuario %s sigue con un turno en curso tras %ss; se procesa igual",
                 user_id, _WAIT_SECONDS,
