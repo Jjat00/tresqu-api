@@ -178,6 +178,55 @@ async def _run_context() -> None:
     )
 
 
+async def _run_real_cases() -> None:
+    """Casos reales de producción (2026-10-01) que acabaron en el aviso fijo."""
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from agents import relevance_guard as guard
+    from agents.turn_history import without_current_message
+
+    async def _off(text, hist):
+        return {"on_topic": False, "automated": False}
+
+    guard._classify = _off  # type: ignore[assignment]
+
+    print("\n[10] Casos reales que recibieron 'solo puedo ayudarte con tus finanzas'")
+    gmail_notice = AIMessage(content="📧 Compra detectada desde tu Gmail: Google Cloud 10862 COP")
+    # El canal guarda el mensaje entrante antes de cargar el historial.
+    stored = [gmail_notice, HumanMessage(content="Holaa")]
+    _check(
+        "'Holaa' (saludo alargado) pasa sin clasificador",
+        (await guard.check_relevance("test:real1", "Holaa", without_current_message(stored, "Holaa"))).allow,
+    )
+    _check(
+        "el saludo tolera letras alargadas ('graciaaas!!')",
+        guard._is_courtesy("Holaa") and guard._is_courtesy("graciaaas!!"),
+    )
+
+    stored = [
+        AIMessage(content="Registré 48.000 COP en Alimentación."),
+        HumanMessage(content="Pague tarjeta de crédito 440000"),
+        HumanMessage(content="🇨🇴 COP"),
+    ]
+    _check(
+        "'🇨🇴 COP' justo después de un pago pasa",
+        (await guard.check_relevance("test:real2", "🇨🇴 COP", without_current_message(stored, "🇨🇴 COP"))).allow,
+    )
+    _check("'usd' suelto es una moneda", guard._is_finance_text("usd"))
+    _check("'¿ves?' no se confunde con una moneda", not guard._is_finance_text("¿ves?"))
+
+    pago = [HumanMessage(content="Pagué el arriendo")]
+    _check(
+        "un mensaje corto tras otro del usuario sobre plata pasa",
+        (await guard.check_relevance("test:real3", "fue ayer", pago)).allow,
+    )
+    charla = [HumanMessage(content="qué calor hace hoy")]
+    _check(
+        "pero no tras un mensaje del usuario ajeno a la plata",
+        not (await guard.check_relevance("test:real4", "fue ayer", charla)).allow,
+    )
+
+
 async def _run_integration() -> None:
     """El cableado real: ``process_message`` corta antes de construir el supervisor."""
     from types import SimpleNamespace
@@ -270,7 +319,15 @@ async def _run_live() -> None:
         AIMessage(content="NVDA cerró en 178,2 USD, un 3,1 % abajo en la semana."),
     ]
 
+    saldo = [
+        HumanMessage(content="Cuanto me queda"),
+        AIMessage(content="Tu saldo disponible al 1 de octubre es de -89.900 COP."),
+    ]
+
     contextual = [
+        # Caso real (2026-10-01): reclamo sobre el saldo, sin una palabra de plata.
+        ("Por que ? Si yo tenía otra cosa", True, saldo),
+        ("Holaa", True, [AIMessage(content="📧 Compra detectada desde tu Gmail: Google Cloud 10862 COP")]),
         ("era de segunda, por eso me salió tan barata", True, moto),
         ("la segunda", True, pregunta),
         ("y eso cómo me deja el mes?", True, moto),
@@ -296,6 +353,7 @@ def main() -> int:
     _setup()
     asyncio.run(_run_deterministic())
     asyncio.run(_run_context())
+    asyncio.run(_run_real_cases())
     asyncio.run(_run_integration())
     if "--live" in sys.argv:
         asyncio.run(_run_live())

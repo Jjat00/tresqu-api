@@ -943,61 +943,66 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         )
         return
 
-    # Procesar el mensaje para extraer información y generar embedding
-    try:
-        # Procesar mensaje
-        response = await process_message(chat_user, user_message_text)
+    # Un turno a la vez por usuario, y la respuesta se guarda dentro: si llegan
+    # dos mensajes seguidos, el segundo ve en el historial que el primero ya
+    # se atendió en vez de registrarlo otra vez (agents/turn_history).
+    from agents.turn_history import user_turn
 
-        # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
-        # bucle automático): no se responde ni se registra nada.
-        if response.silent:
-            logger.info(
-                f"Mensaje silenciado por el guardrail de tema (usuario {chat_user.id})"
+    async with user_turn(chat_user.id):
+        try:
+            # Procesar mensaje
+            response = await process_message(chat_user, user_message_text)
+
+            # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
+            # bucle automático): no se responde ni se registra nada.
+            if response.silent:
+                logger.info(
+                    f"Mensaje silenciado por el guardrail de tema (usuario {chat_user.id})"
+                )
+                return
+
+            await update.message.reply_text(response.text, parse_mode="Markdown")
+
+            # Si la herramienta devolvió un preview pendiente de confirmación
+            # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
+            # justo después del recap textual.
+            pendings = response.pending_confirmations or (
+                [response.pending_confirmation] if response.pending_confirmation else []
             )
-            return
+            if pendings:
+                try:
+                    from .wallbit_handlers import send_confirmation_buttons
+                    # One keyboard per proposed operation.
+                    for pending in pendings:
+                        await send_confirmation_buttons(
+                            bot=context.bot,
+                            chat_id=update.effective_chat.id,
+                            decision_id=pending["confirmation_id"],
+                            preview=pending.get("preview", {}),
+                            two_step=pending.get("two_step_required", False),
+                        )
+                except Exception as exc:
+                    logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
 
-        await update.message.reply_text(response.text, parse_mode="Markdown")
+            # Registrar respuesta
+            await create_message_async(
+                chat,
+                "ai_response",
+                "outgoing",
+                response.text
+            )
+        except Exception as e:
+            logger.error(f"Error al procesar mensaje: {e}")
+            error_message = "Lo siento, hubo un error al procesar tu mensaje. Por favor, intenta de nuevo más tarde."
+            await update.message.reply_text(error_message)
 
-        # Si la herramienta devolvió un preview pendiente de confirmación
-        # (Wallbit BUY/SELL/move/resume...), enviar los botones inline
-        # justo después del recap textual.
-        pendings = response.pending_confirmations or (
-            [response.pending_confirmation] if response.pending_confirmation else []
-        )
-        if pendings:
-            try:
-                from .wallbit_handlers import send_confirmation_buttons
-                # One keyboard per proposed operation.
-                for pending in pendings:
-                    await send_confirmation_buttons(
-                        bot=context.bot,
-                        chat_id=update.effective_chat.id,
-                        decision_id=pending["confirmation_id"],
-                        preview=pending.get("preview", {}),
-                        two_step=pending.get("two_step_required", False),
-                    )
-            except Exception as exc:
-                logger.exception(f"send_confirmation_buttons (telegram) failed: {exc}")
-
-        # Registrar respuesta
-        await create_message_async(
-            chat,
-            "ai_response",
-            "outgoing",
-            response.text
-        )
-    except Exception as e:
-        logger.error(f"Error al procesar mensaje: {e}")
-        error_message = "Lo siento, hubo un error al procesar tu mensaje. Por favor, intenta de nuevo más tarde."
-        await update.message.reply_text(error_message)
-
-        # Registrar error
-        await create_message_async(
-            chat,
-            "error",
-            "outgoing",
-            error_message
-        )
+            # Registrar error
+            await create_message_async(
+                chat,
+                "error",
+                "outgoing",
+                error_message
+            )
 
 
 async def create_account_from_contact(update: Update, context: ContextTypes.DEFAULT_TYPE,

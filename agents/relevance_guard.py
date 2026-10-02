@@ -250,7 +250,35 @@ _COURTESY = re.compile(
     re.IGNORECASE,
 )
 
+# Una moneda suelta ("COP", "🇨🇴 COP", "usd") es casi siempre la respuesta a
+# "¿en qué moneda?" o el remate de un monto que el usuario acaba de escribir.
+# Los botones viejos de Telegram mandaban justo "🇨🇴 COP" y se leía como fuera
+# de tema.
+_CURRENCY_HINT = re.compile(
+    r"\b(?:cop|usd|mxn|ars|clp|pen|brl|eur|uyu|dop|gbp|crc|gtq)\b"
+    r"|[\U0001F1E6-\U0001F1FF]{2}",
+    re.IGNORECASE,
+)
+
+# Preguntas sobre el propio Tresqu: el clasificador nano las falla seguido
+# ("¿qué puedes hacer?" leído como fuera de tema), y son justo lo primero que
+# escribe un usuario nuevo.
+_PRODUCT_HINTS = re.compile(
+    r"qu[eé] (?:puedes|sabes|haces|m[aá]s puedes)|c[oó]mo (?:funcionas|funciona|te uso|se usa)|"
+    r"\bfunciones\b|\bqui[eé]n eres\b|\bmi cuenta\b|\bmi plan\b",
+    re.IGNORECASE,
+)
+
 _MAX_CONTINUATION_WORDS = 6
+
+
+def _squeeze(text: str) -> str:
+    """Colapsa letras repetidas: "Holaaa" → "Hola", "graciaaas" → "gracias"."""
+    return re.sub(r"([^\W\d_])\1+", r"\1", text)
+
+
+def _is_courtesy(text: str) -> bool:
+    return bool(_COURTESY.match(text) or _COURTESY.match(_squeeze(text)))
 
 
 # Cuántos turnos del hilo ve el clasificador. Un mensaje suelto puede no tener
@@ -292,6 +320,30 @@ def _last_turn_is_assistant(history: list) -> bool:
     return False
 
 
+def _is_finance_text(text: str) -> bool:
+    return bool(
+        _FINANCE_HINTS.search(text) or _AMOUNT_HINT.search(text) or _CURRENCY_HINT.search(text)
+    )
+
+
+def _continues_recent_turn(history: list) -> bool:
+    """``True`` si un mensaje corto puede leerse como continuación del hilo.
+
+    Vale cuando el último turno es de Tresqu, o cuando es del propio usuario y
+    hablaba de plata: quien escribe "Pagué la tarjeta 440000" y enseguida
+    "COP" o "ayer" sigue en lo mismo aunque Tresqu aún no haya contestado.
+    """
+    for message in reversed(history or []):
+        role = _ROLE_LABELS.get(message.__class__.__name__)
+        if not role:
+            continue
+        if role == "Tresqu":
+            return True
+        content = getattr(message, "content", "")
+        return isinstance(content, str) and _is_finance_text(content)
+    return False
+
+
 def _local_allow(text: str, history: list, strike: int) -> bool:
     """``True`` si el mensaje es claramente del dominio sin consultar al modelo."""
 
@@ -300,7 +352,7 @@ def _local_allow(text: str, history: list, strike: int) -> bool:
         return True
     if stripped.startswith("/"):  # comandos: /perfil, /registrar, /start…
         return True
-    if _FINANCE_HINTS.search(stripped) or _AMOUNT_HINT.search(stripped):
+    if _is_finance_text(stripped) or _PRODUCT_HINTS.search(stripped):
         return True
     # Cortesías y respuestas cortas a un turno de Tresqu ("sí", "el segundo",
     # "dale"): solo se dan por buenas mientras no haya racha abierta, para que
@@ -308,9 +360,9 @@ def _local_allow(text: str, history: list, strike: int) -> bool:
     # silencio, únicamente un mensaje del dominio lo levanta.
     if strike:
         return False
-    if _COURTESY.match(stripped):
+    if _is_courtesy(stripped):
         return True
-    if len(stripped.split()) <= _MAX_CONTINUATION_WORDS and _last_turn_is_assistant(history):
+    if len(stripped.split()) <= _MAX_CONTINUATION_WORDS and _continues_recent_turn(history):
         return True
     return False
 
@@ -323,13 +375,14 @@ Clasifica el ÚLTIMO mensaje del usuario y responde SOLO con JSON:
 {{"on_topic": true|false, "automated": true|false}}
 
 on_topic = true cuando el mensaje:
-- es un saludo, una despedida, un agradecimiento o cualquier cortesía breve, aunque no mencione dinero ("hola", "buenas", "gracias", "muchas gracias", "ok", "listo", "perfecto", "jaja");
+- es un saludo, una despedida, un agradecimiento o cualquier cortesía breve, aunque no mencione dinero y aunque venga con letras alargadas o errores ("hola", "holaa", "buenas", "gracias", "muchas gracias", "ok", "listo", "perfecto", "jaja");
+- nombra una moneda o un país/bandera como moneda ("COP", "🇨🇴 COP", "en dólares");
 - habla de dinero, gastos, compras, ingresos, deudas, ahorro, presupuesto, inversiones, acciones, ETFs, saldos, mercado o precios;
 - pide registros, reportes, resúmenes, correcciones o cambios sobre eso;
-- pregunta por Tresqu, sus funciones, su cuenta, sus planes o cómo usarlo;
+- pregunta por Tresqu, sus funciones, su cuenta, sus planes o cómo usarlo ("¿qué puedes hacer?", "qué haces", "cómo funciona esto");
 - responde o continúa la conversación reciente: confirmaciones, "sí", "el segundo", un número suelto, una fecha, una categoría, o un detalle de algo que ya se estaba hablando.
 
-REGLA DE CONTEXTO (importante): juzga el mensaje DENTRO de la conversación, no aislado. Si el último turno de la conversación es una pregunta de Tresqu y el mensaje puede leerse como su respuesta (una opción, un nombre, una fecha, una cantidad, una negación o una corrección), on_topic = true, aunque suelto no signifique nada: "no, el otro", "la roja", "fue el martes por la tarde". Eso incluye rechazar, cancelar o posponer lo que Tresqu propuso: "ninguna de las dos", "mejor déjalo así", "olvídalo", "después lo hago". Si por sí solo parece no venir a cuento pero encaja como continuación de lo que se venía hablando, on_topic = true. Ejemplo: si antes se hablaba de una moto que el usuario compró, "era de segunda, me salió en 8 millones" es on_topic. Solo es off_topic si abre un tema nuevo ajeno a las finanzas.
+REGLA DE CONTEXTO (importante): juzga el mensaje DENTRO de la conversación, no aislado. Si en la conversación reciente se está hablando de plata (gastos, ingresos, saldos, inversiones), un mensaje que la continúa, la aclara, la cuestiona ("¿por qué?", "no me cuadra", "si yo tenía 1.600.000") o la complementa es on_topic aunque por sí solo no mencione dinero. Si el último turno de la conversación es una pregunta de Tresqu y el mensaje puede leerse como su respuesta (una opción, un nombre, una fecha, una cantidad, una negación o una corrección), on_topic = true, aunque suelto no signifique nada: "no, el otro", "la roja", "fue el martes por la tarde". Eso incluye rechazar, cancelar o posponer lo que Tresqu propuso: "ninguna de las dos", "mejor déjalo así", "olvídalo", "después lo hago". Si por sí solo parece no venir a cuento pero encaja como continuación de lo que se venía hablando, on_topic = true. Ejemplo: si antes se hablaba de una moto que el usuario compró, "era de segunda, me salió en 8 millones" es on_topic. Solo es off_topic si abre un tema nuevo ajeno a las finanzas.
 
 on_topic = false para cualquier otro tema: programación, tecnología, política, salud, deportes, entretenimiento, tareas escolares, religión, cadenas reenviadas o publicidad ajena.
 
