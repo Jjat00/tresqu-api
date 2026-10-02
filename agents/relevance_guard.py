@@ -254,25 +254,39 @@ _COURTESY = re.compile(
 # "¿en qué moneda?" o el remate de un monto que el usuario acaba de escribir.
 # Los botones viejos de Telegram mandaban justo "🇨🇴 COP" y se leía como fuera
 # de tema.
-_CURRENCY_HINT = re.compile(
-    r"\b(?:cop|usd|mxn|ars|clp|pen|brl|eur|uyu|dop|gbp|crc|gtq)\b"
-    r"|[\U0001F1E6-\U0001F1FF]{2}",
+_CURRENCY_CODE = r"(?:cop|usd|mxn|ars|clp|pen|brl|eur|uyu|dop|gbp|crc|gtq)"
+_FLAG = r"[\U0001F1E6-\U0001F1FF]{2}"
+_TAIL = r"[\s¡!¿?.,;:]*"
+
+# Una moneda solo es atajo cuando ES toda la respuesta ("COP", "🇨🇴 COP",
+# "en usd", "dólares"): dentro de una frase, "CRC" o una bandera no dicen nada
+# y el mensaje va al clasificador.
+_CURRENCY_REPLY = re.compile(
+    rf"{_TAIL}(?:en |son |es en )?(?:{_FLAG}\s*)?"
+    rf"(?:{_CURRENCY_CODE}|d[oó]lar(?:es)?|euros?|pesos?(?: colombianos?| mexicanos?| argentinos?| chilenos?)?)?"
+    rf"(?:\s*{_FLAG})?{_TAIL}",
     re.IGNORECASE,
 )
 
-# Preguntas sobre el propio Tresqu: el clasificador nano las falla seguido
-# ("¿qué puedes hacer?" leído como fuera de tema), y son justo lo primero que
-# escribe un usuario nuevo.
-_PRODUCT_HINTS = re.compile(
-    r"qu[eé] (?:m[aá]s )?(?:puedes|sabes) hacer|qu[eé] haces\b|para qu[eé] sirves|"
-    r"c[oó]mo (?:funcionas|te uso)\b|qui[eé]n eres\b|"
-    r"c[oó]mo (?:funciona|se usa|uso) (?:tresqu|esto|este bot|esta app)\b",
+# Preguntas sobre el propio Tresqu, completas: el clasificador nano las falla
+# seguido ("¿qué puedes hacer?" leído como fuera de tema) y son justo lo
+# primero que escribe un usuario nuevo. Con contenido adicional ("¿qué puedes
+# hacer en Python?") van al clasificador.
+_PRODUCT_QUESTION = re.compile(
+    rf"{_TAIL}(?:y |oye,? |tresqu,? )?"
+    r"(?:qu[eé] (?:m[aá]s )?(?:puedes|sabes) hacer|qu[eé] (?:m[aá]s )?haces|para qu[eé] sirves|"
+    r"c[oó]mo (?:funcionas|te uso)|qui[eé]n eres|"
+    r"c[oó]mo (?:funciona|se usa|uso) (?:tresqu|esto|este bot|esta app))"
+    rf"(?: tresqu)?{_TAIL}",
     re.IGNORECASE,
 )
 
-# Una moneda solo cuenta como atajo en una respuesta corta ("COP", "🇨🇴 COP",
-# "en usd"): dentro de una frase larga, "CRC" o una bandera no dicen nada.
-_MAX_CURRENCY_REPLY_WORDS = 3
+
+def _is_currency_reply(text: str) -> bool:
+    return bool(_CURRENCY_REPLY.fullmatch(text)) and bool(
+        re.search(rf"{_CURRENCY_CODE}|{_FLAG}|d[oó]lar|euro|peso", text, re.IGNORECASE)
+    )
+
 
 _MAX_CONTINUATION_WORDS = 6
 
@@ -326,9 +340,9 @@ def _last_turn_is_assistant(history: list) -> bool:
 
 
 def _is_finance_text(text: str) -> bool:
-    if _FINANCE_HINTS.search(text) or _AMOUNT_HINT.search(text):
-        return True
-    return len(text.split()) <= _MAX_CURRENCY_REPLY_WORDS and bool(_CURRENCY_HINT.search(text))
+    return bool(
+        _FINANCE_HINTS.search(text) or _AMOUNT_HINT.search(text) or _is_currency_reply(text.strip())
+    )
 
 
 def _continues_recent_turn(history: list) -> bool:
@@ -357,7 +371,7 @@ def _local_allow(text: str, history: list, strike: int) -> bool:
         return True
     if stripped.startswith("/"):  # comandos: /perfil, /registrar, /start…
         return True
-    if _is_finance_text(stripped) or _PRODUCT_HINTS.search(stripped):
+    if _is_finance_text(stripped) or _PRODUCT_QUESTION.fullmatch(stripped):
         return True
     # Cortesías y respuestas cortas a un turno de Tresqu ("sí", "el segundo",
     # "dale"): solo se dan por buenas mientras no haya racha abierta, para que

@@ -1144,7 +1144,7 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
             ).order_by("-id").values_list("id", flat=True).first()
         )()
 
-        async with user_turn(user.id):
+        async with user_turn(user.id, order=current_message_id):
             response_text = await process_message(
                 user,
                 effective_message_text,

@@ -59,10 +59,42 @@ class _FakeLock:
 
 
 class _FakeRedis:
+    """Candado, fila ordenada (ZSET) y claves con TTL, en memoria y compartidos."""
+
     store: dict = {}
+    zsets: dict = {}
+    keys: dict = {}
 
     def lock(self, name, timeout, sleep, blocking_timeout, thread_local):
         return _FakeLock(self.store, name, blocking_timeout, sleep)
+
+    async def set(self, key, value, ex=None):
+        self.keys[key] = value
+
+    async def exists(self, key):
+        return int(key in self.keys)
+
+    async def delete(self, key):
+        self.keys.pop(key, None)
+
+    async def zadd(self, key, mapping):
+        self.zsets.setdefault(key, {}).update(mapping)
+
+    async def expire(self, key, seconds):
+        return True
+
+    def _sorted(self, key):
+        return [m for m, _ in sorted(self.zsets.get(key, {}).items(), key=lambda kv: kv[1])]
+
+    async def zrank(self, key, member):
+        members = self._sorted(key)
+        return members.index(member) if member in members else None
+
+    async def zrange(self, key, start, end):
+        return [m.encode() for m in self._sorted(key)[start:end + 1]]
+
+    async def zrem(self, key, member):
+        self.zsets.get(key, {}).pop(member, None)
 
     async def aclose(self) -> None:
         pass
@@ -154,6 +186,33 @@ async def _run_lock() -> None:
     await asyncio.gather(turn("a", 1, 0.2), turn("b", 1, 0.0))
     _check("el segundo turno del mismo usuario espera al primero", order == ["a:in", "a:out", "b:in", "b:out"])
 
+    # Llegan A, B y C (ids 10, 11, 12). C entra a la fila antes que B, pero el
+    # orden lo manda el id del mensaje: C no puede adelantarse.
+    order.clear()
+
+    async def ordered(name: str, msg_id: int, start_after: float, pause: float) -> None:
+        await asyncio.sleep(start_after)
+        async with turn_history.user_turn(7, order=msg_id):
+            order.append(f"{name}:in")
+            await asyncio.sleep(pause)
+            order.append(f"{name}:out")
+
+    await asyncio.gather(
+        ordered("A", 10, 0.0, 0.15),
+        ordered("C", 12, 0.02, 0.0),
+        ordered("B", 11, 0.05, 0.0),
+    )
+    _check(
+        "con tres mensajes seguidos se atienden en orden de llegada",
+        [e for e in order if e.endswith(":in")] == ["A:in", "B:in", "C:in"],
+    )
+
+    # Un turno que murió sin salir de la fila (latido caducado) no la bloquea.
+    _FakeRedis.zsets[turn_history._queue_key(8)] = {"muerto": 1}
+    order.clear()
+    await asyncio.wait_for(turn("vivo", 8, 0.0), timeout=2)
+    _check("un turno muerto en la fila no bloquea a los demás", order == ["vivo:in", "vivo:out"])
+
     order.clear()
     await asyncio.gather(turn("a", 1, 0.2), turn("c", 2, 0.0))
     _check("usuarios distintos no se esperan", order.index("c:out") < order.index("a:out"))
@@ -168,6 +227,10 @@ async def _run_lock() -> None:
     _check("si la espera se agota, el turno sigue igual", order.index("b:out") < order.index("a:out"))
     await asyncio.sleep(0.5)
     _check("y el que esperó no suelta el candado ajeno", _FakeRedis.store == {})
+    _check(
+        "la fila queda vacía al terminar",
+        all(not members for members in _FakeRedis.zsets.values()),
+    )
 
     order.clear()
     try:

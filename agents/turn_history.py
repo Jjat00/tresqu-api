@@ -6,15 +6,17 @@ amigo", los dos turnos corrían a la vez: el segundo veía la gaseosa sin
 respuesta en el historial y la registraba otra vez (2026-10-01, gastos
 triplicados en producción).
 
-``user_turn`` pone en fila los turnos de un mismo usuario: el segundo espera a
-que el primero termine y guarde su respuesta, y así ve en el historial que la
-gaseosa ya quedó registrada. El historial en sí lo arma
+``user_turn`` pone en fila los turnos de un mismo usuario, en orden de llegada
+(el id del mensaje): el segundo espera a que el primero termine y guarde su
+respuesta, y así ve en el historial que la gaseosa ya quedó registrada. El historial en sí lo arma
 ``telegrambot.utils.fetch_last_messages`` sin el mensaje actual ni los que aún
 esperan turno.
 
-El candado vive en Redis (el broker de Celery, que comparten el proceso web
-donde corre Telegram y los workers de WhatsApp), con adquisición atómica,
-liberación atómica por token y renovación mientras el turno sigue vivo. Si
+La fila y el candado viven en Redis (el broker de Celery, que comparten el
+proceso web donde corre Telegram y los workers de WhatsApp): una fila ordenada
+(ZSET) por el id del mensaje, con un latido por turno para descartar a los que
+murieron, y un candado con adquisición y liberación atómicas por token que se
+renueva mientras el turno sigue vivo. Si
 Redis falla, el turno sigue sin candado: nunca deja a Tresqu sin responder.
 """
 
@@ -22,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
 from contextlib import asynccontextmanager, suppress
 
 from django.conf import settings
@@ -58,10 +61,49 @@ def _redis_client():
     )
 
 
-async def _keep_alive(lock) -> None:
+def _queue_key(user_id) -> str:
+    return f"tresqu:agents:queue:{user_id}"
+
+
+def _alive_key(user_id, token: str) -> str:
+    return f"tresqu:agents:alive:{user_id}:{token}"
+
+
+# Puesto en la fila de un turno sin mensaje guardado: al final.
+_NO_ORDER = 10**15
+
+
+async def _wait_for_head(client, user_id, token: str, deadline: float) -> bool:
+    """Espera a que ``token`` sea el primero de la fila. ``False`` si se agota.
+
+    La fila va ordenada por el id del mensaje entrante, que es el orden real de
+    llegada. Un candado solo no basta: quien despierta primero de su espera se
+    lo lleva, y un tercer mensaje podía adelantarse al segundo. Los turnos que
+    murieron sin salir de la fila se reconocen porque su latido caducó.
+    """
+
+    loop = asyncio.get_running_loop()
+    queue = _queue_key(user_id)
+    while True:
+        await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
+        rank = await client.zrank(queue, token)
+        if rank is None or rank == 0:
+            return True
+        ahead = await client.zrange(queue, 0, rank - 1)
+        for member in ahead:
+            member = member.decode() if isinstance(member, bytes) else member
+            if not await client.exists(_alive_key(user_id, member)):
+                await client.zrem(queue, member)
+        if loop.time() >= deadline:
+            return False
+        await asyncio.sleep(_POLL_SECONDS)
+
+
+async def _keep_alive(client, user_id, token: str, lock) -> None:
     while True:
         await asyncio.sleep(_LOCK_TTL / 3)
         try:
+            await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
             await lock.extend(_LOCK_TTL, replace_ttl=True)
         except Exception as exc:  # noqa: BLE001
             logger.warning("turno en fila: no se pudo renovar el candado (%s)", exc)
@@ -69,36 +111,51 @@ async def _keep_alive(lock) -> None:
 
 
 @asynccontextmanager
-async def user_turn(user_id):
-    """Ejecuta el bloque cuando ningún otro turno del usuario esté en curso.
+async def user_turn(user_id, order=None):
+    """Ejecuta el bloque en orden de llegada y sin otro turno del usuario en curso.
 
-    Envuelve el turno completo: cargar historial, correr el agente y guardar
-    la respuesta. Si la respuesta se guardara fuera del bloque, el turno
-    siguiente podría leer el historial justo antes y no verla.
+    ``order`` es el id del mensaje entrante ya guardado: fija el puesto en la
+    fila. Envuelve el turno completo: cargar historial, correr el agente y
+    guardar la respuesta. Si la respuesta se guardara fuera del bloque, el
+    turno siguiente podría leer el historial justo antes y no verla.
     """
 
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + _WAIT_SECONDS
+    token = uuid.uuid4().hex
     client = None
     lock = None
+    queued = False
     acquired = False
     try:
         client = _redis_client()
+        queue = _queue_key(user_id)
+        await client.set(_alive_key(user_id, token), 1, ex=_LOCK_TTL)
+        await client.zadd(queue, {token: order if order is not None else _NO_ORDER})
+        await client.expire(queue, _WAIT_SECONDS + _LOCK_TTL)
+        queued = True
+        in_order = await _wait_for_head(client, user_id, token, deadline)
+        # La fila ordena; el candado garantiza la exclusión aunque un turno
+        # entre tarde a la fila con un id menor que el que ya está corriendo.
         lock = client.lock(
             _lock_key(user_id),
             timeout=_LOCK_TTL,
             sleep=_POLL_SECONDS,
-            blocking_timeout=_WAIT_SECONDS,
+            blocking_timeout=max(0.0, deadline - loop.time()),
             thread_local=False,
         )
         acquired = bool(await lock.acquire())
-        if not acquired:
+        if not (in_order and acquired):
             logger.warning(
                 "turno en fila: el usuario %s sigue con un turno en curso tras %ss; se procesa igual",
                 user_id, _WAIT_SECONDS,
             )
-    except Exception as exc:  # noqa: BLE001 — el candado nunca rompe el flujo
+    except Exception as exc:  # noqa: BLE001 — la fila nunca rompe el flujo
         logger.warning("turno en fila: Redis no disponible (%s); sigue sin candado", exc)
 
-    renewer = asyncio.create_task(_keep_alive(lock)) if acquired else None
+    renewer = (
+        asyncio.create_task(_keep_alive(client, user_id, token, lock)) if acquired else None
+    )
     try:
         yield
     finally:
@@ -111,6 +168,10 @@ async def user_turn(user_id):
                 await lock.release()
             except Exception as exc:  # noqa: BLE001 — caducó o lo tomó otro: no es nuestro
                 logger.warning("turno en fila: no se pudo soltar el candado (%s)", exc)
+        if queued:
+            with suppress(Exception):
+                await client.zrem(_queue_key(user_id), token)
+                await client.delete(_alive_key(user_id, token))
         if client is not None:
             with suppress(Exception):
                 await client.aclose()

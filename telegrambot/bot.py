@@ -948,7 +948,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # se atendió en vez de registrarlo otra vez (agents/turn_history).
     from agents.turn_history import user_turn
 
-    async with user_turn(chat_user.id):
+    async with user_turn(chat_user.id, order=getattr(incoming_record, "id", None)):
         try:
             # Procesar mensaje
             response = await process_message(
@@ -1212,7 +1212,9 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     # dentro (ver agents/turn_history).
                     from agents.turn_history import user_turn
 
-                    async with user_turn(chat_user.id):
+                    async with user_turn(
+                        chat_user.id, order=getattr(incoming_record, "id", None)
+                    ):
                         agent_response = await process_message(
                             chat_user,
                             transcription,

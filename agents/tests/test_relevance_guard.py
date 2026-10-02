@@ -215,6 +215,9 @@ async def _run_real_cases() -> None:
         "¿quién ganó el partido 🇦🇷 🇧🇷 ayer?",
         "¿Qué sabes de la guerra de Troya?",
         "Explícame cómo funciona la fotosíntesis paso a paso",
+        "¿Qué sabes hacer en Python?",
+        "¿Qué puedes hacer para cocinar arroz?",
+        "Implementa CRC",
     ):
         _check(
             f"no se cuela sin clasificador: {text[:40]!r}",
