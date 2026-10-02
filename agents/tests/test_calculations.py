@@ -107,6 +107,8 @@ def _run_date_guard() -> None:
         "Pagué 500 hace 800 días", "eso fue hace tres años", "hace un par de años",
         "pagué 500 hace aproximadamente unos seis o siete años", "Pagué 500 hace 30 meses",
         "I paid 500 three years ago", "el año antepasado", "el gasto del 23", "en marzo",
+        "Pagué 500 en el 24", "Pagué 500 en dos mil veinticuatro", "recibí 300 en el año 23",
+        "the 2023 trip, twenty twenty-three",
     ):
         _check(
             f"con fecha del usuario se respeta: {phrase!r}",
