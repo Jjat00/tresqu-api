@@ -74,6 +74,8 @@ _TOOL_LABELS: dict[str, str] = {
     "get_user_portfolio": "Leer portafolio",
     "get_risk_profile_status": "Leer tu perfil",
     "recompute_inference": "Recalcular inferencia",
+    "get_balance_for_user": "Calcular tu saldo",
+    "calculate": "Hacer la cuenta",
 }
 
 

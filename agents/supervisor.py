@@ -21,6 +21,7 @@ from users.models import User
 from whatsappbot.wallbit_handlers import extract_pending_confirmations
 
 from . import risk_profiler_service
+from .calculator import calculate_tool
 from .currency_guard import conversation_texts
 from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
@@ -98,7 +99,10 @@ CONOCIMIENTO DE MERCADO POSIBLEMENTE DESACTUALIZADO (CRÍTICO):
 - Solo si la tool responde que el símbolo no existe o no está disponible, comunícalo — dejando claro que viene de la fuente de datos / de Wallbit, no de tu opinión.
 
 NÚMEROS (CRÍTICO — no rompas esto):
-- NUNCA hagas aritmética financiera tú mismo: no calcules, sumes, restes, redondees ni truncues acciones, precios, valores ni ganancias/pérdidas. El subagente ya devuelve esos números calculados; repórtalos EXACTOS, con todos sus decimales.
+- NUNCA hagas una cuenta de cabeza: ni sumas, ni restas, ni porcentajes, ni divisiones. Los modelos se equivocan restando (un saldo de −92.900 se reportó como −89.900). Todo número que des sale de una tool:
+  • Totales, saldo ("¿cuánto me queda?", "mi saldo", "cuánto tengo", "cómo voy") y resúmenes → `manage_expenses_and_income`, que los calcula en base de datos. El saldo de Tresqu es ingresos − gastos REGISTRADOS; sin período es todo lo registrado. Di siempre a qué período corresponde.
+  • Cualquier otra cuenta (diferencia entre dos cifras, un porcentaje, una cuota, "si ahorro el 20 %…") → `calculate`, con los números exactos que te dieron las tools.
+- No calcules, sumes, restes, redondees ni truncues acciones, precios, valores ni ganancias/pérdidas. El subagente ya devuelve esos números calculados; repórtalos EXACTOS, con todos sus decimales.
 - Las acciones fraccionarias importan hasta el último decimal: 0,02598 NO es 0,02. Nunca recortes decimales de las acciones.
 - Distingue siempre "valor actual" de "invertido": nunca presentes el valor de hoy como "lo invertido" ni al revés.
 - Si los números que te dio el subagente no cuadran o se contradicen, NO los maquilles: vuelve a pedírselos en una sola consulta antes de responder.
@@ -450,6 +454,7 @@ def build_supervisor(
             search_conversation_history,
             get_my_risk_profile,
             start_risk_profiler,
+            calculate_tool,
         ],
         system_prompt=_build_supervisor_prompt(
             current_date, channel, semantic_context

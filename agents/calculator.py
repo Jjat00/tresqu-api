@@ -1,0 +1,134 @@
+"""Aritmética determinista para los agentes.
+
+El modelo no sabe restar: el 2026-10-01 un usuario preguntó "¿cuánto me
+queda?", el saldo real era 1.660.000 − 1.752.900 = −92.900 COP y Tresqu
+respondió −89.900. Los totales y el saldo salen de la base de datos
+(``expenses.balance``); cualquier otra cuenta que haga falta en una respuesta
+(un porcentaje, una diferencia entre dos totales, una cuota) pasa por aquí.
+
+``calculate`` evalúa una expresión aritmética con ``Decimal`` recorriendo su
+árbol sintáctico: solo admite números, paréntesis y ``+ - * / // % **``. Nada
+de nombres, llamadas ni atributos, así que no hay forma de ejecutar código.
+"""
+
+from __future__ import annotations
+
+import ast
+import operator
+import re
+from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
+
+_MAX_EXPRESSION_CHARS = 300
+_MAX_EXPONENT = 12
+_PRECISION = 34
+_AMBIGUOUS = re.compile(r"(?<![\d.,])[1-9]\d{0,2}[.,]\d{3}(?![\d.,])")
+
+_BINARY = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+}
+_UNARY = {ast.UAdd: operator.pos, ast.USub: operator.neg}
+
+
+class CalculationError(ValueError):
+    """La expresión no es aritmética válida o no se puede calcular."""
+
+
+def _normalize(expression: str) -> str:
+    """Acepta lo que escribe un modelo: "1.660.000 - 1.752.900", "20%", "×"."""
+
+    text = (expression or "").strip()
+    text = text.replace("×", "*").replace("÷", "/").replace("−", "-").replace("^", "**")
+    # Miles con punto o coma ("1.660.000", "1,660,000"): se quitan los separadores.
+    text = re.sub(r"\d{1,3}(?:\.\d{3}){2,}", lambda m: m.group(0).replace(".", ""), text)
+    text = re.sub(r"\d{1,3}(?:,\d{3}){2,}", lambda m: m.group(0).replace(",", ""), text)
+    # "852.000" o "852,000" puede ser 852 mil o 852 con decimales: no se adivina.
+    if _AMBIGUOUS.search(text):
+        raise CalculationError(
+            "número ambiguo (¿miles o decimales?): escríbelo sin separador de miles, p. ej. 852000"
+        )
+    # Coma decimal en español ("0,5", "12,75").
+    text = re.sub(r"(?<=\d),(?=\d)", ".", text)
+    # "20%" → "(20/100)".
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", text)
+    return text
+
+
+def _eval(node):
+    if isinstance(node, ast.Expression):
+        return _eval(node.body)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return Decimal(str(node.value))
+    if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
+        left, right = _eval(node.left), _eval(node.right)
+        if isinstance(node.op, ast.Pow) and (abs(right) > _MAX_EXPONENT or right != right.to_integral_value()):
+            raise CalculationError("solo se admiten potencias enteras pequeñas")
+        return _BINARY[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
+        return _UNARY[type(node.op)](_eval(node.operand))
+    raise CalculationError("solo se admiten números, paréntesis y + - * / % **")
+
+
+def calculate(expression: str) -> Decimal:
+    """Evalúa ``expression`` y devuelve un ``Decimal`` exacto.
+
+    Lanza ``CalculationError`` si no es aritmética válida o si divide por cero.
+    """
+
+    text = _normalize(expression)
+    if not text or len(text) > _MAX_EXPRESSION_CHARS:
+        raise CalculationError("expresión vacía o demasiado larga")
+    try:
+        tree = ast.parse(text, mode="eval")
+    except SyntaxError as exc:
+        raise CalculationError(f"expresión inválida: {expression!r}") from exc
+    with localcontext() as ctx:
+        ctx.prec = _PRECISION
+        ctx.traps[DivisionByZero] = True
+        ctx.traps[InvalidOperation] = True
+        try:
+            return _eval(tree)
+        except (DivisionByZero, InvalidOperation, ZeroDivisionError) as exc:
+            raise CalculationError("división por cero u operación inválida") from exc
+
+
+def format_result(value: Decimal) -> str:
+    """Resultado legible y sin notación científica, con hasta 6 decimales."""
+
+    quantized = value.quantize(Decimal("0.000001")).normalize()
+    text = format(quantized, "f")
+    return "0" if text in ("-0", "") else text
+
+
+def _calculate_tool_impl(expression: str) -> str:
+    try:
+        return format_result(calculate(expression))
+    except CalculationError as exc:
+        return f"error: {exc}"
+    except (InvalidOperation, OverflowError):
+        return "error: el resultado está fuera de rango"
+
+
+def _build_calculate_tool():
+    from langchain_core.tools import tool
+
+    @tool("calculate")
+    def calculate_tool(expression: str) -> str:
+        """Calcula una expresión aritmética de forma EXACTA y devuelve el resultado.
+
+        Úsala para CUALQUIER cuenta que no traiga ya hecha otra tool: diferencias,
+        porcentajes, divisiones, cuotas, conversiones con una tasa dada. Nunca
+        hagas cuentas de cabeza. Escribe los números sin separador de miles y con
+        punto decimal: "1660000 - 1752900", "3500000 * 20%", "(120000 + 45000) / 3".
+        Admite + - * / // % ** y paréntesis."""
+        return _calculate_tool_impl(expression)
+
+    return calculate_tool
+
+
+calculate_tool = _build_calculate_tool()

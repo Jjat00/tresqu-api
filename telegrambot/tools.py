@@ -980,6 +980,28 @@ def get_income_totals(user_external_id: str, start_date: str | None = None, end_
 
 
 @tool
+def get_balance(user_external_id: str, start_date: str | None = None, end_date: str | None = None, whole_history: bool = False) -> Dict[str, Any]:
+    """Saldo EXACTO del usuario: ingresos, gastos y saldo (ingresos − gastos) por
+    moneda, calculado en base de datos. Sin fechas ("cuánto me queda", "mi
+    saldo") cuenta desde el último saldo inicial que declaró el usuario, o todo
+    lo registrado si nunca lo declaró; ``whole_history`` fuerza todo el
+    historial. Con fechas (YYYY-MM-DD, inclusive), ese período. Nunca restes
+    ingresos y gastos a mano: usa esta tool."""
+    try:
+        user = User.objects.get(external_id=user_external_id)
+    except User.DoesNotExist:
+        return {"error": "Usuario no encontrado"}
+    try:
+        from expenses.balance import compute_balance
+        return compute_balance(
+            user, start_date=start_date, end_date=end_date, whole_history=whole_history
+        )
+    except Exception as e:
+        logger.error(f"Error al calcular el saldo: {e}")
+        return {"error": str(e)}
+
+
+@tool
 def get_expense_by_id(expense_id: str):
     """Obtiene un gasto por su ID."""
     try:
