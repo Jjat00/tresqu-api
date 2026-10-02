@@ -41,6 +41,12 @@ def _run_calculator() -> None:
     _check("un exacto largo sale completo", _calculate_tool_impl("0.02598123456789 * 1") == "0.02598123456789")
     _check("ni lo diminuto se vuelve 0", _calculate_tool_impl("0.00000000000049 * 1") == "0.00000000000049")
     _check("una división exacta no se marca", _calculate_tool_impl("1 / 8") == "0.125")
+    _check(
+        "más de 28 dígitos significativos salen completos",
+        _calculate_tool_impl("0.1234567890123456789012345678901234 * 1")
+        == "0.1234567890123456789012345678901234",
+    )
+    _check("enteros con ceros no pierden los ceros", _calculate_tool_impl("1000 * 100") == "100000")
     _check("módulo con negativo entre paréntesis", calculate("10 % (-3)") == Decimal("1"))
     _check(
         "literales sin pasar por float",
@@ -107,7 +113,8 @@ def _run_date_guard() -> None:
         resolve_year("2023-03-23", today, ["el gasto del 23 de marzo"]) == "2026-03-23",
     )
     for phrase in ("eso fue hace tres años", "gasté 50 hace seis años, el 1 de mayo",
-                   "hace como diez años", "hace un par de años", "el año antepasado"):
+                   "hace como diez años", "hace un par de años", "el año antepasado",
+                   "pagué 500 hace aproximadamente unos seis o siete años", "pagué 500 hace 2.5 años"):
         _check(
             f"referencia relativa respetada: {phrase!r}",
             resolve_year("2020-05-01", today, [phrase]) == "2020-05-01",

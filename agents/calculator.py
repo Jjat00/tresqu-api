@@ -134,9 +134,15 @@ def format_result(value: Decimal, inexact: bool = False) -> str:
 
     exponent = value.as_tuple().exponent
     if inexact and isinstance(exponent, int) and exponent < -_MAX_DECIMALS:
-        value = value.quantize(Decimal(1).scaleb(-_MAX_DECIMALS))
-    text = format(value.normalize(), "f")
-    return "0" if text in ("-0", "") else text
+        with localcontext() as ctx:
+            ctx.prec = _PRECISION
+            value = value.quantize(Decimal(1).scaleb(-_MAX_DECIMALS))
+    # format(…, "f") no redondea; normalize() sí (usa el contexto de 28
+    # dígitos), así que los ceros sobrantes se quitan sobre el texto.
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in ("-0", "", "-") else text
 
 
 def _calculate_tool_impl(expression: str) -> str:
