@@ -36,10 +36,14 @@ openai_client = OpenAI(
 )
 
 
-async def build_history(user_id: int) -> list:
-    """Load the last LangChain messages for the given Telegram user."""
+async def build_history(user_id: int, current_message_id: int | None = None) -> list:
+    """Load the last LangChain messages for the given Telegram user.
+
+    ``current_message_id`` (el entrante ya guardado) queda fuera del historial:
+    el agente lo recibe aparte como turno actual.
+    """
     messages = []
-    async for msg in fetch_last_messages(user_id):
+    async for msg in fetch_last_messages(user_id, current_message_id=current_message_id):
         messages.append(msg)
     return messages
 
@@ -77,14 +81,16 @@ async def transcribe_audio(audio_file_path: str) -> str:
         return ""
 
 
-async def process_message(user: User, raw_text: str) -> AgentResponse:
+async def process_message(
+    user: User, raw_text: str, current_message_id: int | None = None
+) -> AgentResponse:
     """Public Telegram entry point — delegates to the unified agents supervisor.
 
     Returns the full ``AgentResponse`` so the bot layer can act on
     ``pending_confirmation`` (e.g. send Wallbit confirm/cancel buttons).
     """
 
-    history = await build_history(user.id)
+    history = await build_history(user.id, current_message_id)
     return await _agent_process_message(
         user=user,
         raw_text=raw_text,

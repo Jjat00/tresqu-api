@@ -1,106 +1,71 @@
-"""Historial limpio y turnos en fila por usuario.
+"""Turnos en fila por usuario.
 
-Telegram y WhatsApp guardan el mensaje entrante en ``users_message`` ANTES de
-cargar el historial, así que ese mensaje llegaba dos veces al modelo: en el
-historial y como turno actual. Efectos vistos en producción (2026-10-01):
+Telegram y WhatsApp guardan el mensaje entrante antes de correr el agente. Si
+el usuario escribe "12000 gaseosa" y a los cinco segundos "12000 préstamo
+amigo", los dos turnos corrían a la vez: el segundo veía la gaseosa sin
+respuesta en el historial y la registraba otra vez (2026-10-01, gastos
+triplicados en producción).
 
-- El supervisor registraba cada gasto dos veces ("Registré dos gastos de
-  35.000 COP") y hasta tres cuando dos mensajes llegaban casi juntos.
-- El guardrail de tema creía que el último turno era del usuario y no de
-  Tresqu, así que un "sí" o un "🇨🇴 COP" dejaba de leerse como continuación y
-  terminaba en el aviso de "solo puedo ayudarte con tus finanzas".
+``user_turn`` pone en fila los turnos de un mismo usuario: el segundo espera a
+que el primero termine y guarde su respuesta, y así ve en el historial que la
+gaseosa ya quedó registrada. El historial en sí lo arma
+``telegrambot.utils.fetch_last_messages`` sin el mensaje actual ni los que aún
+esperan turno.
 
-``without_current_message`` quita esa copia. ``user_turn`` pone en fila los
-turnos de un mismo usuario: si escribe "12000 gaseosa" y a los cinco segundos
-"12000 préstamo amigo", el segundo turno espera a que el primero termine y
-guarde su respuesta, y así ve en el historial que la gaseosa ya quedó
-registrada en vez de registrarla otra vez.
+El candado vive en Redis (el broker de Celery, que comparten el proceso web
+donde corre Telegram y los workers de WhatsApp), con adquisición atómica,
+liberación atómica por token y renovación mientras el turno sigue vivo. Si
+Redis falla, el turno sigue sin candado: nunca deja a Tresqu sin responder.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
-from asgiref.sync import sync_to_async
-from django.core.cache import cache
-from langchain_core.messages import HumanMessage
+from django.conf import settings
 
 from telegrambot.config import AGENT_EXECUTION_TIMEOUT
 
 logger = logging.getLogger(__name__)
 
-# Hasta dónde se busca la copia del mensaje actual. Con turnos en paralelo la
-# copia no siempre es el último mensaje: la respuesta al turno anterior puede
-# haberse guardado después.
-_CURRENT_LOOKBACK = 4
-
-
-def _norm(text) -> str:
-    return " ".join(str(text or "").split())
-
-
-def without_current_message(history: list, raw_text: str) -> list:
-    """Devuelve el historial sin la copia guardada del mensaje que se procesa.
-
-    Busca, entre los últimos mensajes, el más reciente del usuario cuyo texto
-    coincide con ``raw_text``. También cuenta como copia cuando ``raw_text``
-    TERMINA con ese texto: WhatsApp antepone el mensaje citado ("[Respondiendo
-    al mensaje anterior: …]") al texto que guardó.
-    """
-
-    current = _norm(raw_text)
-    if not history or not current:
-        return list(history or [])
-
-    start = max(0, len(history) - _CURRENT_LOOKBACK)
-    for index in range(len(history) - 1, start - 1, -1):
-        message = history[index]
-        if not isinstance(message, HumanMessage):
-            continue
-        stored = _norm(message.content)
-        if stored and (stored == current or current.endswith(stored)):
-            return history[:index] + history[index + 1:]
-    return list(history)
-
-
-# --- Turnos en fila ----------------------------------------------------------
-
-# Lo que puede durar un turno completo: el supervisor tiene su propio timeout y
-# después falta guardar la respuesta. Si el proceso muere con el candado
-# puesto, caduca solo.
-_LOCK_TTL = int(AGENT_EXECUTION_TIMEOUT) + 60
-# Cuánto espera un turno a que termine el anterior. Pasado ese tiempo sigue de
-# todas formas: un candado nunca deja a Tresqu sin responder.
+# Vida del candado sin renovar: si el proceso muere con él puesto, caduca solo
+# en este tiempo. Mientras el turno sigue vivo se renueva cada tercio.
+_LOCK_TTL = 60
+# Cuánto espera un turno a que termine el anterior. Cubre el timeout del
+# supervisor más la carga de contexto y el guardado, y queda por debajo del
+# soft time limit de la tarea de WhatsApp (240 s). Pasado ese tiempo el turno
+# sigue igual: el anterior está colgado y no vale la pena dejar mudo a nadie.
 _WAIT_SECONDS = int(AGENT_EXECUTION_TIMEOUT) + 30
 _POLL_SECONDS = 0.5
 
 
 def _lock_key(user_id) -> str:
-    return f"agents:turn:{user_id}"
+    return f"tresqu:agents:turn:{user_id}"
 
 
-def _acquire(key: str, token: str) -> bool:
-    try:
-        return bool(cache.add(key, token, _LOCK_TTL))
-    except Exception as exc:  # noqa: BLE001 — la caché nunca rompe el flujo
-        logger.warning("turno en fila: no se pudo tomar el candado (%s); sigue sin él", exc)
-        return True
+def _redis_client():
+    """Cliente Redis nuevo por turno.
+
+    Los clientes de ``redis.asyncio`` quedan atados al event loop donde se
+    crean, y las tareas de WhatsApp abren un loop por mensaje.
+    """
+    from redis.asyncio import Redis
+
+    return Redis.from_url(
+        settings.CELERY_BROKER_URL, socket_timeout=5, socket_connect_timeout=5
+    )
 
 
-def _release(key: str, token: str) -> None:
-    try:
-        if cache.get(key) == token:
-            cache.delete(key)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("turno en fila: no se pudo soltar el candado (%s)", exc)
-
-
-_aacquire = sync_to_async(_acquire)
-_arelease = sync_to_async(_release)
+async def _keep_alive(lock) -> None:
+    while True:
+        await asyncio.sleep(_LOCK_TTL / 3)
+        try:
+            await lock.extend(_LOCK_TTL, replace_ttl=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("turno en fila: no se pudo renovar el candado (%s)", exc)
+            return
 
 
 @asynccontextmanager
@@ -112,20 +77,40 @@ async def user_turn(user_id):
     siguiente podría leer el historial justo antes y no verla.
     """
 
-    key = _lock_key(user_id)
-    token = uuid.uuid4().hex
-    deadline = time.monotonic() + _WAIT_SECONDS
-    acquired = await _aacquire(key, token)
-    while not acquired and time.monotonic() < deadline:
-        await asyncio.sleep(_POLL_SECONDS)
-        acquired = await _aacquire(key, token)
-    if not acquired:
-        logger.warning(
-            "turno en fila: el usuario %s sigue con un turno en curso tras %ss; se procesa igual",
-            user_id, _WAIT_SECONDS,
+    client = None
+    lock = None
+    acquired = False
+    try:
+        client = _redis_client()
+        lock = client.lock(
+            _lock_key(user_id),
+            timeout=_LOCK_TTL,
+            sleep=_POLL_SECONDS,
+            blocking_timeout=_WAIT_SECONDS,
+            thread_local=False,
         )
+        acquired = bool(await lock.acquire())
+        if not acquired:
+            logger.warning(
+                "turno en fila: el usuario %s sigue con un turno en curso tras %ss; se procesa igual",
+                user_id, _WAIT_SECONDS,
+            )
+    except Exception as exc:  # noqa: BLE001 — el candado nunca rompe el flujo
+        logger.warning("turno en fila: Redis no disponible (%s); sigue sin candado", exc)
+
+    renewer = asyncio.create_task(_keep_alive(lock)) if acquired else None
     try:
         yield
     finally:
+        if renewer:
+            renewer.cancel()
+            with suppress(asyncio.CancelledError):
+                await renewer
         if acquired:
-            await _arelease(key, token)
+            try:
+                await lock.release()
+            except Exception as exc:  # noqa: BLE001 — caducó o lo tomó otro: no es nuestro
+                logger.warning("turno en fila: no se pudo soltar el candado (%s)", exc)
+        if client is not None:
+            with suppress(Exception):
+                await client.aclose()

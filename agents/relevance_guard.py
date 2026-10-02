@@ -264,10 +264,15 @@ _CURRENCY_HINT = re.compile(
 # ("¿qué puedes hacer?" leído como fuera de tema), y son justo lo primero que
 # escribe un usuario nuevo.
 _PRODUCT_HINTS = re.compile(
-    r"qu[eé] (?:puedes|sabes|haces|m[aá]s puedes)|c[oó]mo (?:funcionas|funciona|te uso|se usa)|"
-    r"\bfunciones\b|\bqui[eé]n eres\b|\bmi cuenta\b|\bmi plan\b",
+    r"qu[eé] (?:m[aá]s )?(?:puedes|sabes) hacer|qu[eé] haces\b|para qu[eé] sirves|"
+    r"c[oó]mo (?:funcionas|te uso)\b|qui[eé]n eres\b|"
+    r"c[oó]mo (?:funciona|se usa|uso) (?:tresqu|esto|este bot|esta app)\b",
     re.IGNORECASE,
 )
+
+# Una moneda solo cuenta como atajo en una respuesta corta ("COP", "🇨🇴 COP",
+# "en usd"): dentro de una frase larga, "CRC" o una bandera no dicen nada.
+_MAX_CURRENCY_REPLY_WORDS = 3
 
 _MAX_CONTINUATION_WORDS = 6
 
@@ -321,9 +326,9 @@ def _last_turn_is_assistant(history: list) -> bool:
 
 
 def _is_finance_text(text: str) -> bool:
-    return bool(
-        _FINANCE_HINTS.search(text) or _AMOUNT_HINT.search(text) or _CURRENCY_HINT.search(text)
-    )
+    if _FINANCE_HINTS.search(text) or _AMOUNT_HINT.search(text):
+        return True
+    return len(text.split()) <= _MAX_CURRENCY_REPLY_WORDS and bool(_CURRENCY_HINT.search(text))
 
 
 def _continues_recent_turn(history: list) -> bool:

@@ -899,7 +899,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Usuario existente por ID de Telegram asociado al chat: {existing_user.id}")
 
     # Registrar el mensaje recibido
-    await create_message_async(
+    incoming_record = await create_message_async(
         chat,
         str(update.message.message_id),
         "incoming",
@@ -951,7 +951,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     async with user_turn(chat_user.id):
         try:
             # Procesar mensaje
-            response = await process_message(chat_user, user_message_text)
+            response = await process_message(
+                chat_user,
+                user_message_text,
+                current_message_id=getattr(incoming_record, "id", None),
+            )
 
             # El guardrail de tema cortó el turno (mensaje ajeno a las finanzas o
             # bucle automático): no se responde ni se registra nada.
@@ -1194,16 +1198,31 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 # Guardar la transcripción en la base de datos
                 response_text = ""
                 pending = None
+                voice_response_saved = False
                 if transcription:
-                    await create_message_async(
+                    incoming_record = await create_message_async(
                         chat,
                         f"transcription_{update.message.message_id}",
                         "incoming",
                         transcription
                     )
 
-                    # Procesar el mensaje con la transcripción
-                    agent_response = await process_message(chat_user, transcription)
+                    # Procesar el mensaje con la transcripción. En fila con
+                    # los demás turnos del usuario, y la respuesta se guarda
+                    # dentro (ver agents/turn_history).
+                    from agents.turn_history import user_turn
+
+                    async with user_turn(chat_user.id):
+                        agent_response = await process_message(
+                            chat_user,
+                            transcription,
+                            current_message_id=getattr(incoming_record, "id", None),
+                        )
+                        if not agent_response.silent:
+                            await create_message_async(
+                                chat, "ai_response", "outgoing", agent_response.text
+                            )
+                            voice_response_saved = True
                     if agent_response.silent:
                         logger.info(
                             f"Nota de voz silenciada por el guardrail de tema "
@@ -1250,13 +1269,14 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 except Exception as exc:
                     logger.exception(f"send_confirmation_buttons (telegram voice) failed: {exc}")
 
-            # Registrar respuesta
-            await create_message_async(
-                chat,
-                "ai_response",
-                "outgoing",
-                response_text
-            )
+            # Registrar respuesta (la del agente ya se guardó dentro del turno)
+            if not voice_response_saved:
+                await create_message_async(
+                    chat,
+                    "ai_response",
+                    "outgoing",
+                    response_text
+                )
 
         # Eliminar el archivo temporal
         try:

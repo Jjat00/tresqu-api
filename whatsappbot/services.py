@@ -162,16 +162,25 @@ async def download_whatsapp_media(media_id: str, access_token: str) -> str:
     )
 
 
-async def build_history(user_id: int) -> list:
-    """Load the last LangChain messages for the given WhatsApp user."""
+async def build_history(user_id: int, current_message_id: int | None = None) -> list:
+    """Load the last LangChain messages for the given WhatsApp user.
+
+    ``current_message_id`` (el entrante ya guardado) queda fuera del historial:
+    el agente lo recibe aparte como turno actual.
+    """
 
     messages = []
-    async for msg in fetch_last_messages(user_id):
+    async for msg in fetch_last_messages(user_id, current_message_id=current_message_id):
         messages.append(msg)
     return messages
 
 
-async def process_message(user: User, raw_text: str, sender_phone: str | None = None) -> str | None:
+async def process_message(
+    user: User,
+    raw_text: str,
+    sender_phone: str | None = None,
+    current_message_id: int | None = None,
+) -> str | None:
     """Public WhatsApp entry point — delegates to the unified agents supervisor.
 
     If the agent produced a pending Wallbit confirmation, send the interactive
@@ -182,7 +191,7 @@ async def process_message(user: User, raw_text: str, sender_phone: str | None = 
     vez de alimentarlo).
     """
 
-    history = await build_history(user.id)
+    history = await build_history(user.id, current_message_id)
     response = await _agent_process_message(
         user=user,
         raw_text=raw_text,

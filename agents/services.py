@@ -31,7 +31,6 @@ from . import relevance_guard, risk_profiler_service
 from .conversation_memory import get_semantic_context
 from .retry import retry_with_backoff
 from .supervisor import build_supervisor
-from .turn_history import without_current_message
 
 RISK_PROFILE_COMMAND = "/perfil"
 RESUME_PROFILE_HINT = (
@@ -101,10 +100,6 @@ async def process_message(
        supervisor while keeping the session paused), or an explicit cancel.
     3. Otherwise, hand off to the multi-agent supervisor as usual.
     """
-
-    # Telegram y WhatsApp guardan el mensaje antes de cargar el historial: sin
-    # esto el modelo lo veía dos veces y registraba el gasto dos veces.
-    history = without_current_message(history, raw_text)
 
     try:
         if await relevance_guard.check_flood_async(

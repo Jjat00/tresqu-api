@@ -1136,8 +1136,21 @@ async def handle_whatsapp_message(sender_number, message_text, message_id, insta
         # primero ya se atendió en vez de registrarlo otra vez.
         from agents.turn_history import user_turn
 
+        # El entrante ya está guardado (texto, voz transcrita o gastos de una
+        # imagen, siempre con el wamid): se excluye del historial por su id.
+        current_message_id = await sync_to_async(
+            lambda: Message.objects.filter(
+                chat=chat, platform_message_id=message_id, message_type="incoming"
+            ).order_by("-id").values_list("id", flat=True).first()
+        )()
+
         async with user_turn(user.id):
-            response_text = await process_message(user, effective_message_text, sender_phone=sender_number)
+            response_text = await process_message(
+                user,
+                effective_message_text,
+                sender_phone=sender_number,
+                current_message_id=current_message_id,
+            )
 
             # 8b. Silencio del guardrail de tema: ni respuesta ni registro saliente.
             if response_text is None:

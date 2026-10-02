@@ -183,7 +183,6 @@ async def _run_real_cases() -> None:
     from langchain_core.messages import AIMessage, HumanMessage
 
     from agents import relevance_guard as guard
-    from agents.turn_history import without_current_message
 
     async def _off(text, hist):
         return {"on_topic": False, "automated": False}
@@ -192,28 +191,36 @@ async def _run_real_cases() -> None:
 
     print("\n[10] Casos reales que recibieron 'solo puedo ayudarte con tus finanzas'")
     gmail_notice = AIMessage(content="📧 Compra detectada desde tu Gmail: Google Cloud 10862 COP")
-    # El canal guarda el mensaje entrante antes de cargar el historial.
-    stored = [gmail_notice, HumanMessage(content="Holaa")]
     _check(
         "'Holaa' (saludo alargado) pasa sin clasificador",
-        (await guard.check_relevance("test:real1", "Holaa", without_current_message(stored, "Holaa"))).allow,
+        (await guard.check_relevance("test:real1", "Holaa", [gmail_notice])).allow,
     )
     _check(
         "el saludo tolera letras alargadas ('graciaaas!!')",
         guard._is_courtesy("Holaa") and guard._is_courtesy("graciaaas!!"),
     )
 
-    stored = [
+    previous = [
         AIMessage(content="Registré 48.000 COP en Alimentación."),
         HumanMessage(content="Pague tarjeta de crédito 440000"),
-        HumanMessage(content="🇨🇴 COP"),
     ]
     _check(
         "'🇨🇴 COP' justo después de un pago pasa",
-        (await guard.check_relevance("test:real2", "🇨🇴 COP", without_current_message(stored, "🇨🇴 COP"))).allow,
+        (await guard.check_relevance("test:real2", "🇨🇴 COP", previous)).allow,
     )
     _check("'usd' suelto es una moneda", guard._is_finance_text("usd"))
     _check("'¿ves?' no se confunde con una moneda", not guard._is_finance_text("¿ves?"))
+    for text in (
+        "Implementa un CRC para validar paquetes de red",
+        "¿quién ganó el partido 🇦🇷 🇧🇷 ayer?",
+        "¿Qué sabes de la guerra de Troya?",
+        "Explícame cómo funciona la fotosíntesis paso a paso",
+    ):
+        _check(
+            f"no se cuela sin clasificador: {text[:40]!r}",
+            not guard._local_allow(text, [], 1) and not guard._local_allow(text, [], 0),
+        )
+    _check("'¿qué puedes hacer?' pasa directo", guard._local_allow("¿qué puedes hacer?", [], 0))
 
     pago = [HumanMessage(content="Pagué el arriendo")]
     _check(
