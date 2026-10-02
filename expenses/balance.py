@@ -9,57 +9,98 @@ Mismo criterio de fechas que el dashboard y que ``get_expense_totals``: fecha
 real del movimiento (``spent_at`` / ``received_at``) y, si no la tiene, su
 ``timestamp`` en la zona horaria del usuario. Cada moneda va por separado:
 restar COP de USD no tiene sentido.
+
+Saldo inicial: cuando el usuario declara cuánta plata tiene ("tengo
+1.660.000"), el agente lo registra como ingreso con la nota "saldo inicial".
+Desde ahí esa moneda se cuenta de nuevo: lo anterior ya está reflejado en la
+cifra declarada, y restarlo otra vez dejaba en −176.500 a quien tenía 808.000.
 """
 
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from typing import Any
 
+import pytz
 from django.db.models import Count, Q, Sum
 
 from expenses.models import Expense
 from income.models import Income
 from users.models import User
 
+INITIAL_BALANCE_NOTE = "saldo inicial"
+
 
 def _money(value: Decimal | None) -> float:
     return float((value or Decimal("0")).quantize(Decimal("0.01")))
 
 
-def _by_currency(query) -> dict[str, dict[str, Any]]:
-    rows = query.values("currency").annotate(total=Sum("amount"), count=Count("id"))
-    return {
-        r["currency"]: {"total": r["total"] or Decimal("0"), "count": r["count"]}
-        for r in rows
-    }
-
-
-_INITIAL_BALANCE = "saldo inicial"
+def _user_tz(user: User):
+    try:
+        return pytz.timezone(user.timezone)
+    except (AttributeError, pytz.exceptions.UnknownTimeZoneError):
+        return pytz.timezone("America/Bogota")
 
 
 def _initial_balance_q() -> Q:
     # Coincidencia exacta: una nota libre que solo menciona "saldo inicial"
     # ("Saldo inicial del mes registrado como…") no es un punto de partida.
-    return Q(note__iexact=_INITIAL_BALANCE) | Q(category_str__iexact=_INITIAL_BALANCE)
+    return Q(note__iexact=INITIAL_BALANCE_NOTE) | Q(category_str__iexact=INITIAL_BALANCE_NOTE)
 
 
-def latest_initial_balance(user: User) -> Income | None:
-    """El último ingreso que el usuario declaró como su saldo de partida.
+def _effective_date(record, field: str, tz) -> date:
+    value = getattr(record, field)
+    return value or record.timestamp.astimezone(tz).date()
 
-    Cuando alguien dice "tengo 1.660.000" o "mi saldo es…", el agente lo
-    registra como ingreso con la nota "saldo inicial". Desde ese punto el
-    usuario cuenta su plata de nuevo: los gastos de antes ya están reflejados
-    en esa cifra y restarlos otra vez lo deja en negativo sin razón (caso real
-    del 2026-10-01: −92.900 en vez de 808.000).
+
+def _anchor_key(income: Income, tz):
+    return (_effective_date(income, "received_at", tz), income.created_at, income.id)
+
+
+def latest_initial_balances(user: User) -> dict[str, Income]:
+    """El último saldo inicial declarado de cada moneda.
+
+    Se ordena por su fecha (``received_at`` o, si no tiene, el día local de su
+    ``timestamp``) y, dentro del mismo día, por cuándo se registró.
     """
 
-    return (
-        Income.objects.filter(user=user, received_at__isnull=False)
-        .filter(_initial_balance_q())
-        .order_by("-received_at", "-id")
-        .first()
+    tz = _user_tz(user)
+    anchors: dict[str, Income] = {}
+    for income in Income.objects.filter(user=user).filter(_initial_balance_q()):
+        current = anchors.get(income.currency)
+        if current is None or _anchor_key(income, tz) > _anchor_key(current, tz):
+            anchors[income.currency] = income
+    return anchors
+
+
+def _after_anchor(field: str, anchor: Income, tz) -> Q:
+    """Movimientos posteriores a la declaración del saldo inicial.
+
+    - Con fecha real: días posteriores y, del mismo día, solo lo registrado
+      después de la declaración (lo de antes ya estaba en la cifra declarada).
+    - Sin fecha real: igual, ubicándolos por su ``timestamp`` en la zona del
+      usuario, como hace el dashboard.
+    """
+
+    anchor_day = _effective_date(anchor, "received_at", tz)
+    day_start = tz.localize(datetime.combine(anchor_day, time.min)).astimezone(pytz.UTC)
+    next_day_start = tz.localize(
+        datetime.combine(anchor_day + timedelta(days=1), time.min)
+    ).astimezone(pytz.UTC)
+    dated = Q(**{f"{field}__gt": anchor_day}) | Q(
+        **{field: anchor_day, "created_at__gt": anchor.created_at}
     )
+    undated = Q(**{f"{field}__isnull": True}) & (
+        Q(timestamp__gte=next_day_start)
+        | Q(timestamp__gte=day_start, created_at__gt=anchor.created_at)
+    )
+    return dated | undated
+
+
+def _sum(query) -> dict[str, Any]:
+    row = query.aggregate(total=Sum("amount"), count=Count("id"))
+    return {"total": row["total"] or Decimal("0"), "count": row["count"]}
 
 
 def compute_balance(
@@ -70,45 +111,49 @@ def compute_balance(
 ) -> dict[str, Any]:
     """Ingresos, gastos y saldo (ingresos − gastos) por moneda.
 
-    Sin fechas es lo que la gente entiende por "cuánto me queda": desde su
-    último saldo inicial si lo declaró, o todo lo registrado si no (o si se
-    pide ``whole_history``). Con fechas (YYYY-MM-DD, inclusive), solo ese
-    período.
+    Sin fechas es lo que la gente entiende por "cuánto me queda": cada moneda
+    desde su último saldo inicial declarado, o todo lo registrado si nunca lo
+    declaró (o si se pide ``whole_history``). Con fechas (YYYY-MM-DD,
+    inclusive), solo ese período y sin saldos iniciales de por medio.
     """
 
     from telegrambot.tools import _filter_by_period
 
-    anchor = None
-    if not start_date and not end_date and not whole_history:
-        anchor = latest_initial_balance(user)
+    tz = _user_tz(user)
+    use_anchors = not start_date and not end_date and not whole_history
+    anchors = latest_initial_balances(user) if use_anchors else {}
 
-    expense_qs = Expense.objects.filter(user=user)
-    income_qs = Income.objects.filter(user=user)
-    if anchor:
-        start_date = anchor.received_at.isoformat()
-        # Saldos iniciales anteriores del mismo día ya no cuentan: los
-        # reemplaza el último.
-        income_qs = income_qs.exclude(Q(_initial_balance_q()) & ~Q(id=anchor.id))
-
-    expenses = _by_currency(
-        _filter_by_period(expense_qs, "spent_at", start_date, end_date, user=user)
+    expenses = _filter_by_period(
+        Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user
     )
-    incomes = _by_currency(
-        _filter_by_period(income_qs, "received_at", start_date, end_date, user=user)
+    incomes = _filter_by_period(
+        Income.objects.filter(user=user), "received_at", start_date, end_date, user=user
     )
 
     default_currency = getattr(user, "default_currency", None) or "COP"
-    currencies = sorted(
-        set(expenses) | set(incomes) or {default_currency},
-        key=lambda c: (c != default_currency, c),
-    )
-    zero = {"total": Decimal("0"), "count": 0}
+    currencies = set(expenses.values_list("currency", flat=True).distinct())
+    currencies |= set(incomes.values_list("currency", flat=True).distinct())
+    currencies = sorted(currencies or {default_currency}, key=lambda c: (c != default_currency, c))
+
     by_currency = []
     for currency in currencies:
-        inc = incomes.get(currency, zero)
-        exp = expenses.get(currency, zero)
+        exp_qs = expenses.filter(currency=currency)
+        inc_qs = incomes.filter(currency=currency)
+        anchor = anchors.get(currency)
+        if anchor:
+            exp_qs = exp_qs.filter(_after_anchor("spent_at", anchor, tz))
+            # Cuenta el ancla y lo posterior; ni lo anterior ni otros saldos iniciales.
+            inc_qs = inc_qs.filter(
+                Q(id=anchor.id)
+                | (_after_anchor("received_at", anchor, tz) & ~_initial_balance_q())
+            )
+        inc, exp = _sum(inc_qs), _sum(exp_qs)
         by_currency.append({
             "currency": currency,
+            "since_initial_balance": (
+                _effective_date(anchor, "received_at", tz).isoformat() if anchor else None
+            ),
+            "initial_balance": _money(anchor.amount) if anchor else None,
             "incomes_total": _money(inc["total"]),
             "incomes_count": inc["count"],
             "expenses_total": _money(exp["total"]),
@@ -116,23 +161,19 @@ def compute_balance(
             "balance": _money(inc["total"] - exp["total"]),
         })
 
-    if anchor:
-        label = (
-            f"desde tu saldo inicial de {_money(anchor.amount):,.0f} {anchor.currency} "
-            f"del {anchor.received_at.isoformat()}"
-        ).replace(",", ".")
-    elif not start_date and not end_date:
-        label = "todo lo registrado"
-    else:
+    if start_date or end_date:
         label = f"{start_date or 'inicio'} a {end_date or 'hoy'}"
+    elif anchors:
+        label = "cada moneda desde su último saldo inicial (since_initial_balance); sin él, todo lo registrado"
+    else:
+        label = "todo lo registrado"
     return {
         "period": {"from": start_date, "to": end_date, "label": label},
-        "starts_from_initial_balance": bool(anchor),
         "default_currency": default_currency,
         "by_currency": by_currency,
         "note": (
             "balance = incomes_total - expenses_total, calculado en base de datos. "
-            "Repórtalo tal cual, diciendo el período (period.label); no lo recalcules "
-            "ni lo combines entre monedas."
+            "Repórtalo tal cual, diciendo desde cuándo cuenta cada moneda; no lo "
+            "recalcules ni lo combines entre monedas."
         ),
     }

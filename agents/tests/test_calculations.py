@@ -33,7 +33,14 @@ def _run_calculator() -> None:
     _check("acciones fraccionarias", calculate("0.02598 * 3") == Decimal("0.07794"))
     _check("paréntesis y división", calculate("(120000 + 45000) / 3") == Decimal("55000"))
     _check("signos tipográficos", calculate("10 × 3 − 4 ÷ 2") == Decimal("28"))
-    _check("redondeo legible", _calculate_tool_impl("10 / 3") == "3.333333")
+    _check("división periódica con 12 decimales", _calculate_tool_impl("10 / 3") == "3.333333333333")
+    _check("sin redondeo oculto", _calculate_tool_impl("0.00000049 * 1") == "0.00000049")
+    _check(
+        "literales sin pasar por float",
+        calculate("0.123456789123456789 * 1000000000000000000") == Decimal("123456789123456789"),
+    )
+    _check("% seguido de número es módulo", calculate("10 % 3") == Decimal("1"))
+    _check("% al final es porcentaje", calculate("200 * 15 %") == Decimal("30"))
 
     for bad in ("852.000 + 1", "1660000 - 852,000", '__import__("os")', "abs(-1)", "x + 1", "1/0", "2 ** 100", "", "1 if 1 else 2"):
         try:
@@ -47,6 +54,18 @@ def _run_calculator() -> None:
         "ni con un resultado gigante",
         _calculate_tool_impl("999999999999 ** 12").startswith("error"),
     )
+    _check(
+        "ni con potencias anidadas",
+        _calculate_tool_impl("((((((10 ** 12) ** 12) ** 12) ** 12) ** 12) ** 12)").startswith("error"),
+    )
+    import time
+
+    started = time.monotonic()
+    result = _calculate_tool_impl("1" * 30000 + "%")
+    _check(
+        "una entrada enorme se rechaza de inmediato",
+        result.startswith("error") and time.monotonic() - started < 0.1,
+    )
 
 
 def _run_date_guard() -> None:
@@ -56,21 +75,41 @@ def _run_date_guard() -> None:
     today = date(2026, 10, 1)
     # El caso real: "12000 gaseosa" quedó con fecha 2023-10-01.
     _check(
-        "un año que nadie dijo pasa al actual",
+        "un año viejo que nadie dijo pasa al actual",
         resolve_year("2023-10-01", today, ["12000 gaseosa"]) == "2026-10-01",
     )
     _check("el año actual no se toca", resolve_year("2026-09-28", today, ["el domingo"]) == "2026-09-28")
     _check(
+        "el año pasado no se toca ('del año pasado' no lleva número)",
+        resolve_year("2025-03-15", today, ["el 15 de marzo del año pasado"]) == "2025-03-15",
+    )
+    _check(
+        "'mañana' un 31 de diciembre no se toca",
+        resolve_year("2027-01-01", date(2026, 12, 31), ["mañana"]) == "2027-01-01",
+    )
+    _check(
         "un año que el usuario escribió se respeta",
-        resolve_year("2025-03-15", today, ["gasté 50 mil el 15 de marzo de 2025"]) == "2025-03-15",
+        resolve_year("2023-03-15", today, ["gasté 50 mil el 15 de marzo de 2023"]) == "2023-03-15",
     )
     _check(
         "también con año corto en la fecha",
-        resolve_year("2025-03-15", today, ["pagué el 15/03/25"]) == "2025-03-15",
+        resolve_year("2023-03-15", today, ["pagué el 15/03/23"]) == "2023-03-15",
+    )
+    _check(
+        "'del 23 de marzo' no cuenta como año 2023",
+        resolve_year("2023-03-23", today, ["el gasto del 23 de marzo"]) == "2026-03-23",
+    )
+    _check(
+        "una referencia relativa a años se respeta",
+        resolve_year("2023-05-01", today, ["eso fue hace tres años"]) == "2023-05-01",
     )
     _check(
         "si con el año actual quedaría en el futuro, va al anterior",
-        resolve_year("2024-12-28", date(2026, 1, 5), ["el 28 de diciembre"]) == "2025-12-28",
+        resolve_year("2023-12-28", today, ["el 28 de diciembre"]) == "2025-12-28",
+    )
+    _check(
+        "un 29 de febrero sin año válido se deja igual (nunca 'hoy')",
+        resolve_year("2024-02-29", today, ["el 29 de febrero"]) == "2024-02-29",
     )
     _check("sin fecha no hace nada", resolve_year(None, today, []) is None)
     _check("una fecha rara se deja igual", resolve_year("ayer", today, []) == "ayer")

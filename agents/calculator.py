@@ -16,11 +16,16 @@ from __future__ import annotations
 import ast
 import operator
 import re
-from decimal import Decimal, DivisionByZero, InvalidOperation, localcontext
+from decimal import Decimal, DecimalException, DivisionByZero, InvalidOperation, Overflow, localcontext
 
 _MAX_EXPRESSION_CHARS = 300
 _MAX_EXPONENT = 12
 _PRECISION = 34
+# Ningún número de una cuenta personal se acerca a esto; cortar antes evita
+# que potencias anidadas revienten el contexto decimal.
+_MAX_MAGNITUDE = Decimal(10) ** 24
+# Decimales que se muestran: solo importa en divisiones periódicas (10/3).
+_MAX_DECIMALS = 12
 _AMBIGUOUS = re.compile(r"(?<![\d.,])[1-9]\d{0,2}[.,]\d{3}(?![\d.,])")
 
 _BINARY = {
@@ -54,24 +59,33 @@ def _normalize(expression: str) -> str:
         )
     # Coma decimal en español ("0,5", "12,75").
     text = re.sub(r"(?<=\d),(?=\d)", ".", text)
-    # "20%" → "(20/100)".
-    text = re.sub(r"(\d+(?:\.\d+)?)\s*%", r"(\1/100)", text)
+    # "20%" → "(20/100)". Un % seguido de otro número es el operador módulo.
+    text = re.sub(r"(\d+(?:\.\d+)?)\s*%(?!\s*[\d(.])", r"(\1/100)", text)
     return text
 
 
-def _eval(node):
+def _checked(value: Decimal) -> Decimal:
+    if abs(value) > _MAX_MAGNITUDE:
+        raise CalculationError("el resultado está fuera de rango")
+    return value
+
+
+def _eval(node, source: str):
     if isinstance(node, ast.Expression):
-        return _eval(node.body)
+        return _eval(node.body, source)
     if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
-        return Decimal(str(node.value))
+        # Desde el texto del literal, no desde el float que ya redondeó Python:
+        # 0.123456789123456789 no cabe en un float.
+        literal = ast.get_source_segment(source, node) or str(node.value)
+        return _checked(Decimal(literal))
     if isinstance(node, ast.BinOp) and type(node.op) in _BINARY:
-        left, right = _eval(node.left), _eval(node.right)
+        left, right = _eval(node.left, source), _eval(node.right, source)
         if isinstance(node.op, ast.Pow) and (abs(right) > _MAX_EXPONENT or right != right.to_integral_value()):
             raise CalculationError("solo se admiten potencias enteras pequeñas")
-        return _BINARY[type(node.op)](left, right)
+        return _checked(_BINARY[type(node.op)](left, right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in _UNARY:
-        return _UNARY[type(node.op)](_eval(node.operand))
-    raise CalculationError("solo se admiten números, paréntesis y + - * / % **")
+        return _UNARY[type(node.op)](_eval(node.operand, source))
+    raise CalculationError("solo se admiten números, paréntesis y + - * / // % **")
 
 
 def calculate(expression: str) -> Decimal:
@@ -80,8 +94,11 @@ def calculate(expression: str) -> Decimal:
     Lanza ``CalculationError`` si no es aritmética válida o si divide por cero.
     """
 
+    # El límite va ANTES de normalizar: las regex no deben ver entradas enormes.
+    if not expression or len(expression) > _MAX_EXPRESSION_CHARS:
+        raise CalculationError("expresión vacía o demasiado larga")
     text = _normalize(expression)
-    if not text or len(text) > _MAX_EXPRESSION_CHARS:
+    if not text or len(text) > _MAX_EXPRESSION_CHARS * 2:
         raise CalculationError("expresión vacía o demasiado larga")
     try:
         tree = ast.parse(text, mode="eval")
@@ -91,17 +108,25 @@ def calculate(expression: str) -> Decimal:
         ctx.prec = _PRECISION
         ctx.traps[DivisionByZero] = True
         ctx.traps[InvalidOperation] = True
+        ctx.traps[Overflow] = True
         try:
-            return _eval(tree)
-        except (DivisionByZero, InvalidOperation, ZeroDivisionError) as exc:
-            raise CalculationError("división por cero u operación inválida") from exc
+            return _eval(tree, text)
+        except (DecimalException, ZeroDivisionError, OverflowError) as exc:
+            raise CalculationError("división por cero, desborde u operación inválida") from exc
 
 
 def format_result(value: Decimal) -> str:
-    """Resultado legible y sin notación científica, con hasta 6 decimales."""
+    """Resultado exacto y sin notación científica.
 
-    quantized = value.quantize(Decimal("0.000001")).normalize()
-    text = format(quantized, "f")
+    Solo se recorta lo que no se puede escribir exacto: una división periódica
+    (10/3) se muestra con ``_MAX_DECIMALS`` decimales. Lo demás va completo
+    (0.00000049 sigue siendo 0.00000049).
+    """
+
+    exponent = value.as_tuple().exponent
+    if isinstance(exponent, int) and exponent < -_MAX_DECIMALS:
+        value = value.quantize(Decimal(1).scaleb(-_MAX_DECIMALS))
+    text = format(value.normalize(), "f")
     return "0" if text in ("-0", "") else text
 
 
@@ -110,7 +135,7 @@ def _calculate_tool_impl(expression: str) -> str:
         return format_result(calculate(expression))
     except CalculationError as exc:
         return f"error: {exc}"
-    except (InvalidOperation, OverflowError):
+    except (DecimalException, OverflowError):
         return "error: el resultado está fuera de rango"
 
 

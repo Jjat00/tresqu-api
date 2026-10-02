@@ -129,7 +129,9 @@ def build_expenses_tools(
         return resolve_currency(requested, default_currency, conversation_context)
 
     def _date(value: str | None) -> str | None:
-        """Fecha a registrar: descarta un año que nadie mencionó (``agents.date_guard``)."""
+        """Fecha de un registro NUEVO: corrige un año que nadie mencionó
+        (``agents.date_guard``). Las ediciones no pasan por aquí: su fecha
+        viene del registro guardado."""
         from telegrambot.tools import _user_tz
 
         today = datetime.now(_user_tz(user)).date()
@@ -324,7 +326,7 @@ def build_expenses_tools(
             "amount": amount,
             "currency": mentioned_currency(currency, conversation_context),
             "category": category,
-            "spent_at": _date(spent_at),
+            "spent_at": spent_at,
             "note": note,
         })
 
@@ -344,7 +346,7 @@ def build_expenses_tools(
             "amount": amount,
             "currency": mentioned_currency(currency, conversation_context),
             "category": category,
-            "received_at": _date(received_at),
+            "received_at": received_at,
             "note": note,
         })
 
@@ -642,7 +644,7 @@ CONSULTAS:
 - Por categoría + período: get_category_expenses / get_category_incomes.
 - Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
 - Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
-- SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user sin fechas (cuenta desde el último saldo inicial del usuario). Si nombra un período, pasa sus fechas. Reporta por moneda ingresos, gastos y saldo tal como los devuelve y di el período con period.label (p. ej. "desde tu saldo inicial del 30 de septiembre").
+- SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user sin fechas (cuenta desde el último saldo inicial del usuario). Si nombra un período, pasa sus fechas. Reporta por moneda ingresos, gastos y saldo tal como los devuelve, y di desde cuándo cuenta: since_initial_balance (p. ej. "desde tu saldo inicial del 30 de septiembre") o, si viene vacío, "con todo lo registrado".
 - SALDO DECLARADO: cuando el usuario dice cuánta plata tiene para empezar a contar desde ahí ("tengo 1.660.000", "mi saldo es…"), y confirma que quiere registrarlo, créalo como ingreso con la nota EXACTA "saldo inicial". Así el saldo arranca desde ese punto. Nunca borres otros movimientos por eso.
 - CUENTAS: nunca sumes, restes, multipliques ni saques porcentajes de cabeza. Si la respuesta necesita una cuenta que ninguna tool trae hecha (diferencia entre dos totales, un porcentaje, un promedio simple), usa calculate con los números exactos de las tools.
 - TOTALES ("cuánto gasté", "cuánto llevo este mes", "total de ingresos de julio"): get_expense_totals_for_user / get_income_totals_for_user con el rango de fechas del período. Devuelven el total exacto por moneda, calculado igual que el dashboard; reporta cada moneda por separado, tal cual.
