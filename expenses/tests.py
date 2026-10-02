@@ -136,10 +136,20 @@ class BalanceTests(TestCase):
 
     def test_fijar_saldo_inicial_acepta_cero_y_ancla_desde_ahi(self):
         from datetime import timedelta
+        from unittest import mock
+
+        from agents.run_context import start_transaction_tracking
         from expenses.balance import compute_balance, set_initial_balance
 
         self._expense("700", self.today - timedelta(days=2))
-        set_initial_balance(self.user, Decimal("0"))
+        tracked = start_transaction_tracking()
+        with mock.patch("telegrambot.tools.embeddings") as fake_embeddings:
+            fake_embeddings.embed_query.return_value = None
+            income = set_initial_balance(self.user, Decimal("0"))
+        self.assertIn({"kind": "income", "id": income.id}, tracked)
+        self.assertEqual(income.user_income_category.name, "Saldo Inicial")
+        with self.assertRaises(ValueError):
+            set_initial_balance(self.user, Decimal("10"), currency="USDT")
         self._expense("25", self.today, dated=False)
         row = self._row(compute_balance(self.user))
         self.assertEqual(row["balance"], -25.0)

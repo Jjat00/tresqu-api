@@ -83,57 +83,68 @@ def _run_calculator() -> None:
 
 
 def _run_date_guard() -> None:
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    from agents.currency_guard import user_texts
     from agents.date_guard import resolve_year
 
     print("\n[año de las fechas]")
     today = date(2026, 10, 1)
     # El caso real: "12000 gaseosa" quedó con fecha 2023-10-01.
     _check(
-        "un año viejo que nadie dijo pasa al actual",
+        "sin fecha del usuario, un año viejo pasa al actual",
         resolve_year("2023-10-01", today, ["12000 gaseosa"]) == "2026-10-01",
     )
+    _check("'ayer' también se corrige", resolve_year("2023-09-30", today, ["ayer 5000 mecato"]) == "2026-09-30")
     _check("el año actual no se toca", resolve_year("2026-09-28", today, ["el domingo"]) == "2026-09-28")
-    _check(
-        "el año pasado no se toca ('del año pasado' no lleva número)",
-        resolve_year("2025-03-15", today, ["el 15 de marzo del año pasado"]) == "2025-03-15",
-    )
+    _check("el año pasado no se toca", resolve_year("2025-03-15", today, ["algo"]) == "2025-03-15")
     _check(
         "'mañana' un 31 de diciembre no se toca",
         resolve_year("2027-01-01", date(2026, 12, 31), ["mañana"]) == "2027-01-01",
     )
-    _check(
-        "un año que el usuario escribió se respeta",
-        resolve_year("2023-03-15", today, ["gasté 50 mil el 15 de marzo de 2023"]) == "2023-03-15",
-    )
-    _check(
-        "también con año corto en la fecha",
-        resolve_year("2023-03-15", today, ["pagué el 15/03/23"]) == "2023-03-15",
-    )
-    _check(
-        "'del 23 de marzo' no cuenta como año 2023",
-        resolve_year("2023-03-23", today, ["el gasto del 23 de marzo"]) == "2026-03-23",
-    )
-    for phrase in ("eso fue hace tres años", "gasté 50 hace seis años, el 1 de mayo",
-                   "hace como diez años", "hace un par de años", "el año antepasado",
-                   "pagué 500 hace aproximadamente unos seis o siete años", "pagué 500 hace 2.5 años",
-                   "Pagué 500 hace 30 meses", "I paid 500 three years ago"):
+    for phrase in (
+        "gasté 50 mil el 15 de marzo de 2023", "pagué el 15/03/23", "Pagué 500 el 15 de marzo del 24",
+        "Pagué 500 hace 800 días", "eso fue hace tres años", "hace un par de años",
+        "pagué 500 hace aproximadamente unos seis o siete años", "Pagué 500 hace 30 meses",
+        "I paid 500 three years ago", "el año antepasado", "el gasto del 23", "en marzo",
+    ):
         _check(
-            f"referencia relativa respetada: {phrase!r}",
-            resolve_year("2020-05-01", today, [phrase]) == "2020-05-01",
+            f"con fecha del usuario se respeta: {phrase!r}",
+            resolve_year("2023-03-15", today, [phrase]) == "2023-03-15",
         )
     _check(
         "si con el año actual quedaría en el futuro, va al anterior",
-        resolve_year("2023-12-28", today, ["el 28 de diciembre"]) == "2025-12-28",
+        resolve_year("2023-12-28", today, ["5000 mecato"]) == "2025-12-28",
     )
     _check(
         "un 29 de febrero sin año válido se deja igual (nunca 'hoy')",
-        resolve_year("2024-02-29", today, ["el 29 de febrero"]) == "2024-02-29",
+        resolve_year("2024-02-29", date(2027, 3, 1), ["5000 mecato"]) == "2024-02-29",
     )
     _check("sin fecha no hace nada", resolve_year(None, today, []) is None)
     _check("una fecha rara se deja igual", resolve_year("ayer", today, []) == "ayer")
 
+    history = [
+        HumanMessage(content="48000 hamburguesa"),
+        AIMessage(content="Registré 48.000 COP hoy, 1 de octubre de 2026."),
+    ]
+    texts = user_texts("12000 gaseosa", history)
+    _check("user_texts deja fuera a Tresqu", texts == ["48000 hamburguesa", "12000 gaseosa"])
+    _check(
+        "y así la fecha de una confirmación de Tresqu no frena la corrección",
+        resolve_year("2023-10-01", today, texts) == "2026-10-01",
+    )
+    _check(
+        "acepta el historial del chat web como dicts",
+        user_texts("x", [{"role": "user", "content": "a"}, {"role": "assistant", "content": "b"}]) == ["a", "x"],
+    )
+
 
 def main() -> int:
+    import django
+    import os
+
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "cashbotapp.settings")
+    django.setup()
     _run_calculator()
     _run_date_guard()
     print()

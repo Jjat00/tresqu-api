@@ -179,3 +179,29 @@ def conversation_texts(
     if user_message:
         texts.append(user_message)
     return texts
+
+
+def user_texts(
+    user_message: str | None,
+    history: Iterable[Any] | None = None,
+    limit: int = 6,
+) -> list[str]:
+    """Solo lo que escribió el usuario: su mensaje actual y sus mensajes entre
+    los últimos ``limit`` del hilo.
+
+    A diferencia de ``conversation_texts``, deja fuera a Tresqu: sus
+    confirmaciones traen fechas ("hoy 1 de octubre de 2026") y harían creer a
+    ``date_guard`` que el usuario dio una fecha.
+    """
+    texts: list[str] = []
+    for message in list(history or [])[-limit:]:
+        if isinstance(message, dict):
+            role, content = message.get("role"), message.get("content")
+        else:
+            role = "user" if message.__class__.__name__ == "HumanMessage" else "assistant"
+            content = getattr(message, "content", None)
+        if role == "user" and isinstance(content, str) and content.strip():
+            texts.append(content)
+    if user_message:
+        texts.append(user_message)
+    return texts

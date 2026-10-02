@@ -103,27 +103,56 @@ def set_initial_balance(user: User, amount: Decimal, currency: str | None = None
 
     Va aparte de ``create_income`` porque un saldo inicial puede ser 0
     ("empieza a contar desde cero") y un ingreso normal no. Negativo no: quien
-    arranca debiendo lo registra como 0 más el gasto o la deuda.
+    arranca debiendo lo registra como 0 más el gasto o la deuda. Por lo demás
+    se comporta igual: moneda validada, categoría del usuario, rastreo para
+    vincularlo a la confirmación de WhatsApp y embedding para la búsqueda.
     """
 
     from django.utils import timezone
+
+    from agents.run_context import record_created_transaction
+    from categories.utils import get_or_create_user_income_category
+    from telegrambot.currencies import is_valid_currency
 
     if amount < 0:
         raise ValueError("el saldo inicial no puede ser negativo")
     can_add, message = user.can_add_income()
     if not can_add:
         raise ValueError(message)
+    if currency and not is_valid_currency(currency):
+        raise ValueError(f"moneda no válida: {currency}")
+    currency = (currency or getattr(user, "default_currency", None) or "COP").upper()
+
+    category, _ = get_or_create_user_income_category(
+        user=user,
+        name="Saldo Inicial",
+        description="Plata con la que empiezas a contar en Tresqu",
+        example="Saldo inicial declarado",
+    )
     now = timezone.now()
-    return Income.objects.create(
+    received = now.astimezone(_user_tz(user)).date()
+    text = f"Saldo inicial de {amount} {currency} el {received}."
+    income = Income.objects.create(
         user=user,
         amount=amount,
-        currency=(currency or getattr(user, "default_currency", None) or "COP").upper(),
-        category_str="Saldo inicial",
+        currency=currency,
+        category_str=category.name,
+        user_income_category=category,
         description="Saldo inicial declarado por el usuario",
         note=INITIAL_BALANCE_NOTE,
+        raw_message=text,
         timestamp=now,
-        received_at=now.astimezone(_user_tz(user)).date(),
+        received_at=received,
     )
+    record_created_transaction("income", income.id)
+    try:
+        from telegrambot.tools import embeddings
+
+        income.embedding = embeddings.embed_query(text)
+        income.save(update_fields=["embedding"])
+    except Exception:  # noqa: BLE001 — sin embedding el saldo igual vale
+        pass
+    return income
 
 
 def _sum(query) -> dict[str, Any]:

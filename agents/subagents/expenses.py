@@ -105,6 +105,7 @@ def build_expenses_tools(
     expense_categories_str: str = "",
     income_categories_str: str = "",
     conversation_context: Sequence[str] = (),
+    user_context: Sequence[str] | None = None,
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
@@ -134,8 +135,10 @@ def build_expenses_tools(
         viene del registro guardado."""
         from telegrambot.tools import _user_tz
 
+        if user_context is None:
+            return value  # sin lo que dijo el usuario no hay base para corregir
         today = datetime.now(_user_tz(user)).date()
-        return resolve_year(value, today, conversation_context)
+        return resolve_year(value, today, user_context)
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -718,11 +721,12 @@ def build_expenses_subagent(
     income_categories_str: str,
     current_date: str,
     conversation_context: Sequence[str] = (),
+    user_context: Sequence[str] | None = None,
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
-        user, expense_categories_str, income_categories_str, conversation_context)
+        user, expense_categories_str, income_categories_str, conversation_context, user_context)
     return create_agent(
         model=_model(),
         tools=tools,

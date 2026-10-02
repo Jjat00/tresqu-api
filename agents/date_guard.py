@@ -4,17 +4,15 @@ El 2026-10-01 el usuario escribió "12000 gaseosa" y el gasto quedó con fecha
 2023-10-01: el modelo puso un año que nadie dijo. Igual que con la moneda
 (``currency_guard``), aquí no se le pregunta nada al modelo.
 
-Es deliberadamente conservador, porque cambiar una fecha bien puesta es tan
-malo como dejar una mal puesta:
-
-- Solo toca años de hace DOS o más años. El año pasado sale de frases que
-  no llevan el número ("el 15 de marzo del año pasado", "en diciembre" dicho en
-  enero) y las fechas futuras de "mañana" un 31 de diciembre son legítimas.
-- No toca nada si el año aparece escrito en la conversación, ni si hay una
-  referencia relativa a años ("hace dos años", "el año antepasado").
-- Solo se aplica al CREAR: al editar, la fecha viene del registro guardado.
-- Si la fecha corregida no existe (29 de febrero) o quedaría en el futuro, se
-  prueba con el año anterior; si tampoco, la fecha se deja como estaba.
+La regla es deliberadamente estrecha, porque cambiar una fecha bien puesta es
+tan malo como dejar una mal puesta. Solo se corrige cuando el usuario NO dio
+ninguna fecha: ni un mes, ni una fecha en números, ni un año, ni una
+referencia como "hace…", "el año pasado", "en 3 semanas". Sin nada de eso, lo
+que dijo fue "hoy", "ayer", un día de la semana o nada, y la fecha correcta
+cae en los últimos días: un año de hace dos o más años es un error seguro.
+Se cambia por el año actual (o el anterior si quedaría en el futuro); si esa
+fecha no existe (29 de febrero), se deja como estaba. Solo se aplica al
+CREAR: al editar, la fecha viene del registro guardado.
 """
 
 from __future__ import annotations
@@ -26,28 +24,32 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
-# Cualquier referencia relativa a años o meses en el mismo mensaje ("hace seis años",
-# "hace aproximadamente unos seis o siete años", "hace 2.5 años", "el año
-# antepasado", "años atrás", "hace 30 meses", "three years ago"): ante la duda,
-# la fecha del modelo se respeta.
-_RELATIVE_YEARS = re.compile(
-    r"\bhace\b.*\b(?:años?|mes(?:es)?)\b|antepasado|\b(?:años?|meses)\s+atr[aá]s\b|"
-    r"\b(?:years?|months?)\s+ago\b|\blast\s+year\b",
-    re.IGNORECASE | re.DOTALL,
+_MONTHS = (
+    "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|"
+    "noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|sept|oct|nov|dic|"
+    "january|february|march|april|june|july|august|september|october|november|"
+    "december|jan|aug|dec"
+)
+
+# Cualquier señal de que el usuario dio una fecha o un período propio.
+_EXPLICIT_DATE = re.compile(
+    rf"\b(?:{_MONTHS})\b"
+    r"|\d{1,2}\s*[/.-]\s*\d{1,2}"  # 15/03, 15-03-24, 15.03
+    r"|\b(?:19|20)\d{2}\b"  # un año escrito
+    r"|\bdel?\s+'?\d{2}\b|'\d{2}\b"  # "del 24", "'24"
+    r"|\bhace\b|\batr[aá]s\b|\bantepasad|\bpasad[oa]\b|\banterior\b"
+    r"|\b(?:años?|mes(?:es)?|semanas?|d[ií]as)\b"
+    r"|\b(?:ago|last|years?|months?|weeks?|days)\b",
+    re.IGNORECASE,
 )
 
 
-def _year_mentioned(year: int, texts: list[str]) -> bool:
-    short = f"{year % 100:02d}"
-    long_pattern = re.compile(rf"(?<!\d){year}(?!\d)")
-    # Año corto en una fecha (15/03/23) o con apóstrofo ('23). "del 23" no
-    # cuenta: casi siempre es un día ("el gasto del 23 de marzo").
-    short_pattern = re.compile(rf"(?:\d{{1,2}}[/-]\d{{1,2}}[/-]|')({short})(?!\d)")
-    return any(long_pattern.search(t) or short_pattern.search(t) for t in texts)
+def _user_gave_a_date(texts: list[str]) -> bool:
+    return any(_EXPLICIT_DATE.search(t) for t in texts)
 
 
 def resolve_year(value: str | None, today: date, texts: Iterable[str]) -> str | None:
-    """Devuelve ``value`` (YYYY-MM-DD) con el año corregido si nadie lo dijo."""
+    """Devuelve ``value`` (YYYY-MM-DD) con el año corregido si nadie dio fecha."""
 
     if not value:
         return value
@@ -57,8 +59,7 @@ def resolve_year(value: str | None, today: date, texts: Iterable[str]) -> str | 
         return value
     if parsed.year > today.year - 2:
         return value
-    texts = [t or "" for t in (texts or [])]
-    if _year_mentioned(parsed.year, texts) or any(_RELATIVE_YEARS.search(t) for t in texts):
+    if _user_gave_a_date([t or "" for t in (texts or [])]):
         return value
 
     for year in (today.year, today.year - 1):
@@ -68,7 +69,7 @@ def resolve_year(value: str | None, today: date, texts: Iterable[str]) -> str | 
             continue
         if candidate <= today:
             logger.warning(
-                "date_guard: el año %s no aparece en la conversación; %s -> %s",
+                "date_guard: nadie dio una fecha y el año %s es de hace años; %s -> %s",
                 parsed.year, value, candidate.isoformat(),
             )
             return candidate.isoformat()

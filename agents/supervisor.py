@@ -22,7 +22,7 @@ from whatsappbot.wallbit_handlers import extract_pending_confirmations
 
 from . import risk_profiler_service
 from .calculator import calculate_tool
-from .currency_guard import conversation_texts
+from .currency_guard import conversation_texts, user_texts
 from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
 from .subagents.wallbit import build_wallbit_subagent
@@ -274,6 +274,7 @@ def build_supervisor(
         income_categories_str,
         current_date,
         conversation_context,
+        user_texts(user_message, history),
     )
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
     analyst_agent = build_analyst_subagent(user)
