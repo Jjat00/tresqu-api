@@ -108,7 +108,7 @@ def _run_date_guard() -> None:
         "pagué 500 hace aproximadamente unos seis o siete años", "Pagué 500 hace 30 meses",
         "I paid 500 three years ago", "el año antepasado", "el gasto del 23", "en marzo",
         "Pagué 500 en el 24", "Pagué 500 en dos mil veinticuatro", "recibí 300 en el año 23",
-        "the 2023 trip, twenty twenty-three",
+        "the 2023 trip, twenty twenty-three", "Pagué 500 en el veinticuatro", "el quince de este",
     ):
         _check(
             f"con fecha del usuario se respeta: {phrase!r}",
@@ -134,6 +134,13 @@ def _run_date_guard() -> None:
     _check(
         "y así la fecha de una confirmación de Tresqu no frena la corrección",
         resolve_year("2023-10-01", today, texts) == "2026-10-01",
+    )
+    long_history = [HumanMessage(content="Registra un gasto de 500 del 15/03/2024")] + [
+        AIMessage(content="¿Categoría?"), HumanMessage(content="Comida"),
+    ] * 5
+    _check(
+        "una fecha vieja del usuario sigue contando aunque el hilo sea largo",
+        resolve_year("2024-03-15", today, user_texts("Sí, regístralo", long_history)) == "2024-03-15",
     )
     _check(
         "acepta el historial del chat web como dicts",

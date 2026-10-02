@@ -37,7 +37,12 @@ _EXPLICIT_DATE = re.compile(
     r"|\d{1,2}\s*[/.-]\s*\d{1,2}"  # 15/03, 15-03-24, 15.03
     r"|\b(?:19|20)\d{2}\b"  # un año escrito
     r"|\b(?:del?|el|en)\s+(?:el\s+|año\s+)?'?\d{2}\b|'\d{2}\b"  # "del 24", "en el 24", "el 15", "'24"
-    r"|\bdos\s+mil\b|\bmil\s+novecientos\b|\btwenty\b|\bnineteen\b"  # años con palabras
+    # Números con palabras: pueden ser un año o un día ("en el veinticuatro",
+    # "dos mil veinticuatro", "el quince"). Ante la duda, no se corrige.
+    r"|\b(?:dieci\w*|veint\w*|treint\w*|cuarent\w*|cincuent\w*|sesent\w*|setent\w*|"
+    r"ochent\w*|novent\w*|diez|once|doce|trece|catorce|quince|mil|"
+    r"twenty|thirty|nineteen|twelve|eleven|thirteen|fourteen|fifteen|sixteen|"
+    r"seventeen|eighteen)\b"
     r"|\bhace\b|\batr[aá]s\b|\bantepasad|\bpasad[oa]\b|\banterior\b"
     r"|\b(?:años?|mes(?:es)?|semanas?|d[ií]as)\b"
     r"|\b(?:ago|last|years?|months?|weeks?|days)\b",

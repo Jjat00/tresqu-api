@@ -184,17 +184,17 @@ def conversation_texts(
 def user_texts(
     user_message: str | None,
     history: Iterable[Any] | None = None,
-    limit: int = 6,
 ) -> list[str]:
-    """Solo lo que escribió el usuario: su mensaje actual y sus mensajes entre
-    los últimos ``limit`` del hilo.
+    """Solo lo que escribió el usuario: su mensaje actual y todos sus mensajes
+    del historial que ve el agente (si el agente ve una fecha, la guarda
+    también tiene que verla).
 
     A diferencia de ``conversation_texts``, deja fuera a Tresqu: sus
     confirmaciones traen fechas ("hoy 1 de octubre de 2026") y harían creer a
     ``date_guard`` que el usuario dio una fecha.
     """
     texts: list[str] = []
-    for message in list(history or [])[-limit:]:
+    for message in list(history or []):
         if isinstance(message, dict):
             role, content = message.get("role"), message.get("content")
         else:
