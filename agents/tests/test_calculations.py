@@ -33,8 +33,15 @@ def _run_calculator() -> None:
     _check("acciones fraccionarias", calculate("0.02598 * 3") == Decimal("0.07794"))
     _check("paréntesis y división", calculate("(120000 + 45000) / 3") == Decimal("55000"))
     _check("signos tipográficos", calculate("10 × 3 − 4 ÷ 2") == Decimal("28"))
-    _check("división periódica con 12 decimales", _calculate_tool_impl("10 / 3") == "3.333333333333")
+    _check(
+        "división periódica: 12 decimales y marcada como aproximada",
+        _calculate_tool_impl("10 / 3") == "3.333333333333 (aproximado)",
+    )
     _check("sin redondeo oculto", _calculate_tool_impl("0.00000049 * 1") == "0.00000049")
+    _check("un exacto largo sale completo", _calculate_tool_impl("0.02598123456789 * 1") == "0.02598123456789")
+    _check("ni lo diminuto se vuelve 0", _calculate_tool_impl("0.00000000000049 * 1") == "0.00000000000049")
+    _check("una división exacta no se marca", _calculate_tool_impl("1 / 8") == "0.125")
+    _check("módulo con negativo entre paréntesis", calculate("10 % (-3)") == Decimal("1"))
     _check(
         "literales sin pasar por float",
         calculate("0.123456789123456789 * 1000000000000000000") == Decimal("123456789123456789"),
@@ -99,10 +106,12 @@ def _run_date_guard() -> None:
         "'del 23 de marzo' no cuenta como año 2023",
         resolve_year("2023-03-23", today, ["el gasto del 23 de marzo"]) == "2026-03-23",
     )
-    _check(
-        "una referencia relativa a años se respeta",
-        resolve_year("2023-05-01", today, ["eso fue hace tres años"]) == "2023-05-01",
-    )
+    for phrase in ("eso fue hace tres años", "gasté 50 hace seis años, el 1 de mayo",
+                   "hace como diez años", "hace un par de años", "el año antepasado"):
+        _check(
+            f"referencia relativa respetada: {phrase!r}",
+            resolve_year("2020-05-01", today, [phrase]) == "2020-05-01",
+        )
     _check(
         "si con el año actual quedaría en el futuro, va al anterior",
         resolve_year("2023-12-28", today, ["el 28 de diciembre"]) == "2025-12-28",

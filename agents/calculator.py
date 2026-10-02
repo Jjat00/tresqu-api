@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast
 import operator
 import re
-from decimal import Decimal, DecimalException, DivisionByZero, InvalidOperation, Overflow, localcontext
+from decimal import Decimal, DecimalException, DivisionByZero, Inexact, InvalidOperation, Overflow, localcontext
 
 _MAX_EXPRESSION_CHARS = 300
 _MAX_EXPONENT = 12
@@ -88,11 +88,8 @@ def _eval(node, source: str):
     raise CalculationError("solo se admiten números, paréntesis y + - * / // % **")
 
 
-def calculate(expression: str) -> Decimal:
-    """Evalúa ``expression`` y devuelve un ``Decimal`` exacto.
-
-    Lanza ``CalculationError`` si no es aritmética válida o si divide por cero.
-    """
+def _evaluate(expression: str) -> tuple[Decimal, bool]:
+    """``(resultado, inexacto)``. ``inexacto`` solo si hubo que redondear (10/3)."""
 
     # El límite va ANTES de normalizar: las regex no deben ver entradas enormes.
     if not expression or len(expression) > _MAX_EXPRESSION_CHARS:
@@ -109,22 +106,34 @@ def calculate(expression: str) -> Decimal:
         ctx.traps[DivisionByZero] = True
         ctx.traps[InvalidOperation] = True
         ctx.traps[Overflow] = True
+        ctx.clear_flags()
         try:
-            return _eval(tree, text)
+            value = _eval(tree, text)
         except (DecimalException, ZeroDivisionError, OverflowError) as exc:
             raise CalculationError("división por cero, desborde u operación inválida") from exc
+        return value, bool(ctx.flags[Inexact])
 
 
-def format_result(value: Decimal) -> str:
-    """Resultado exacto y sin notación científica.
+def calculate(expression: str) -> Decimal:
+    """Evalúa ``expression`` y devuelve un ``Decimal``.
 
-    Solo se recorta lo que no se puede escribir exacto: una división periódica
-    (10/3) se muestra con ``_MAX_DECIMALS`` decimales. Lo demás va completo
-    (0.00000049 sigue siendo 0.00000049).
+    Exacto salvo cuando el resultado no se puede escribir con 34 dígitos
+    (divisiones periódicas). Lanza ``CalculationError`` si no es aritmética
+    válida, si divide por cero o si se desborda.
+    """
+
+    return _evaluate(expression)[0]
+
+
+def format_result(value: Decimal, inexact: bool = False) -> str:
+    """Resultado sin notación científica.
+
+    Un resultado exacto se muestra completo, con todos sus decimales. Solo uno
+    inexacto (10/3) se aproxima, a ``_MAX_DECIMALS`` decimales.
     """
 
     exponent = value.as_tuple().exponent
-    if isinstance(exponent, int) and exponent < -_MAX_DECIMALS:
+    if inexact and isinstance(exponent, int) and exponent < -_MAX_DECIMALS:
         value = value.quantize(Decimal(1).scaleb(-_MAX_DECIMALS))
     text = format(value.normalize(), "f")
     return "0" if text in ("-0", "") else text
@@ -132,7 +141,9 @@ def format_result(value: Decimal) -> str:
 
 def _calculate_tool_impl(expression: str) -> str:
     try:
-        return format_result(calculate(expression))
+        value, inexact = _evaluate(expression)
+        result = format_result(value, inexact)
+        return f"{result} (aproximado)" if inexact else result
     except CalculationError as exc:
         return f"error: {exc}"
     except (DecimalException, OverflowError):
@@ -150,7 +161,8 @@ def _build_calculate_tool():
         porcentajes, divisiones, cuotas, conversiones con una tasa dada. Nunca
         hagas cuentas de cabeza. Escribe los números sin separador de miles y con
         punto decimal: "1660000 - 1752900", "3500000 * 20%", "(120000 + 45000) / 3".
-        Admite + - * / // % ** y paréntesis."""
+        Admite + - * / // % ** y paréntesis. "15%" es porcentaje; "10 % 3" es
+        módulo (con un negativo, entre paréntesis: "10 % (-3)")."""
         return _calculate_tool_impl(expression)
 
     return calculate_tool

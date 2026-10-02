@@ -26,9 +26,11 @@ from typing import Iterable
 
 logger = logging.getLogger(__name__)
 
+# Cualquier referencia relativa a años ("hace seis años", "hace un par de
+# años", "hace como diez años", "el año antepasado", "años atrás"): ante la
+# duda la fecha del modelo se respeta.
 _RELATIVE_YEARS = re.compile(
-    r"hace\s+(?:\d+|un|uno|dos|tres|cuatro|cinco|varios|unos)\s+años?|"
-    r"año\s+antepasado|antepasado|años?\s+atr[aá]s",
+    r"\bhace\b[^.\n]{0,30}?\baños?\b|antepasado|\baños?\s+atr[aá]s\b",
     re.IGNORECASE,
 )
 
