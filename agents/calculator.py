@@ -26,6 +26,9 @@ _PRECISION = 34
 _MAX_MAGNITUDE = Decimal(10) ** 24
 # Decimales que se muestran: solo importa en divisiones periódicas (10/3).
 _MAX_DECIMALS = 12
+# Un resultado exacto se muestra completo, pero no puede inundar el contexto
+# del modelo ("1e-1000000" son un millón de caracteres).
+_MAX_RESULT_CHARS = 80
 _AMBIGUOUS = re.compile(r"(?<![\d.,])[1-9]\d{0,2}[.,]\d{3}(?![\d.,])")
 
 _BINARY = {
@@ -139,9 +142,14 @@ def format_result(value: Decimal, inexact: bool = False) -> str:
             value = value.quantize(Decimal(1).scaleb(-_MAX_DECIMALS))
     # format(…, "f") no redondea; normalize() sí (usa el contexto de 28
     # dígitos), así que los ceros sobrantes se quitan sobre el texto.
+    exponent = value.as_tuple().exponent
+    if isinstance(exponent, int) and abs(exponent) > _MAX_RESULT_CHARS:
+        raise CalculationError("el resultado tiene demasiados dígitos")
     text = format(value, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
+    if len(text) > _MAX_RESULT_CHARS:
+        raise CalculationError("el resultado tiene demasiados dígitos")
     return "0" if text in ("-0", "", "-") else text
 
 

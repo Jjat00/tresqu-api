@@ -403,6 +403,35 @@ def build_expenses_tools(
             return {"error": str(exc)}
 
     @tool
+    def set_initial_balance_for_user(amount: float, currency: str = "") -> Dict[str, Any]:
+        """Registra el SALDO INICIAL: cuánta plata tiene el usuario para empezar
+        a contar desde ahora ("tengo 1.660.000", "empieza desde cero"). Acepta 0.
+        Deja `currency` vacío si el usuario no la dijo. Úsala solo cuando el
+        usuario confirme que quiere fijar su saldo; nunca borra nada."""
+        from decimal import Decimal, InvalidOperation
+
+        from expenses.balance import set_initial_balance
+
+        try:
+            value = Decimal(str(amount))
+        except (InvalidOperation, ValueError):
+            return {"status": "error", "message": "monto inválido"}
+        try:
+            income = set_initial_balance(user, value, _currency(currency) or None)
+        except ValueError as exc:
+            return {"status": "error", "message": str(exc)}
+        except Exception as exc:
+            logger.error(f"set_initial_balance_for_user: {exc}")
+            return {"status": "error", "message": str(exc)}
+        return {
+            "status": "success",
+            "income_id": income.id,
+            "amount": float(income.amount),
+            "currency": income.currency,
+            "date": income.received_at.isoformat(),
+        }
+
+    @tool
     def get_user_expenses(start_date: str | None = None, end_date: str | None = None) -> List[Dict[str, Any]]:
         """Lista los gastos del usuario en un rango de fechas (máx. 300, más recientes
         primero). Para consultas de período pasa SIEMPRE start_date y end_date.
@@ -576,6 +605,7 @@ def build_expenses_tools(
         get_expense_totals_for_user,
         get_income_totals_for_user,
         get_balance_for_user,
+        set_initial_balance_for_user,
         calculate_tool,
         get_user_expenses,
         get_user_incomes,
@@ -645,7 +675,7 @@ CONSULTAS:
 - Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
 - Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
 - SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user sin fechas (cuenta desde el último saldo inicial del usuario). Si nombra un período, pasa sus fechas. Reporta por moneda ingresos, gastos y saldo tal como los devuelve, y di desde cuándo cuenta: since_initial_balance (p. ej. "desde tu saldo inicial del 30 de septiembre") o, si viene vacío, "con todo lo registrado".
-- SALDO DECLARADO: cuando el usuario dice cuánta plata tiene para empezar a contar desde ahí ("tengo 1.660.000", "mi saldo es…"), y confirma que quiere registrarlo, créalo como ingreso con la nota EXACTA "saldo inicial". Así el saldo arranca desde ese punto. Nunca borres otros movimientos por eso.
+- SALDO DECLARADO: cuando el usuario dice cuánta plata tiene para empezar a contar desde ahí ("tengo 1.660.000", "mi saldo es…", "empieza desde cero") y confirma que quiere fijarlo, usa set_initial_balance_for_user (acepta 0). Así el saldo arranca desde ese punto. NO lo registres con create_income_for_user y nunca borres otros movimientos por eso. Si dice que arranca debiendo, fija 0 y ofrece registrar la deuda como gasto.
 - CUENTAS: nunca sumes, restes, multipliques ni saques porcentajes de cabeza. Si la respuesta necesita una cuenta que ninguna tool trae hecha (diferencia entre dos totales, un porcentaje, un promedio simple), usa calculate con los números exactos de las tools.
 - TOTALES ("cuánto gasté", "cuánto llevo este mes", "total de ingresos de julio"): get_expense_totals_for_user / get_income_totals_for_user con el rango de fechas del período. Devuelven el total exacto por moneda, calculado igual que el dashboard; reporta cada moneda por separado, tal cual.
 - Listar movimientos: get_user_expenses / get_user_incomes, SIEMPRE con rango de fechas para consultas de período (devuelven máx. 300). Sirven para detallar, no para sumar.

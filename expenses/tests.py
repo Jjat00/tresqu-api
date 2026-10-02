@@ -133,3 +133,16 @@ class BalanceTests(TestCase):
         self._expense("100", self.today - timedelta(days=3))
         self._income("1000", self.today, note="Saldo inicial del mes registrado como pago")
         self.assertEqual(self._row(compute_balance(self.user))["balance"], 900.0)
+
+    def test_fijar_saldo_inicial_acepta_cero_y_ancla_desde_ahi(self):
+        from datetime import timedelta
+        from expenses.balance import compute_balance, set_initial_balance
+
+        self._expense("700", self.today - timedelta(days=2))
+        set_initial_balance(self.user, Decimal("0"))
+        self._expense("25", self.today, dated=False)
+        row = self._row(compute_balance(self.user))
+        self.assertEqual(row["balance"], -25.0)
+        self.assertEqual(row["initial_balance"], 0.0)
+        with self.assertRaises(ValueError):
+            set_initial_balance(self.user, Decimal("-1"))

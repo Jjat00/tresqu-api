@@ -98,6 +98,34 @@ def _after_anchor(field: str, anchor: Income, tz) -> Q:
     return dated | undated
 
 
+def set_initial_balance(user: User, amount: Decimal, currency: str | None = None) -> Income:
+    """Registra el saldo con el que el usuario empieza a contar.
+
+    Va aparte de ``create_income`` porque un saldo inicial puede ser 0
+    ("empieza a contar desde cero") y un ingreso normal no. Negativo no: quien
+    arranca debiendo lo registra como 0 más el gasto o la deuda.
+    """
+
+    from django.utils import timezone
+
+    if amount < 0:
+        raise ValueError("el saldo inicial no puede ser negativo")
+    can_add, message = user.can_add_income()
+    if not can_add:
+        raise ValueError(message)
+    now = timezone.now()
+    return Income.objects.create(
+        user=user,
+        amount=amount,
+        currency=(currency or getattr(user, "default_currency", None) or "COP").upper(),
+        category_str="Saldo inicial",
+        description="Saldo inicial declarado por el usuario",
+        note=INITIAL_BALANCE_NOTE,
+        timestamp=now,
+        received_at=now.astimezone(_user_tz(user)).date(),
+    )
+
+
 def _sum(query) -> dict[str, Any]:
     row = query.aggregate(total=Sum("amount"), count=Count("id"))
     return {"total": row["total"] or Decimal("0"), "count": row["count"]}
