@@ -8,9 +8,10 @@ Igual que con la moneda y la fecha, aquí no se le pregunta nada al modelo.
 
 Regla: en un mismo turno, un gasto (o ingreso) del mismo monto y moneda se
 registra a lo sumo tantas veces como el usuario escribió ese monto en su
-mensaje, y como mínimo una. "200000 préstamo Darwin" → una vez; "20000 almuerzo
-y 20000 taxi" → dos. Si el usuario pide repetir de forma explícita ("cada
-uno", "dos veces", "x3"), no hay tope. La comprobación y la creación van bajo
+mensaje (o en el anterior, si el actual solo completa una aclaración), y como
+mínimo una. "200000 préstamo Darwin" → una vez; "20000 almuerzo y 20000
+taxi" → dos. Si el usuario pide repetir ese monto de forma explícita ("cada
+uno", "dos veces", "x3" en la misma cláusula), no hay tope. La comprobación y la creación van bajo
 un candado: las tools síncronas corren en hilos y las dos llamadas paralelas
 llegan a la vez.
 """
@@ -70,25 +71,42 @@ def amount_mentions(message: str, amount: Decimal) -> int:
     return count
 
 
-def asks_for_repetition(message: str) -> bool:
-    for match in _REPEAT.finditer(message or ""):
-        if not _NEGATION.search(message[: match.start()]):
-            return True
+_CLAUSE = re.compile(r"[.;:\n]+")
+
+
+def asks_for_repetition(message: str, amount: Decimal | None = None) -> bool:
+    """Repetición afirmativa en la misma cláusula que el monto.
+
+    "3 cervezas de 20000 cada una" sí; "ya pagué el taxi dos veces; registra
+    20000 de almuerzo" no: las "dos veces" son del taxi.
+    """
+    for clause in _CLAUSE.split(message or ""):
+        if amount is not None and not amount_mentions(clause, amount):
+            continue
+        for match in _REPEAT.finditer(clause):
+            if not _NEGATION.search(clause[: match.start()]):
+                return True
     return False
 
 
 class TurnCreations:
     """Lo creado en un turno, para no registrar dos veces el mismo movimiento."""
 
-    def __init__(self, user_message: str | None):
+    def __init__(self, user_message: str | None, previous_user_message: str | None = None):
         self.user_message = user_message or ""
+        self.previous_user_message = previous_user_message or ""
         self._lock = threading.Lock()
         self._created: dict[tuple[str, Decimal, str], list[str]] = {}
 
     def _limit(self, amount: Decimal) -> int | None:
-        if asks_for_repetition(self.user_message):
+        # Si el mensaje actual no trae el monto, completa una aclaración del
+        # anterior ("20k taxi y 20k almuerzo" → "¿moneda?" → "COP").
+        source = self.user_message
+        if not amount_mentions(source, amount):
+            source = self.previous_user_message
+        if asks_for_repetition(source, amount):
             return None
-        return max(1, amount_mentions(self.user_message, amount))
+        return max(1, amount_mentions(source, amount))
 
     def create(self, kind: str, amount, currency: str, do_create: Callable[[], str]) -> str:
         """Ejecuta ``do_create`` salvo que ya se haya registrado lo mismo en este turno."""

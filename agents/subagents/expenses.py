@@ -109,6 +109,7 @@ def build_expenses_tools(
     user_context: Sequence[str] | None = None,
     user_message: str | None = None,
     day_context: Sequence[str] | None = None,
+    previous_user_message: str | None = None,
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
@@ -132,7 +133,7 @@ def build_expenses_tools(
 
     external_id = user.external_id
     default_currency = user.default_currency or "USD"
-    turn = TurnCreations(user_message)
+    turn = TurnCreations(user_message, previous_user_message)
 
     def _currency(requested: str | None) -> str:
         """Moneda a registrar: descarta la que nadie mencionó en la conversación.
@@ -745,12 +746,13 @@ def build_expenses_subagent(
     user_context: Sequence[str] | None = None,
     user_message: str | None = None,
     day_context: Sequence[str] | None = None,
+    previous_user_message: str | None = None,
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
         user, expense_categories_str, income_categories_str, conversation_context, user_context,
-        user_message, day_context)
+        user_message, day_context, previous_user_message)
     return create_agent(
         model=_model(),
         tools=tools,

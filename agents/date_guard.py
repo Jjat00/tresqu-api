@@ -65,13 +65,13 @@ _DAY_SIGNAL = re.compile(
     # "el 5", "del 15", "día 3", "el primero", "el quince"
     rf"|\b(?:el|del|al|d[ií]a)\s+(?:\d{{1,2}}(?![\d.,%])|(?:{_DAY_WORD})\b)"
     r"|\bhace\b|\batr[aá]s\b|\bantepasad|\bpasad[oa]\b|\banterior\b"
+    r"|\bantes\b|\bdespu[eé]s\b|\b(?:d[ií]as?|semanas?|mes(?:es)?|años?)\b"
     r"|\b(?:ayer|anoche|antier|anteayer|anteanoche|ma[ñn]ana|lunes|martes|"
     r"mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin\s+de\s+semana|"
     r"quincena|yesterday|tomorrow|ago|last|monday|tuesday|wednesday|thursday|"
     r"friday|saturday|sunday|weekend)\b",
     re.IGNORECASE,
 )
-_AMOUNT = re.compile(r"\d")
 _MEMORY_USER_LINE = re.compile(r"^\[\d{4}-\d{2}-\d{2}\]\s+Usuario:\s*(.*)$", re.MULTILINE)
 
 
@@ -84,18 +84,15 @@ def user_gave_a_day(texts: Iterable[str]) -> bool:
 
 
 def current_turn_texts(user_message: str | None, previous_user_message: str | None) -> list[str]:
-    """Lo que el usuario dijo sobre el movimiento de ESTE turno.
-
-    Su mensaje actual y, si uno de los dos está incompleto (sin monto), el
-    anterior: "ayer gasté en taxi" → "¿cuánto?" → "20000", o "20000 taxi" →
-    "¿en qué moneda?" → "COP". Si los dos traen monto son movimientos
-    distintos y el "ayer" del anterior no es de este.
+    """Lo que el usuario dijo sobre el movimiento de ESTE turno: su mensaje
+    actual y el anterior, por si este completa una aclaración ("el 5 gasté en
+    taxi" → "¿cuánto?" → "20000"). Se incluye siempre el anterior: si era otro
+    asunto, como mucho deja pasar la fecha del modelo (lo de antes), mientras
+    que dejarlo fuera cambiaría a hoy una fecha que el usuario sí dio.
     """
 
     texts = [user_message or ""]
-    if previous_user_message and (
-        not _AMOUNT.search(user_message or "") or not _AMOUNT.search(previous_user_message)
-    ):
+    if previous_user_message:
         texts.append(previous_user_message)
     return texts
 

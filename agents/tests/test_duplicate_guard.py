@@ -68,6 +68,23 @@ class TurnCreationsTests(SimpleTestCase):
         self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
         self.assertTrue(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
 
+    def test_aclaracion_de_moneda_usa_el_mensaje_anterior(self):
+        # Revisión de Codex, ronda 2: "20k taxi y 20k almuerzo" → "¿moneda?" → "COP".
+        turn = TurnCreations("COP", "20k taxi y 20k almuerzo")
+        self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+        self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+        self.assertTrue(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+
+    def test_el_anterior_no_cuenta_si_el_actual_trae_el_monto(self):
+        turn = TurnCreations("200000 Darwin", "200000 préstamo y 200000 arriendo")
+        self.assertFalse(turn.create("income", 200000, "COP", self._ok).startswith("Error"))
+        self.assertTrue(turn.create("income", 200000, "COP", self._ok).startswith("Error"))
+
+    def test_repeticion_de_otra_clausula_no_cuenta(self):
+        turn = TurnCreations("Ya pagué el taxi dos veces; registra 20000 de almuerzo")
+        self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+        self.assertTrue(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+
     def test_abreviados_permiten_los_dos(self):
         turn = TurnCreations("20k almuerzo y 20k taxi")
         self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
@@ -129,11 +146,18 @@ class NewRecordDateTests(SimpleTestCase):
         self.assertEqual(resolve_new_record_date("2023-10-04", TODAY, ["ayer 12000 gaseosa"]), "2026-10-04")
 
     def test_textos_del_turno(self):
-        # El anterior entra solo si uno de los dos está incompleto.
-        self.assertEqual(current_turn_texts("200000 Darwin", "ayer 8000 papas"), ["200000 Darwin"])
-        self.assertEqual(current_turn_texts("20000", "ayer gasté en taxi"), ["20000", "ayer gasté en taxi"])
-        self.assertEqual(current_turn_texts("COP", "20000 taxi ayer"), ["COP", "20000 taxi ayer"])
+        # El anterior entra siempre: puede completar una aclaración.
+        self.assertEqual(current_turn_texts("20000", "El 5 gasté en taxi"), ["20000", "El 5 gasté en taxi"])
         self.assertEqual(current_turn_texts("20000 taxi", None), ["20000 taxi"])
+
+    def test_aclaracion_conserva_el_dia(self):
+        # Revisión de Codex, ronda 2: "El 5 gasté en taxi" → "¿Cuánto?" → "20000".
+        texts = current_turn_texts("20000", "El 5 gasté en taxi")
+        self.assertEqual(resolve_new_record_date("2026-10-05", date(2026, 10, 6), texts), "2026-10-05")
+
+    def test_referencias_con_unidades(self):
+        self.assertEqual(resolve_new_record_date(
+            "2026-10-04", date(2026, 10, 6), ["Gasté 20000 taxi dos días antes de hoy"]), "2026-10-04")
 
     def test_memoria_sin_metadatos_ni_tresqu(self):
         lines = ["[2026-10-01] Tresqu: Registré 20000 hoy 1 de octubre",
@@ -155,8 +179,7 @@ class ExpensesToolsWiringTests(SimpleTestCase):
         from agents.subagents import expenses as subagent
 
         message = "200000 del préstamo Darwin ya me los devolvió"
-        # Un "ayer" de un mensaje anterior con su propio monto no es de este turno.
-        tools = self._tools(message, ["ayer 8000 papas", message], current_turn_texts(message, "ayer 8000 papas"))
+        tools = self._tools(message, ["8000 papas", message], current_turn_texts(message, "8000 papas"))
         sent = []
 
         def fake_invoke(tool, payload):

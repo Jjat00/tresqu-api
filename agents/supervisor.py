@@ -281,7 +281,8 @@ def build_supervisor(
     # Lo que el usuario dijo del movimiento de ESTE turno (y lo que el agente
     # busque en la memoria): sin un día ahí, un registro nuevo es de hoy. La
     # memoria semántica inyectada no cuenta: trae fechas de otros movimientos.
-    day_context = current_turn_texts(user_message, previous_user_text(history))
+    previous_message = previous_user_text(history)
+    day_context = current_turn_texts(user_message, previous_message)
 
     expenses_agent = build_expenses_subagent(
         user,
@@ -292,6 +293,7 @@ def build_supervisor(
         date_context,
         user_message,
         day_context,
+        previous_message,
     )
     wallbit_agent = build_wallbit_subagent(user, channel, user_message)
     analyst_agent = build_analyst_subagent(user)
