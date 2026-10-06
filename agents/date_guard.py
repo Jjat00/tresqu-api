@@ -50,8 +50,43 @@ _EXPLICIT_DATE = re.compile(
 )
 
 
+# Referencias a un día cercano: no son fechas "explícitas" (no cambian el año),
+# pero sí dicen que el movimiento no fue hoy.
+_RELATIVE_DAY = re.compile(
+    r"\b(?:ayer|anoche|antier|anteayer|anteanoche|ma[ñn]ana|lunes|martes|"
+    r"mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin\s+de\s+semana|"
+    r"quincena|yesterday|tomorrow|monday|tuesday|wednesday|thursday|friday|"
+    r"saturday|sunday|weekend)\b",
+    re.IGNORECASE,
+)
+
+
 def _user_gave_a_date(texts: list[str]) -> bool:
     return any(_EXPLICIT_DATE.search(t) for t in texts)
+
+
+def _user_gave_a_day(texts: list[str]) -> bool:
+    return _user_gave_a_date(texts) or any(_RELATIVE_DAY.search(t) for t in texts)
+
+
+def resolve_new_record_date(value: str | None, today: date, texts: Iterable[str]) -> str | None:
+    """Fecha de un registro NUEVO.
+
+    Si el usuario no dio ningún día (ni fecha, ni "ayer", ni un día de la
+    semana), el movimiento es de hoy, diga lo que diga el modelo. El
+    2026-10-05 el supervisor copió "hoy, 4 de octubre" de una confirmación
+    vieja del historial y el subagente registró el ingreso dos veces, una por
+    cada fecha. Si el usuario sí dio un día, solo se corrige el año
+    (``resolve_year``).
+    """
+
+    texts = [t or "" for t in (texts or [])]
+    if _user_gave_a_day(texts):
+        return resolve_year(value, today, texts)
+    if value and value.strip()[:10] != today.isoformat():
+        logger.warning("date_guard: nadie dio un día; %s -> hoy %s", value, today.isoformat())
+        return today.isoformat()
+    return value
 
 
 def resolve_year(value: str | None, today: date, texts: Iterable[str]) -> str | None:

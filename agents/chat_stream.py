@@ -417,6 +417,7 @@ async def _stream_specialist(
             _user_today(user),
             conversation_texts(raw_text, history),
             user_texts(raw_text, history),
+            raw_text,
         )
     elif agent_id == "wallbit":
         agent = build_wallbit_subagent(user, channel, raw_text)

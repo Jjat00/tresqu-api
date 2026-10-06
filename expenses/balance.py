@@ -10,6 +10,8 @@ real del movimiento (``spent_at`` / ``received_at``) y, si no la tiene, su
 ``timestamp`` en la zona horaria del usuario. Cada moneda va por separado:
 restar COP de USD no tiene sentido.
 
+Por defecto el saldo es el del mes actual (ver ``compute_balance``).
+
 Saldo inicial: cuando el usuario declara cuánta plata tiene ("tengo
 1.660.000"), el agente lo registra como ingreso con la nota "saldo inicial".
 Desde ahí esa moneda se cuenta de nuevo: lo anterior ya está reflejado en la
@@ -58,8 +60,10 @@ def _anchor_key(income: Income, tz):
     return (_effective_date(income, "received_at", tz), income.created_at, income.id)
 
 
-def latest_initial_balances(user: User, until: date | None = None) -> dict[str, Income]:
-    """El último saldo inicial declarado de cada moneda (hasta ``until``, inclusive).
+def latest_initial_balances(
+    user: User, since: date | None = None, until: date | None = None
+) -> dict[str, Income]:
+    """El último saldo inicial declarado de cada moneda dentro de [since, until].
 
     Se ordena por su fecha (``received_at`` o, si no tiene, el día local de su
     ``timestamp``) y, dentro del mismo día, por cuándo se registró.
@@ -68,7 +72,8 @@ def latest_initial_balances(user: User, until: date | None = None) -> dict[str, 
     tz = _user_tz(user)
     anchors: dict[str, Income] = {}
     for income in Income.objects.filter(user=user).filter(_initial_balance_q()):
-        if until and _effective_date(income, "received_at", tz) > until:
+        day = _effective_date(income, "received_at", tz)
+        if (since and day < since) or (until and day > until):
             continue
         current = anchors.get(income.currency)
         if current is None or _anchor_key(income, tz) > _anchor_key(current, tz):
@@ -162,31 +167,50 @@ def _sum(query) -> dict[str, Any]:
     return {"total": row["total"] or Decimal("0"), "count": row["count"]}
 
 
+def _spanish_date(day: date) -> str:
+    months = (
+        "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
+        "septiembre", "octubre", "noviembre", "diciembre",
+    )
+    return f"{day.day} de {months[day.month - 1]} de {day.year}"
+
+
 def compute_balance(
     user: User,
     start_date: str | None = None,
     end_date: str | None = None,
     whole_history: bool = False,
 ) -> dict[str, Any]:
-    """Ingresos, gastos y saldo (ingresos − gastos) por moneda.
+    """Ingresos, gastos y saldo (ingresos − gastos) por moneda en un período.
 
-    Sin fechas es lo que la gente entiende por "cuánto me queda": cada moneda
-    desde su último saldo inicial declarado, o todo lo registrado si nunca lo
-    declaró (o si se pide ``whole_history``). Con ``start_date`` (YYYY-MM-DD,
-    inclusive), solo ese período y sin saldos iniciales de por medio.
+    - Sin fechas: el MES ACTUAL, del día 1 a hoy (zona del usuario). Es lo que
+      la gente entiende por "mi saldo" y la respuesta siempre dice el período,
+      para que nadie lo tome por el de toda la vida (decisión de Jaime,
+      2026-10-06).
+    - Con fechas (YYYY-MM-DD, inclusive): ese período; sin ``start_date``,
+      desde el primer registro.
+    - ``whole_history``: todo lo registrado, sin saldos iniciales de por medio.
 
-    Solo ``end_date`` es "mi saldo al día X": sigue contando desde el último
-    saldo inicial anterior a ese día. El 2026-10-05 el agente pidió el saldo
-    con ``end_date`` de hoy y, al apagarse el ancla, sumó gastos de 2025 ya
-    incluidos en la cifra declarada: −445.500 COP en vez de 539.000.
+    Saldo inicial: si el usuario declaró uno ("tengo 1.660.000") DENTRO del
+    período, esa moneda se cuenta desde ahí: lo anterior ya está en la cifra
+    declarada. El 2026-10-05 el ancla se apagaba con solo pasar ``end_date``
+    y Tresqu restó gastos de 2025 ya incluidos en el saldo declarado
+    (−445.500 COP en vez de 539.000).
     """
 
     from telegrambot.tools import _filter_by_period
 
     tz = _user_tz(user)
-    use_anchors = not start_date and not whole_history
+    today = datetime.now(tz).date()
+    default_month = not start_date and not end_date and not whole_history
+    if default_month:
+        start_date, end_date = today.replace(day=1).isoformat(), today.isoformat()
+    if whole_history:
+        start_date = end_date = None
+
+    since = date.fromisoformat(start_date) if start_date else None
     until = date.fromisoformat(end_date) if end_date else None
-    anchors = latest_initial_balances(user, until) if use_anchors else {}
+    anchors = {} if whole_history else latest_initial_balances(user, since, until)
 
     expenses = _filter_by_period(
         Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user
@@ -226,23 +250,28 @@ def compute_balance(
             "balance": _money(inc["total"] - exp["total"]),
         })
 
-    if start_date:
-        label = f"{start_date} a {end_date or 'hoy'}"
-    elif anchors:
-        label = "cada moneda desde su último saldo inicial (since_initial_balance); sin él, todo lo registrado"
-        if end_date:
-            label += f", hasta {end_date}"
-    elif end_date:
-        label = f"todo lo registrado hasta {end_date}"
-    else:
+    if whole_history:
         label = "todo lo registrado"
+    elif since:
+        label = f"del {_spanish_date(since)} al {_spanish_date(until or today)}"
+        if default_month:
+            label += " (mes actual)"
+    else:
+        label = f"todo lo registrado hasta el {_spanish_date(until)}"
     return {
-        "period": {"from": start_date, "to": end_date, "label": label},
+        "period": {
+            "from": start_date,
+            "to": end_date,
+            "label": label,
+            "current_month": default_month,
+        },
         "default_currency": default_currency,
         "by_currency": by_currency,
         "note": (
             "balance = incomes_total - expenses_total, calculado en base de datos. "
-            "Repórtalo tal cual, diciendo desde cuándo cuenta cada moneda; no lo "
+            "Repórtalo tal cual y di SIEMPRE el período (period.label) para que el "
+            "usuario no crea que es el saldo de toda la vida; si una moneda trae "
+            "since_initial_balance, di que cuenta desde ese saldo inicial. No lo "
             "recalcules ni lo combines entre monedas."
         ),
     }

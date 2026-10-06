@@ -39,16 +39,32 @@ class MonthlyInsightsCurrencyTests(TestCase):
 
 
 class BalanceTests(TestCase):
-    """``compute_balance``: saldo determinista, con el saldo inicial como ancla
-    por moneda y corte en el instante en que se declaró."""
+    """``compute_balance``: saldo determinista del mes actual por defecto, con el
+    saldo inicial como ancla por moneda y corte en el instante en que se declaró."""
+
+    TODAY = datetime(2026, 10, 6).date()
 
     def setUp(self):
+        from unittest import mock
+
+        from expenses import balance
+
         self.user = User.objects.create(
             external_id="573001110002", platform="whatsapp", first_name="Ana",
             default_currency="COP", timezone="America/Bogota",
         )
         self.tz = pytz.timezone("America/Bogota")
         self.today = timezone.now().astimezone(self.tz).date()
+        tz, fixed = self.tz, self.TODAY
+
+        class FixedNow(datetime):
+            @classmethod
+            def now(cls, tz_=None):
+                return tz.localize(datetime(fixed.year, fixed.month, fixed.day, 18, 0))
+
+        patcher = mock.patch.object(balance, "datetime", FixedNow)
+        patcher.start()
+        self.addCleanup(patcher.stop)
 
     def _ts(self, day, hour=12):
         return self.tz.localize(datetime(day.year, day.month, day.day, hour, 0)).astimezone(dt_timezone.utc)
@@ -68,95 +84,121 @@ class BalanceTests(TestCase):
     def _row(self, data, currency="COP"):
         return next(r for r in data["by_currency"] if r["currency"] == currency)
 
-    def test_sin_saldo_inicial_cuenta_todo_lo_registrado(self):
-        from datetime import timedelta
+    def _d(self, month, day):
+        return datetime(2026, month, day).date()
+
+    def test_sin_fechas_es_el_mes_actual_y_lo_dice(self):
         from expenses.balance import compute_balance
 
-        self._income("1660000", self.today - timedelta(days=40))
-        self._expense("1752900", self.today - timedelta(days=3))
-        row = self._row(compute_balance(self.user))
+        self._income("1660000", self._d(8, 27))
+        self._expense("500000", self._d(9, 20))
+        self._income("200000", self._d(10, 5))
+        self._expense("50000", self._d(10, 2))
+        self._expense("9000", self._d(10, 7))  # futuro: fuera del período
+        data = compute_balance(self.user)
+        row = self._row(data)
+        self.assertEqual(row["balance"], 150000.0)
+        self.assertEqual(data["period"]["from"], "2026-10-01")
+        self.assertEqual(data["period"]["to"], "2026-10-06")
+        self.assertTrue(data["period"]["current_month"])
+        self.assertIn("1 de octubre de 2026", data["period"]["label"])
+        self.assertIn("6 de octubre de 2026", data["period"]["label"])
+
+    def test_todo_el_historial_resta_con_exactitud(self):
+        from expenses.balance import compute_balance
+
+        self._income("1660000", self._d(8, 27))
+        self._expense("1752900", self._d(10, 3))
+        row = self._row(compute_balance(self.user, whole_history=True))
         self.assertEqual(row["balance"], -92900.0)  # el modelo había dicho −89.900
         self.assertIsNone(row["since_initial_balance"])
 
-    def test_saldo_inicial_descarta_lo_anterior_incluso_del_mismo_dia(self):
-        from datetime import timedelta
+    def test_saldo_inicial_del_mes_descarta_lo_anterior_incluso_del_mismo_dia(self):
         from expenses.balance import compute_balance
 
-        self._expense("500000", self.today - timedelta(days=200))
-        self._expense("200", self.today)  # registrado antes de declarar el saldo
-        self._income("1000", self.today, note="saldo inicial")
-        self._expense("50", self.today, dated=False)  # después, sin fecha real
+        self._expense("500000", self._d(10, 1))
+        self._expense("200", self.TODAY)  # registrado antes de declarar el saldo
+        self._income("1000", self.TODAY, note="saldo inicial")
+        self._expense("50", self.TODAY, dated=False)  # después, sin fecha real
         row = self._row(compute_balance(self.user))
         self.assertEqual(row["balance"], 950.0)
-        self.assertEqual(row["since_initial_balance"], self.today.isoformat())
+        self.assertEqual(row["since_initial_balance"], self.TODAY.isoformat())
         self.assertEqual(self._row(compute_balance(self.user, whole_history=True))["balance"], -499250.0)
 
     def test_el_saldo_inicial_es_por_moneda(self):
-        from datetime import timedelta
         from expenses.balance import compute_balance
 
-        yesterday = self.today - timedelta(days=1)
-        self._income("100", yesterday, currency="USD", note="saldo inicial")
-        self._expense("10", self.today, currency="USD")
-        self._expense("300", yesterday)
-        self._income("1000", self.today, note="saldo inicial")
+        self._income("100", self._d(10, 5), currency="USD", note="saldo inicial")
+        self._expense("10", self.TODAY, currency="USD")
+        self._expense("300", self._d(10, 5))
+        self._income("1000", self.TODAY, note="saldo inicial")
         data = compute_balance(self.user)
         self.assertEqual(self._row(data, "USD")["balance"], 90.0)
         self.assertEqual(self._row(data, "COP")["balance"], 1000.0)
 
     def test_saldo_inicial_sin_fecha_real_y_el_ultimo_reemplaza_al_anterior(self):
-        from datetime import timedelta
         from expenses.balance import compute_balance
 
-        self._income("5000", self.today - timedelta(days=10), note="Saldo inicial")
-        self._expense("100", self.today - timedelta(days=1))
-        self._income("1000", self.today, note="saldo inicial", dated=False)
+        self._income("5000", self._d(10, 2), note="Saldo inicial")
+        self._expense("100", self._d(10, 5))
+        self._income("1000", self.TODAY, note="saldo inicial", dated=False)
         row = self._row(compute_balance(self.user))
         self.assertEqual(row["balance"], 1000.0)
         self.assertEqual(row["incomes_count"], 1)
 
-    def test_con_fechas_no_usa_anclas(self):
-        from datetime import timedelta
+    def test_saldo_inicial_anterior_al_periodo_no_cuenta(self):
+        # Decisión 2026-10-06: el saldo es el del período; un saldo inicial de
+        # septiembre no entra en el saldo de octubre.
         from expenses.balance import compute_balance
 
-        start = self.today - timedelta(days=5)
-        self._income("1000", start, note="saldo inicial")
-        self._expense("300", self.today)
-        data = compute_balance(self.user, start_date=start.isoformat(), end_date=self.today.isoformat())
-        self.assertEqual(self._row(data)["balance"], 700.0)
-        self.assertIsNone(self._row(data)["since_initial_balance"])
+        self._income("1660000", self._d(9, 30), note="saldo inicial")
+        self._expense("1321000", self._d(10, 3))
+        self._income("200000", self._d(10, 5))
+        row = self._row(compute_balance(self.user))
+        self.assertEqual(row["balance"], -1121000.0)
+        self.assertIsNone(row["since_initial_balance"])
 
-    def test_solo_fecha_de_corte_sigue_contando_desde_el_saldo_inicial(self):
+    def test_solo_fecha_de_corte_cuenta_desde_el_saldo_inicial(self):
         # 2026-10-05: el agente pidió el saldo con end_date=hoy y salió −445.500
         # (todo el historial) en vez de 539.000 desde el saldo inicial.
-        from datetime import timedelta
         from expenses.balance import compute_balance
 
-        self._expense("984500", self.today - timedelta(days=300))
-        self._income("1660000", self.today - timedelta(days=6), note="saldo inicial")
-        self._expense("1321000", self.today - timedelta(days=3))
-        self._income("200000", self.today - timedelta(days=1))
-        self._expense("112000", self.today)
-        row = self._row(compute_balance(self.user, end_date=(self.today - timedelta(days=1)).isoformat()))
+        self._expense("984500", self._d(5, 29))
+        self._income("1660000", self._d(9, 30), note="saldo inicial")
+        self._expense("1321000", self._d(10, 3))
+        self._income("200000", self._d(10, 5))
+        self._expense("112000", self.TODAY)
+        data = compute_balance(self.user, end_date="2026-10-05")
+        row = self._row(data)
         self.assertEqual(row["balance"], 539000.0)
-        self.assertEqual(row["since_initial_balance"], (self.today - timedelta(days=6)).isoformat())
+        self.assertEqual(row["since_initial_balance"], "2026-09-30")
+        self.assertIn("hasta el 5 de octubre de 2026", data["period"]["label"])
 
-    def test_fecha_de_corte_anterior_al_saldo_inicial_usa_el_ancla_previa_o_ninguna(self):
-        from datetime import timedelta
+    def test_fecha_de_corte_anterior_al_saldo_inicial_lo_ignora(self):
         from expenses.balance import compute_balance
 
-        self._expense("100", self.today - timedelta(days=10))
-        self._income("1000", self.today - timedelta(days=2), note="saldo inicial")
-        row = self._row(compute_balance(self.user, end_date=(self.today - timedelta(days=5)).isoformat()))
+        self._expense("100", self._d(9, 20))
+        self._income("1000", self._d(10, 4), note="saldo inicial")
+        row = self._row(compute_balance(self.user, end_date="2026-10-01"))
         self.assertEqual(row["balance"], -100.0)
         self.assertIsNone(row["since_initial_balance"])
 
-    def test_una_nota_que_solo_menciona_saldo_inicial_no_es_ancla(self):
-        from datetime import timedelta
+    def test_periodo_explicito_con_saldo_inicial_dentro(self):
         from expenses.balance import compute_balance
 
-        self._expense("100", self.today - timedelta(days=3))
-        self._income("1000", self.today, note="Saldo inicial del mes registrado como pago")
+        self._expense("999", self._d(10, 1))
+        self._income("1000", self._d(10, 2), note="saldo inicial")
+        self._expense("300", self.TODAY)
+        data = compute_balance(self.user, start_date="2026-10-01", end_date="2026-10-06")
+        self.assertEqual(self._row(data)["balance"], 700.0)
+        self.assertEqual(self._row(data)["since_initial_balance"], "2026-10-02")
+        self.assertFalse(data["period"]["current_month"])
+
+    def test_una_nota_que_solo_menciona_saldo_inicial_no_es_ancla(self):
+        from expenses.balance import compute_balance
+
+        self._expense("100", self._d(10, 3))
+        self._income("1000", self.TODAY, note="Saldo inicial del mes registrado como pago")
         self.assertEqual(self._row(compute_balance(self.user))["balance"], 900.0)
 
     def test_fijar_saldo_inicial_acepta_cero_y_ancla_desde_ahi(self):
@@ -176,7 +218,10 @@ class BalanceTests(TestCase):
         with self.assertRaises(ValueError):
             set_initial_balance(self.user, Decimal("10"), currency="USDT")
         self._expense("25", self.today, dated=False)
-        row = self._row(compute_balance(self.user))
+        # set_initial_balance usa el reloj real; el período va explícito.
+        row = self._row(compute_balance(
+            self.user, start_date=self.today.replace(day=1).isoformat(), end_date=self.today.isoformat()
+        ))
         self.assertEqual(row["balance"], -25.0)
         self.assertEqual(row["initial_balance"], 0.0)
         with self.assertRaises(ValueError):
