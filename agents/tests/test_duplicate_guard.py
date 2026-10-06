@@ -55,6 +55,8 @@ class HelpersTests(SimpleTestCase):
     def test_nota_normalizada(self):
         self.assertEqual(note_key("Devolución del préstamo de Darwin"), note_key("devolucion prestamo Darwin"))
         self.assertNotEqual(note_key("taxi"), note_key("almuerzo"))
+        # Revisión de Codex, ronda 4: el orden distingue trayectos.
+        self.assertNotEqual(note_key("taxi de casa a oficina"), note_key("taxi de oficina a casa"))
 
 
 class TurnCreationsTests(SimpleTestCase):
@@ -143,7 +145,8 @@ class NewRecordDateTests(SimpleTestCase):
         for text in ("20000 cervezas ayer", "el sábado 20000 cine", "20000 el 3 de octubre",
                      "anoche 20000 taxi", "20000 cena del viernes", "20000 taxi el 5",
                      "el primero pagué 20000", "el quince 30000 mercado", "hace 3 días 20000",
-                     "Gasté 20000 taxi dos días antes de hoy"):
+                     "Gasté 20000 taxi dos días antes de hoy",
+                     "El 5, gasté 20000 en taxi", "20000 taxi el 5."):
             self.assertEqual(resolve_new_record_date("2026-10-03", TODAY, [text]), "2026-10-03", text)
 
     def test_cadena_de_aclaraciones_conserva_el_dia(self):

@@ -63,7 +63,7 @@ _DAY_SIGNAL = re.compile(
     r"|\d{1,2}\s*[/.-]\s*\d{1,2}"  # 15/03, 5-10
     r"|\b(?:19|20)\d{2}\b"  # un año escrito
     # "el 5", "del 15", "día 3", "el primero", "el quince"
-    rf"|\b(?:el|del|al|d[ií]a)\s+(?:\d{{1,2}}(?![\d.,%])|(?:{_DAY_WORD})\b)"
+    rf"|\b(?:el|del|al|d[ií]a)\s+(?:\d{{1,2}}(?![\d%]|[.,]\d)|(?:{_DAY_WORD})\b)"
     r"|\bhace\b|\batr[aá]s\b|\bantepasad|\bpasad[oa]\b|\banterior\b"
     r"|\bantes\b|\bdespu[eé]s\b|\b(?:d[ií]as?|semanas?|mes(?:es)?|años?)\b"
     r"|\b(?:ayer|anoche|antier|anteayer|anteanoche|ma[ñn]ana|lunes|martes|"

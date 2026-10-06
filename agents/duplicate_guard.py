@@ -84,12 +84,13 @@ def asks_for_repetition(message: str) -> bool:
     return False
 
 
-def note_key(note: str | None) -> frozenset[str]:
-    """La nota sin tildes, mayúsculas, puntuación ni palabras vacías:
-    "Devolución del préstamo de Darwin" == "devolucion prestamo Darwin"."""
+def note_key(note: str | None) -> tuple[str, ...]:
+    """La nota sin tildes, mayúsculas, puntuación ni palabras vacías, en orden:
+    "Devolución del préstamo de Darwin" == "devolucion prestamo Darwin", pero
+    "taxi de casa a oficina" != "taxi de oficina a casa"."""
     text = unicodedata.normalize("NFKD", note or "")
     text = "".join(c for c in text if not unicodedata.combining(c)).lower()
-    return frozenset(w for w in re.findall(r"\w+", text) if w not in _STOPWORDS)
+    return tuple(w for w in re.findall(r"\w+", text) if w not in _STOPWORDS)
 
 
 class TurnCreations:
