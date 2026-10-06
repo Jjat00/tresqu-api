@@ -147,16 +147,76 @@ class BalanceTests(TestCase):
         self.assertEqual(row["incomes_count"], 1)
 
     def test_saldo_inicial_anterior_al_periodo_no_cuenta(self):
-        # Decisión 2026-10-06: el saldo es el del período; un saldo inicial de
-        # septiembre no entra en el saldo de octubre.
+        # El saldo es el del período; un saldo inicial de hace más de dos días
+        # antes del mes no entra en el saldo de octubre.
         from expenses.balance import compute_balance
 
-        self._income("1660000", self._d(9, 30), note="saldo inicial")
+        self._income("1660000", self._d(9, 28), note="saldo inicial")
         self._expense("1321000", self._d(10, 3))
         self._income("200000", self._d(10, 5))
         row = self._row(compute_balance(self.user))
         self.assertEqual(row["balance"], -1121000.0)
         self.assertIsNone(row["since_initial_balance"])
+        self.assertFalse(row["carried_initial_balance"])
+
+    def test_saldo_inicial_de_los_dos_dias_previos_se_arrastra(self):
+        # Usuario 128: declaró 1.660.000 el 30-09; su saldo de octubre parte de ahí.
+        from expenses.balance import compute_balance
+
+        self._expense("984500", self._d(5, 29))
+        self._expense("300", self._d(9, 30))  # registrado antes de declarar: no cuenta
+        self._income("1660000", self._d(9, 30), note="saldo inicial")
+        self._expense("1301000", self._d(10, 3))
+        self._income("200000", self._d(10, 5))
+        self._expense("112000", self.TODAY)
+        for data in (compute_balance(self.user),
+                     compute_balance(self.user, start_date="2026-10-01", end_date="2026-10-06")):
+            row = self._row(data)
+            self.assertEqual(row["balance"], 447000.0)
+            self.assertEqual(row["since_initial_balance"], "2026-09-30")
+            self.assertTrue(row["carried_initial_balance"])
+            self.assertEqual(row["incomes_count"], 2)
+            self.assertIn("30 de septiembre de 2026 (1.660.000 COP)", row["counted_label"])
+
+    def test_lo_posterior_al_saldo_arrastrado_del_mes_anterior_cuenta(self):
+        from expenses.balance import compute_balance
+
+        self._income("1000", self._d(9, 29), note="saldo inicial")
+        self._expense("100", self._d(9, 30))
+        row = self._row(compute_balance(self.user))
+        self.assertEqual(row["balance"], 900.0)
+        self.assertEqual(row["since_initial_balance"], "2026-09-29")
+
+    def test_un_saldo_inicial_del_mes_gana_al_arrastrado(self):
+        from expenses.balance import compute_balance
+
+        self._income("1000", self._d(9, 30), note="saldo inicial")
+        self._income("500", self._d(10, 2), note="saldo inicial")
+        self._expense("50", self._d(10, 4))
+        row = self._row(compute_balance(self.user))
+        self.assertEqual(row["balance"], 450.0)
+        self.assertFalse(row["carried_initial_balance"])
+
+    def test_sin_arrastre_si_el_periodo_no_empieza_el_dia_1(self):
+        from expenses.balance import compute_balance
+
+        self._income("1000", self._d(10, 1), note="saldo inicial")
+        self._expense("50", self._d(10, 4))
+        row = self._row(compute_balance(self.user, start_date="2026-10-03"))
+        self.assertEqual(row["balance"], -50.0)
+        self.assertFalse(row["carried_initial_balance"])
+
+    def test_arrastre_por_moneda(self):
+        from expenses.balance import compute_balance
+
+        self._income("100", self._d(9, 30), currency="USD", note="saldo inicial")
+        self._expense("10", self._d(10, 2), currency="USD")
+        self._expense("300", self._d(10, 2))
+        data = compute_balance(self.user)
+        self.assertEqual(self._row(data, "USD")["balance"], 90.0)
+        self.assertTrue(self._row(data, "USD")["carried_initial_balance"])
+        self.assertEqual(self._row(data, "COP")["balance"], -300.0)
+        self.assertFalse(self._row(data, "COP")["carried_initial_balance"])
 
     def test_solo_fecha_de_corte_cuenta_desde_el_saldo_inicial(self):
         # 2026-10-05: el agente pidió el saldo con end_date=hoy y salió −445.500
