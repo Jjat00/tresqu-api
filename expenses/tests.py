@@ -194,6 +194,17 @@ class BalanceTests(TestCase):
         self.assertEqual(self._row(data)["since_initial_balance"], "2026-10-02")
         self.assertFalse(data["period"]["current_month"])
 
+    def test_solo_fecha_inicial_llega_hasta_hoy(self):
+        from expenses.balance import compute_balance
+
+        self._expense("100", self._d(10, 2))
+        self._expense("5000", self._d(10, 15))  # futuro
+        self._income("9000", self._d(10, 20), note="saldo inicial")  # ancla futura
+        data = compute_balance(self.user, start_date="2026-10-01")
+        self.assertEqual(self._row(data)["balance"], -100.0)
+        self.assertEqual(data["period"]["to"], "2026-10-06")
+        self.assertIsNone(self._row(data)["since_initial_balance"])
+
     def test_una_nota_que_solo_menciona_saldo_inicial_no_es_ancla(self):
         from expenses.balance import compute_balance
 

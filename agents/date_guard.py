@@ -50,39 +50,86 @@ _EXPLICIT_DATE = re.compile(
 )
 
 
-# Referencias a un día cercano: no son fechas "explícitas" (no cambian el año),
-# pero sí dicen que el movimiento no fue hoy.
-_RELATIVE_DAY = re.compile(
-    r"\b(?:ayer|anoche|antier|anteayer|anteanoche|ma[ñn]ana|lunes|martes|"
+# Señales de que el usuario dijo EL DÍA del movimiento. Es un detector aparte
+# de ``_EXPLICIT_DATE``: aquel es amplio a propósito (ante la duda no corrige un
+# año) y toma "20 mil" como fecha por la palabra "mil"; aquí un falso positivo
+# deja pasar una fecha copiada del historial.
+_DAY_WORD = (
+    r"primero|uno|dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|once|doce|"
+    r"trece|catorce|quince|dieci\w+|veinte|veinti\w+|treinta(?:\s+y\s+uno)?"
+)
+_DAY_SIGNAL = re.compile(
+    rf"\b(?:{_MONTHS})\b"
+    r"|\d{1,2}\s*[/.-]\s*\d{1,2}"  # 15/03, 5-10
+    r"|\b(?:19|20)\d{2}\b"  # un año escrito
+    # "el 5", "del 15", "día 3", "el primero", "el quince"
+    rf"|\b(?:el|del|al|d[ií]a)\s+(?:\d{{1,2}}(?![\d.,%])|(?:{_DAY_WORD})\b)"
+    r"|\bhace\b|\batr[aá]s\b|\bantepasad|\bpasad[oa]\b|\banterior\b"
+    r"|\b(?:ayer|anoche|antier|anteayer|anteanoche|ma[ñn]ana|lunes|martes|"
     r"mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo|finde|fin\s+de\s+semana|"
-    r"quincena|yesterday|tomorrow|monday|tuesday|wednesday|thursday|friday|"
-    r"saturday|sunday|weekend)\b",
+    r"quincena|yesterday|tomorrow|ago|last|monday|tuesday|wednesday|thursday|"
+    r"friday|saturday|sunday|weekend)\b",
     re.IGNORECASE,
 )
+_AMOUNT = re.compile(r"\d")
+_MEMORY_USER_LINE = re.compile(r"^\[\d{4}-\d{2}-\d{2}\]\s+Usuario:\s*(.*)$", re.MULTILINE)
 
 
 def _user_gave_a_date(texts: list[str]) -> bool:
     return any(_EXPLICIT_DATE.search(t) for t in texts)
 
 
-def _user_gave_a_day(texts: list[str]) -> bool:
-    return _user_gave_a_date(texts) or any(_RELATIVE_DAY.search(t) for t in texts)
+def user_gave_a_day(texts: Iterable[str]) -> bool:
+    return any(_DAY_SIGNAL.search(t or "") for t in texts)
 
 
-def resolve_new_record_date(value: str | None, today: date, texts: Iterable[str]) -> str | None:
-    """Fecha de un registro NUEVO.
+def current_turn_texts(user_message: str | None, previous_user_message: str | None) -> list[str]:
+    """Lo que el usuario dijo sobre el movimiento de ESTE turno.
 
-    Si el usuario no dio ningún día (ni fecha, ni "ayer", ni un día de la
-    semana), el movimiento es de hoy, diga lo que diga el modelo. El
-    2026-10-05 el supervisor copió "hoy, 4 de octubre" de una confirmación
-    vieja del historial y el subagente registró el ingreso dos veces, una por
-    cada fecha. Si el usuario sí dio un día, solo se corrige el año
-    (``resolve_year``).
+    Su mensaje actual y, si uno de los dos está incompleto (sin monto), el
+    anterior: "ayer gasté en taxi" → "¿cuánto?" → "20000", o "20000 taxi" →
+    "¿en qué moneda?" → "COP". Si los dos traen monto son movimientos
+    distintos y el "ayer" del anterior no es de este.
     """
 
-    texts = [t or "" for t in (texts or [])]
-    if _user_gave_a_day(texts):
-        return resolve_year(value, today, texts)
+    texts = [user_message or ""]
+    if previous_user_message and (
+        not _AMOUNT.search(user_message or "") or not _AMOUNT.search(previous_user_message)
+    ):
+        texts.append(previous_user_message)
+    return texts
+
+
+def memory_user_texts(lines: Iterable[str]) -> list[str]:
+    """Mensajes del usuario dentro de resultados de memoria, sin la fecha de
+    metadatos ("[2026-10-01] Usuario: …") ni las líneas de Tresqu, que traen
+    fechas de sus confirmaciones."""
+
+    found: list[str] = []
+    for block in lines:
+        found.extend(m.group(1) for m in _MEMORY_USER_LINE.finditer(block or ""))
+    return found
+
+
+def resolve_new_record_date(
+    value: str | None,
+    today: date,
+    day_texts: Iterable[str],
+    year_texts: Iterable[str] | None = None,
+) -> str | None:
+    """Fecha de un registro NUEVO.
+
+    Si el usuario no dio el día del movimiento en ``day_texts`` (su mensaje de
+    este turno y lo que el agente buscó en la memoria), es de hoy, diga lo que
+    diga el modelo. El 2026-10-05 el supervisor copió "hoy, 4 de octubre" de una
+    confirmación vieja del historial y el subagente registró el ingreso dos
+    veces, una por cada fecha. Si el usuario sí dio un día, solo se corrige el
+    año con ``year_texts`` (``resolve_year``).
+    """
+
+    day_texts = [t or "" for t in (day_texts or [])]
+    if user_gave_a_day(day_texts):
+        return resolve_year(value, today, list(year_texts if year_texts is not None else day_texts))
     if value and value.strip()[:10] != today.isoformat():
         logger.warning("date_guard: nadie dio un día; %s -> hoy %s", value, today.isoformat())
         return today.isoformat()

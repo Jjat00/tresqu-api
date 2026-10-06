@@ -108,6 +108,7 @@ def build_expenses_tools(
     conversation_context: Sequence[str] = (),
     user_context: Sequence[str] | None = None,
     user_message: str | None = None,
+    day_context: Sequence[str] | None = None,
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
@@ -122,6 +123,11 @@ def build_expenses_tools(
     ``user_message`` es el mensaje del turno: con él ``agents.duplicate_guard``
     impide registrar dos veces el mismo movimiento (las tools se construyen
     una vez por turno, así que lo creado se cuenta por turno).
+
+    ``day_context`` es lo que el usuario dijo del movimiento de este turno (ver
+    ``agents.date_guard.current_turn_texts``) más lo que el agente busque en la
+    memoria; si ahí no hay un día, el registro nuevo es de hoy. Sin él se usa
+    ``user_context``.
     """
 
     external_id = user.external_id
@@ -147,7 +153,8 @@ def build_expenses_tools(
         if user_context is None:
             return value  # sin lo que dijo el usuario no hay base para corregir
         today = datetime.now(_user_tz(user)).date()
-        return resolve_new_record_date(value, today, user_context)
+        day_texts = day_context if day_context is not None else user_context
+        return resolve_new_record_date(value, today, day_texts, user_context)
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -737,12 +744,13 @@ def build_expenses_subagent(
     conversation_context: Sequence[str] = (),
     user_context: Sequence[str] | None = None,
     user_message: str | None = None,
+    day_context: Sequence[str] | None = None,
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
         user, expense_categories_str, income_categories_str, conversation_context, user_context,
-        user_message)
+        user_message, day_context)
     return create_agent(
         model=_model(),
         tools=tools,

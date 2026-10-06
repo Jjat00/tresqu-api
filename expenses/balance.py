@@ -188,7 +188,7 @@ def compute_balance(
       para que nadie lo tome por el de toda la vida (decisión de Jaime,
       2026-10-06).
     - Con fechas (YYYY-MM-DD, inclusive): ese período; sin ``start_date``,
-      desde el primer registro.
+      desde el primer registro; sin ``end_date``, hasta hoy.
     - ``whole_history``: todo lo registrado, sin saldos iniciales de por medio.
 
     Saldo inicial: si el usuario declaró uno ("tengo 1.660.000") DENTRO del
@@ -207,6 +207,10 @@ def compute_balance(
         start_date, end_date = today.replace(day=1).isoformat(), today.isoformat()
     if whole_history:
         start_date = end_date = None
+    elif start_date and not end_date:
+        # "Desde el 1 de octubre" es hasta hoy: así el filtro, el ancla y la
+        # etiqueta dicen lo mismo (sin esto entraban movimientos futuros).
+        end_date = today.isoformat()
 
     since = date.fromisoformat(start_date) if start_date else None
     until = date.fromisoformat(end_date) if end_date else None

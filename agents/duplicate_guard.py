@@ -25,12 +25,20 @@ from typing import Callable
 
 logger = logging.getLogger(__name__)
 
+# Repetición pedida de forma afirmativa ("cada uno", "dos veces", "x3").
+# Palabras sueltas como "veces" o "duplicar" no bastan: "a veces tomo taxi" o
+# "sin duplicar" no piden repetir nada.
 _REPEAT = re.compile(
-    r"\bcada\s+un[oa]?\b|\bveces\b|\bx\s?\d+\b|\b\d+\s?x\b|\bambos\b|\bambas\b"
-    r"|\blos\s+dos\b|\blas\s+dos\b|\brepet\w*|\bduplic\w*",
+    r"\bcada\s+un[oa]\b"
+    r"|\b(?:dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|\d+)\s+veces\b"
+    r"|(?<![\w.,])x\s?\d+\b|\b\d+\s?x\b",
     re.IGNORECASE,
 )
+_NEGATION = re.compile(r"\b(?:no|sin|nunca|ni)\b[^.;\n]{0,25}$", re.IGNORECASE)
 _NUMBER = re.compile(r"\d[\d.,]*")
+# Un monto se escribe a veces abreviado: "20k", "20 mil", "1,5M", "2 millones"
+# o, en monedas de alta denominación, sin los miles ("20 almuerzo" = 20.000).
+_SCALES = (Decimal(1), Decimal(1000), Decimal(1000000))
 
 
 def _as_decimal(text: str) -> Decimal | None:
@@ -49,13 +57,24 @@ def _as_decimal(text: str) -> Decimal | None:
 
 
 def amount_mentions(message: str, amount: Decimal) -> int:
-    """Cuántas veces aparece ``amount`` escrito en el mensaje."""
+    """Cuántas veces el mensaje escribe ``amount``, entero o abreviado.
+
+    Se cuenta de más antes que de menos: un tope alto deja pasar un duplicado
+    (lo de antes), uno bajo bloquearía un movimiento legítimo.
+    """
     count = 0
     for match in _NUMBER.finditer(message or ""):
         value = _as_decimal(match.group())
-        if value is not None and value == amount:
+        if value is not None and any(value * scale == amount for scale in _SCALES):
             count += 1
     return count
+
+
+def asks_for_repetition(message: str) -> bool:
+    for match in _REPEAT.finditer(message or ""):
+        if not _NEGATION.search(message[: match.start()]):
+            return True
+    return False
 
 
 class TurnCreations:
@@ -67,7 +86,7 @@ class TurnCreations:
         self._created: dict[tuple[str, Decimal, str], list[str]] = {}
 
     def _limit(self, amount: Decimal) -> int | None:
-        if _REPEAT.search(self.user_message):
+        if asks_for_repetition(self.user_message):
             return None
         return max(1, amount_mentions(self.user_message, amount))
 

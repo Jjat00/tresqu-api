@@ -17,8 +17,8 @@ from unittest import mock
 
 from django.test import SimpleTestCase
 
-from agents.date_guard import resolve_new_record_date
-from agents.duplicate_guard import TurnCreations, amount_mentions
+from agents.date_guard import current_turn_texts, memory_user_texts, resolve_new_record_date
+from agents.duplicate_guard import TurnCreations, amount_mentions, asks_for_repetition
 
 TODAY = date(2026, 10, 5)
 
@@ -30,7 +30,19 @@ class AmountMentionsTests(SimpleTestCase):
         self.assertEqual(amount_mentions("1,250,000 arriendo", Decimal("1250000")), 1)
         self.assertEqual(amount_mentions("9,99 café", Decimal("9.99")), 1)
         self.assertEqual(amount_mentions("20000 almuerzo y 20000 taxi", Decimal("20000")), 2)
-        self.assertEqual(amount_mentions("20k cervezas", Decimal("20000")), 0)
+        # Abreviados y escala coloquial: cuentan como el monto (revisión de Codex).
+        self.assertEqual(amount_mentions("20k almuerzo y 20k taxi", Decimal("20000")), 2)
+        self.assertEqual(amount_mentions("20 mil almuerzo y 20 mil taxi", Decimal("20000")), 2)
+        self.assertEqual(amount_mentions("20 almuerzo y 20 taxi", Decimal("20000")), 2)
+        self.assertEqual(amount_mentions("1,5M carro", Decimal("1500000")), 1)
+
+    def test_repeticion_solo_afirmativa(self):
+        self.assertTrue(asks_for_repetition("3 cervezas de 20000 cada una"))
+        self.assertTrue(asks_for_repetition("regístralo dos veces"))
+        self.assertTrue(asks_for_repetition("20000 x3"))
+        for text in ("registra 20000 taxi sin duplicar", "a veces tomo taxi: registra 20000",
+                     "no lo registres dos veces", "pagué 20000 por los dos"):
+            self.assertFalse(asks_for_repetition(text), text)
 
 
 class TurnCreationsTests(SimpleTestCase):
@@ -56,6 +68,11 @@ class TurnCreationsTests(SimpleTestCase):
         self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
         self.assertTrue(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
 
+    def test_abreviados_permiten_los_dos(self):
+        turn = TurnCreations("20k almuerzo y 20k taxi")
+        self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+        self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
+
     def test_repeticion_explicita_no_tiene_tope(self):
         turn = TurnCreations("registra 3 cervezas de 20000 cada una")
         for _ in range(3):
@@ -67,56 +84,79 @@ class TurnCreationsTests(SimpleTestCase):
         self.assertFalse(turn.create("expense", 20000, "COP", self._ok).startswith("Error"))
 
     def test_llamadas_en_paralelo_crean_una(self):
+        # La primera creación queda bloqueada hasta que la segunda llamada ya
+        # entró: sin el candado, las dos crearían.
         turn = TurnCreations("200000 del préstamo Darwin ya me los devolvió")
-        created, barrier = [], threading.Barrier(2)
+        created, inside, release = [], threading.Event(), threading.Event()
+        results = []
 
         def slow_create():
             created.append(1)
+            inside.set()
+            release.wait(2)
             return "Ingreso registrado"
 
-        def worker():
-            barrier.wait()
-            turn.create("income", 200000, "COP", slow_create)
-
-        threads = [threading.Thread(target=worker) for _ in range(2)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
+        first = threading.Thread(target=lambda: results.append(turn.create("income", 200000, "COP", slow_create)))
+        first.start()
+        inside.wait(2)
+        second = threading.Thread(target=lambda: results.append(turn.create("income", 200000, "COP", slow_create)))
+        second.start()
+        second.join(0.3)
+        self.assertTrue(second.is_alive())  # espera el candado, no crea
+        release.set()
+        first.join(2)
+        second.join(2)
         self.assertEqual(len(created), 1)
+        self.assertEqual(sum(r.startswith("Error: NO registrado") for r in results), 1)
 
 
 class NewRecordDateTests(SimpleTestCase):
     def test_sin_dia_del_usuario_es_hoy(self):
-        texts = ["7000 arbitraje", "200000 del préstamo Darwin ya me los devolvió"]
+        texts = ["200000 del préstamo Darwin ya me los devolvió"]
         self.assertEqual(resolve_new_record_date("2026-10-04", TODAY, texts), "2026-10-05")
         self.assertIsNone(resolve_new_record_date(None, TODAY, texts))
         self.assertEqual(resolve_new_record_date("2026-10-05", TODAY, texts), "2026-10-05")
+        # "mil" no es una fecha (revisión de Codex)
+        self.assertEqual(resolve_new_record_date("2026-10-01", TODAY, ["20 mil taxi"]), "2026-10-05")
 
-    def test_con_dia_relativo_o_fecha_se_respeta(self):
+    def test_con_dia_dado_se_respeta(self):
         for text in ("20000 cervezas ayer", "el sábado 20000 cine", "20000 el 3 de octubre",
-                     "anoche 20000 taxi", "20000 cena del viernes"):
+                     "anoche 20000 taxi", "20000 cena del viernes", "20000 taxi el 5",
+                     "el primero pagué 20000", "el quince 30000 mercado", "hace 3 días 20000"):
             self.assertEqual(resolve_new_record_date("2026-10-03", TODAY, [text]), "2026-10-03", text)
 
     def test_con_dia_dado_solo_corrige_el_año(self):
         self.assertEqual(resolve_new_record_date("2023-10-04", TODAY, ["ayer 12000 gaseosa"]), "2026-10-04")
 
+    def test_textos_del_turno(self):
+        # El anterior entra solo si uno de los dos está incompleto.
+        self.assertEqual(current_turn_texts("200000 Darwin", "ayer 8000 papas"), ["200000 Darwin"])
+        self.assertEqual(current_turn_texts("20000", "ayer gasté en taxi"), ["20000", "ayer gasté en taxi"])
+        self.assertEqual(current_turn_texts("COP", "20000 taxi ayer"), ["COP", "20000 taxi ayer"])
+        self.assertEqual(current_turn_texts("20000 taxi", None), ["20000 taxi"])
+
+    def test_memoria_sin_metadatos_ni_tresqu(self):
+        lines = ["[2026-10-01] Tresqu: Registré 20000 hoy 1 de octubre",
+                 "[2024-03-16] Usuario: Viajé a Lima el 15/03/2024"]
+        self.assertEqual(memory_user_texts(lines), ["Viajé a Lima el 15/03/2024"])
+
 
 class ExpensesToolsWiringTests(SimpleTestCase):
     """Las tools del subagente aplican las dos guardas."""
 
-    def _tools(self, user_message, user_context):
+    def _tools(self, user_message, user_context, day_context=None):
         from agents.subagents import expenses as subagent
 
         user = SimpleNamespace(external_id="x", default_currency="COP", timezone="America/Bogota")
         return {t.name: t for t in subagent.build_expenses_tools(
-            user, "", "", (user_message,), user_context, user_message)}
+            user, "", "", (user_message,), user_context, user_message, day_context)}
 
     def test_caso_darwin(self):
         from agents.subagents import expenses as subagent
 
         message = "200000 del préstamo Darwin ya me los devolvió"
-        tools = self._tools(message, ["8000 papas", message])
+        # Un "ayer" de un mensaje anterior con su propio monto no es de este turno.
+        tools = self._tools(message, ["ayer 8000 papas", message], current_turn_texts(message, "ayer 8000 papas"))
         sent = []
 
         def fake_invoke(tool, payload):
