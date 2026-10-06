@@ -32,6 +32,10 @@ from income.models import Income
 from users.models import User
 
 INITIAL_BALANCE_NOTE = "saldo inicial"
+# Un saldo inicial declarado en los últimos días del mes anterior se arrastra
+# al saldo del mes: quien dijo "tengo 1.660.000" el 30 de septiembre espera
+# que su saldo de octubre parta de ahí (decisión de Jaime, 2026-10-06).
+CARRY_OVER_DAYS = 2
 
 
 def _money(value: Decimal | None) -> float:
@@ -167,6 +171,11 @@ def _sum(query) -> dict[str, Any]:
     return {"total": row["total"] or Decimal("0"), "count": row["count"]}
 
 
+def _thousands(value: Decimal) -> str:
+    text = f"{value:,.2f}".rstrip("0").rstrip(".")
+    return text.replace(",", "X").replace(".", ",").replace("X", ".")
+
+
 def _spanish_date(day: date) -> str:
     months = (
         "enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto",
@@ -193,7 +202,9 @@ def compute_balance(
 
     Saldo inicial: si el usuario declaró uno ("tengo 1.660.000") DENTRO del
     período, esa moneda se cuenta desde ahí: lo anterior ya está en la cifra
-    declarada. El 2026-10-05 el ancla se apagaba con solo pasar ``end_date``
+    declarada. En un período que empieza el día 1, una moneda sin saldo inicial
+    dentro de él arrastra el declarado en los ``CARRY_OVER_DAYS`` días previos
+    (``carried_initial_balance``) y cuenta desde ese día. El 2026-10-05 el ancla se apagaba con solo pasar ``end_date``
     y Tresqu restó gastos de 2025 ya incluidos en el saldo declarado
     (−445.500 COP en vez de 539.000).
     """
@@ -214,7 +225,17 @@ def compute_balance(
 
     since = date.fromisoformat(start_date) if start_date else None
     until = date.fromisoformat(end_date) if end_date else None
+    if since and until and until < since:
+        # Un rango invertido (o un inicio futuro sin fin) no tiene saldo: mejor
+        # un error claro que una cifra con un saldo inicial arrastrado.
+        raise ValueError(f"rango de fechas inválido: {start_date} es posterior a {end_date}")
     anchors = {} if whole_history else latest_initial_balances(user, since, until)
+    carried: dict[str, Income] = {}
+    if since and since.day == 1 and not whole_history:
+        before = latest_initial_balances(
+            user, since - timedelta(days=CARRY_OVER_DAYS), since - timedelta(days=1)
+        )
+        carried = {c: a for c, a in before.items() if c not in anchors}
 
     expenses = _filter_by_period(
         Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user
@@ -226,13 +247,25 @@ def compute_balance(
     default_currency = getattr(user, "default_currency", None) or "COP"
     currencies = set(expenses.values_list("currency", flat=True).distinct())
     currencies |= set(incomes.values_list("currency", flat=True).distinct())
+    currencies |= set(carried)
     currencies = sorted(currencies or {default_currency}, key=lambda c: (c != default_currency, c))
 
     by_currency = []
     for currency in currencies:
         exp_qs = expenses.filter(currency=currency)
         inc_qs = incomes.filter(currency=currency)
-        anchor = anchors.get(currency)
+        anchor = anchors.get(currency) or carried.get(currency)
+        if currency in carried:
+            # El período de esta moneda empieza el día del saldo arrastrado.
+            anchor_day = _effective_date(anchor, "received_at", tz).isoformat()
+            exp_qs = _filter_by_period(
+                Expense.objects.filter(user=user, currency=currency), "spent_at",
+                anchor_day, end_date, user=user,
+            )
+            inc_qs = _filter_by_period(
+                Income.objects.filter(user=user, currency=currency), "received_at",
+                anchor_day, end_date, user=user,
+            )
         if anchor:
             exp_qs = exp_qs.filter(_after_anchor("spent_at", anchor, tz))
             # Cuenta el ancla y lo posterior; ni lo anterior ni otros saldos iniciales.
@@ -247,6 +280,14 @@ def compute_balance(
                 _effective_date(anchor, "received_at", tz).isoformat() if anchor else None
             ),
             "initial_balance": _money(anchor.amount) if anchor else None,
+            "carried_initial_balance": currency in carried,
+            # Lo que el agente debe decir de esta moneda, tal cual.
+            "counted_label": (
+                f"desde tu saldo inicial del {_spanish_date(_effective_date(anchor, 'received_at', tz))} "
+                f"({_thousands(anchor.amount)} {currency}), declarado justo antes de empezar el mes, "
+                f"hasta el {_spanish_date(until or today)}"
+                if currency in carried else None
+            ),
             "incomes_total": _money(inc["total"]),
             "incomes_count": inc["count"],
             "expenses_total": _money(exp["total"]),
@@ -275,7 +316,9 @@ def compute_balance(
             "balance = incomes_total - expenses_total, calculado en base de datos. "
             "Repórtalo tal cual y di SIEMPRE el período (period.label) para que el "
             "usuario no crea que es el saldo de toda la vida; si una moneda trae "
-            "since_initial_balance, di que cuenta desde ese saldo inicial. No lo "
-            "recalcules ni lo combines entre monedas."
+            "since_initial_balance, di que cuenta desde ese saldo inicial. Si trae "
+            "carried_initial_balance=true, el período de esa moneda es counted_label "
+            "(no period.label): díselo con esa fecha y ese monto. No lo recalcules "
+            "ni lo combines entre monedas."
         ),
     }
