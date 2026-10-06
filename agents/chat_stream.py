@@ -45,7 +45,7 @@ from .services import (
     _user_today,
 )
 from .subagents.analyst import build_analyst_subagent
-from .currency_guard import conversation_texts, user_texts
+from .currency_guard import conversation_texts, previous_user_text, user_texts
 from .subagents.expenses import build_expenses_subagent
 from .subagents.risk import build_risk_subagent
 from .subagents.wallbit import build_wallbit_subagent
@@ -417,6 +417,9 @@ async def _stream_specialist(
             _user_today(user),
             conversation_texts(raw_text, history),
             user_texts(raw_text, history),
+            raw_text,
+            user_texts(raw_text, history),
+            previous_user_text(history),
         )
     elif agent_id == "wallbit":
         agent = build_wallbit_subagent(user, channel, raw_text)

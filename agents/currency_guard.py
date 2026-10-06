@@ -205,3 +205,16 @@ def user_texts(
     if user_message:
         texts.append(user_message)
     return texts
+
+
+def previous_user_text(history: Iterable[Any] | None) -> str | None:
+    """El último mensaje del usuario en el historial (sin el del turno actual)."""
+    for message in reversed(list(history or [])):
+        if isinstance(message, dict):
+            role, content = message.get("role"), message.get("content")
+        else:
+            role = "user" if message.__class__.__name__ == "HumanMessage" else "assistant"
+            content = getattr(message, "content", None)
+        if role == "user" and isinstance(content, str) and content.strip():
+            return content
+    return None

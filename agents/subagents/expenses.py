@@ -21,7 +21,8 @@ from langchain_openai import ChatOpenAI
 
 from agents.calculator import calculate_tool
 from agents.currency_guard import mentioned_currency, resolve_currency
-from agents.date_guard import resolve_year
+from agents.date_guard import resolve_new_record_date, user_gave_a_day
+from agents.duplicate_guard import TurnCreations
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from telegrambot.tools import (
     create_expense,
@@ -106,6 +107,9 @@ def build_expenses_tools(
     income_categories_str: str = "",
     conversation_context: Sequence[str] = (),
     user_context: Sequence[str] | None = None,
+    user_message: str | None = None,
+    day_context: Sequence[str] | None = None,
+    previous_user_message: str | None = None,
 ) -> list:
     """All tools the expenses subagent needs, with ``user_external_id`` bound.
 
@@ -116,10 +120,20 @@ def build_expenses_tools(
     ``conversation_context`` son los textos reales del turno (mensaje del
     usuario + últimos mensajes del hilo). Se usan para descartar monedas que
     ningún humano mencionó: ver ``agents.currency_guard``.
+
+    ``user_message`` es el mensaje del turno: con él ``agents.duplicate_guard``
+    impide registrar dos veces el mismo movimiento (las tools se construyen
+    una vez por turno, así que lo creado se cuenta por turno).
+
+    ``day_context`` es lo que el usuario escribió en el historial visible más lo
+    que el agente busque en la memoria (sin la memoria semántica inyectada,
+    que trae fechas de otros movimientos); si ahí no hay un día, el registro
+    nuevo es de hoy. Sin él se usa ``user_context``.
     """
 
     external_id = user.external_id
     default_currency = user.default_currency or "USD"
+    turn = TurnCreations(user_message, previous_user_message)
 
     def _currency(requested: str | None) -> str:
         """Moneda a registrar: descarta la que nadie mencionó en la conversación.
@@ -140,7 +154,19 @@ def build_expenses_tools(
         if user_context is None:
             return value  # sin lo que dijo el usuario no hay base para corregir
         today = datetime.now(_user_tz(user)).date()
-        return resolve_year(value, today, user_context)
+        day_texts = day_context if day_context is not None else user_context
+        return resolve_new_record_date(value, today, day_texts, user_context)
+
+    def _day_identity(resolved: str | None) -> str | None:
+        """La fecha cuenta para distinguir dos movimientos iguales solo si el
+        usuario dio un día ("los taxis de ayer y hoy"). Si no, la eligió el
+        modelo, y variarla es justo como duplicaba (``agents.duplicate_guard``)."""
+        from telegrambot.tools import _user_tz
+
+        texts = day_context if day_context is not None else user_context
+        if not texts or not user_gave_a_day(texts):
+            return None
+        return (resolved or datetime.now(_user_tz(user)).date().isoformat())[:10]
 
     @tool
     async def parse_expense_for_user(text: str) -> dict:
@@ -273,14 +299,16 @@ def build_expenses_tools(
                 "examples": category_examples,
                 "color": category_color,
             })
-        return _invoke_strict(create_expense, {
+        resolved = _currency(currency)
+        day = _date(spent_at)
+        return turn.create("expense", amount, resolved or default_currency, note, lambda: _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": _currency(currency),
+            "currency": resolved,
             "category": category,
-            "spent_at": _date(spent_at),
+            "spent_at": day,
             "note": note,
-        })
+        }), category, _day_identity(day))
 
     @tool
     def create_income_for_user(
@@ -306,14 +334,16 @@ def build_expenses_tools(
                 "example": category_example,
                 "color": category_color,
             })
-        return _invoke_strict(create_income, {
+        resolved = _currency(currency)
+        day = _date(received_at)
+        return turn.create("income", amount, resolved or default_currency, note, lambda: _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
-            "currency": _currency(currency),
+            "currency": resolved,
             "category": category,
-            "received_at": _date(received_at),
+            "received_at": day,
             "note": note,
-        })
+        }), category, _day_identity(day))
 
     @tool("update_expense")
     def update_expense_for_user(
@@ -391,11 +421,12 @@ def build_expenses_tools(
         whole_history: bool = False,
     ) -> Dict[str, Any]:
         """Saldo EXACTO (ingresos − gastos) por moneda, calculado en base de datos.
-        Sin fechas ("cuánto me queda", "mi saldo", "cuánto tengo"): desde el
-        último saldo inicial que declaró el usuario, o todo lo registrado si no
-        lo declaró. whole_history=True solo si pide explícitamente todo el
-        historial. Con fechas YYYY-MM-DD: ese período ("cómo voy este mes").
-        Úsala SIEMPRE para cualquier saldo o balance: nunca restes tú."""
+        Sin fechas ("cuánto me queda", "mi saldo", "cuánto tengo"): el del MES
+        ACTUAL, del día 1 a hoy. Con fechas YYYY-MM-DD: ese período.
+        whole_history=True solo si pide explícitamente todo el historial. Si el
+        usuario declaró un saldo inicial dentro del período, cuenta desde él.
+        Di siempre el período (period.label). Úsala SIEMPRE para cualquier
+        saldo o balance: nunca restes tú."""
         try:
             return _invoke_strict(get_balance, {
                 "user_external_id": external_id,
@@ -647,6 +678,7 @@ REGLAS DE OPERACIÓN:
 - Mismo patrón para INGRESOS con parse_income_for_user/parse_incomes_for_user/create_income_for_user.
 - Si hay referencias temporales (ayer, el sábado, hace una semana), usa parse_relative_date_for_user. Para días de semana, asume el más reciente en el pasado.
 - Si falta fecha, usa get_current_date_for_user.
+- UN MOVIMIENTO = UNA CREACIÓN: nunca registres el mismo movimiento dos veces para cubrir una fecha dudosa. Si la instrucción trae fechas contradictorias ("hoy, 4 de octubre" cuando hoy es otro día), usa la FECHA ACTUAL. Si una tool de creación responde que ya se registró en este turno, no insistas: reporta solo el registro hecho.
 - MONEDA: NUNCA infieras ni adivines la moneda. Solo pásala a las tools si el usuario la dijo de forma EXPLÍCITA e inequívoca (USD, EUR, "dólares", "euros", "pesos colombianos", "pesos argentinos"...). Palabras ambiguas como "pesos" a secas NO cuentan: deja la moneda vacía y la tool usará la moneda por defecto del usuario. Si el usuario SÍ nombró una moneda, respétala aunque difiera de la suya por defecto.
 - ESCALA DE MONTOS COLOQUIALES: La moneda por defecto del usuario es {default_currency}. En monedas de alta denominación (COP, CLP, PYG, VES...) la gente omite los miles al hablar: "gasté 90 en una camisa" significa 90.000, no 90 pesos. Las tools parse_*_for_user ya aplican esta regla; si registras o editas un monto SIN pasar por ellas, aplícala tú: determina la moneda en juego (la explícita del mensaje, o si no hay, la por defecto) y, si es de alta denominación y el monto literal es implausiblemente bajo para lo descrito (camisa de 90 COP, cena de 20 COP, proyecto pagado a 200 COP), interprétalo como MILES (90 → 90000). Si el monto ya es plausible (4500 un café) o el usuario fue explícito ("90 mil", "90k", "90.000"), no lo toques. En USD/EUR y similares NO aplica: 90 USD son 90 dólares. Esta regla ajusta SOLO el monto, nunca la moneda.
 
@@ -679,7 +711,7 @@ CONSULTAS:
 - Por categoría + período: get_category_expenses / get_category_incomes.
 - Top categorías: get_top_expense_categories / get_top_income_categories_for_user.
 - Búsqueda semántica: search_expenses / search_incomes (NO usar para consultas de período).
-- SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user sin fechas (cuenta desde el último saldo inicial del usuario). Si nombra un período, pasa sus fechas. Reporta por moneda ingresos, gastos y saldo tal como los devuelve, y di desde cuándo cuenta: since_initial_balance (p. ej. "desde tu saldo inicial del 30 de septiembre") o, si viene vacío, "con todo lo registrado".
+- SALDO ("cuánto me queda", "mi saldo", "cuánto tengo", "cuánto me sobra"): get_balance_for_user SIN fechas, que devuelve el del MES ACTUAL (del día 1 a hoy). Si nombra un período, pasa sus fechas; whole_history=True solo si pide explícitamente todo el historial. Reporta por moneda ingresos, gastos y saldo tal como los devuelve y di SIEMPRE el período con period.label (p. ej. "del 1 al 6 de octubre de 2026"), para que no crea que es el saldo de toda la vida. Si una moneda trae since_initial_balance, di que cuenta desde ese saldo inicial.
 - SALDO DECLARADO: cuando el usuario dice cuánta plata tiene para empezar a contar desde ahí ("tengo 1.660.000", "mi saldo es…", "empieza desde cero") y confirma que quiere fijarlo, usa set_initial_balance_for_user (acepta 0). Así el saldo arranca desde ese punto. NO lo registres con create_income_for_user y nunca borres otros movimientos por eso. Si dice que arranca debiendo, fija 0 y ofrece registrar la deuda como gasto.
 - CUENTAS: nunca sumes, restes, multipliques ni saques porcentajes de cabeza. Si la respuesta necesita una cuenta que ninguna tool trae hecha (diferencia entre dos totales, un porcentaje, un promedio simple), usa calculate con los números exactos de las tools.
 - TOTALES ("cuánto gasté", "cuánto llevo este mes", "total de ingresos de julio"): get_expense_totals_for_user / get_income_totals_for_user con el rango de fechas del período. Devuelven el total exacto por moneda, calculado igual que el dashboard; reporta cada moneda por separado, tal cual.
@@ -725,11 +757,15 @@ def build_expenses_subagent(
     current_date: str,
     conversation_context: Sequence[str] = (),
     user_context: Sequence[str] | None = None,
+    user_message: str | None = None,
+    day_context: Sequence[str] | None = None,
+    previous_user_message: str | None = None,
 ):
     """Returns a compiled LangChain agent ready to be invoked by the supervisor."""
 
     tools = build_expenses_tools(
-        user, expense_categories_str, income_categories_str, conversation_context, user_context)
+        user, expense_categories_str, income_categories_str, conversation_context, user_context,
+        user_message, day_context, previous_user_message)
     return create_agent(
         model=_model(),
         tools=tools,
