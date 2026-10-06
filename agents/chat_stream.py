@@ -46,7 +46,6 @@ from .services import (
 )
 from .subagents.analyst import build_analyst_subagent
 from .currency_guard import conversation_texts, previous_user_text, user_texts
-from .date_guard import current_turn_texts
 from .subagents.expenses import build_expenses_subagent
 from .subagents.risk import build_risk_subagent
 from .subagents.wallbit import build_wallbit_subagent
@@ -419,7 +418,7 @@ async def _stream_specialist(
             conversation_texts(raw_text, history),
             user_texts(raw_text, history),
             raw_text,
-            current_turn_texts(raw_text, previous_user_text(history)),
+            user_texts(raw_text, history),
             previous_user_text(history),
         )
     elif agent_id == "wallbit":

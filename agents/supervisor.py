@@ -23,7 +23,7 @@ from whatsappbot.wallbit_handlers import extract_pending_confirmations
 from . import risk_profiler_service
 from .calculator import calculate_tool
 from .currency_guard import conversation_texts, previous_user_text, user_texts
-from .date_guard import current_turn_texts, memory_user_texts
+from .date_guard import memory_user_texts
 from .subagents.analyst import build_analyst_subagent
 from .subagents.expenses import build_expenses_subagent
 from .subagents.wallbit import build_wallbit_subagent
@@ -278,11 +278,11 @@ def build_supervisor(
     date_context = user_texts(user_message, history)
     if semantic_context:
         date_context.append(semantic_context)
-    # Lo que el usuario dijo del movimiento de ESTE turno (y lo que el agente
-    # busque en la memoria): sin un día ahí, un registro nuevo es de hoy. La
-    # memoria semántica inyectada no cuenta: trae fechas de otros movimientos.
+    # Lo que el usuario escribió (y lo que el agente busque en la memoria): sin
+    # un día ahí, un registro nuevo es de hoy. La memoria semántica inyectada
+    # no cuenta: trae fechas de otros movimientos.
     previous_message = previous_user_text(history)
-    day_context = current_turn_texts(user_message, previous_message)
+    day_context = user_texts(user_message, history)
 
     expenses_agent = build_expenses_subagent(
         user,

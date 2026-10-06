@@ -6,13 +6,15 @@ movimiento: el supervisor le pasó "hoy, 4 de octubre" (un "hoy" copiado de
 una confirmación vieja del historial) y el modelo cubrió las dos fechas.
 Igual que con la moneda y la fecha, aquí no se le pregunta nada al modelo.
 
-Regla: en un mismo turno, un gasto (o ingreso) del mismo monto y moneda se
-registra a lo sumo tantas veces como el usuario escribió ese monto en su
-mensaje (o en el anterior, si el actual solo completa una aclaración), y como
-mínimo una. "200000 préstamo Darwin" → una vez; "20000 almuerzo y 20000
-taxi" → dos. Si el usuario pide repetir ese monto de forma explícita ("cada
-uno", "dos veces", "x3" en la misma cláusula), no hay tope. La comprobación y la creación van bajo
-un candado: las tools síncronas corren en hilos y las dos llamadas paralelas
+Regla: en un mismo turno no se registra dos veces un movimiento IDÉNTICO
+(mismo tipo, monto, moneda y nota; la fecha y la categoría no cuentan, que es
+justo lo que el modelo varió). Movimientos distintos con el mismo monto
+("20k taxi y 20k almuerzo") pasan siempre, sin interpretar el texto. Para
+idénticos, el texto del usuario solo puede AFLOJAR el tope, nunca endurecerlo:
+se permiten tantos como veces escribió el monto (en su mensaje o en el
+anterior, si el actual completa una aclaración), y sin tope si pidió repetir
+("cada uno", "dos veces", "x3"). La comprobación y la creación van bajo un
+candado: las tools síncronas corren en hilos y las dos llamadas paralelas
 llegan a la vez.
 """
 
@@ -21,14 +23,14 @@ from __future__ import annotations
 import logging
 import re
 import threading
+import unicodedata
 from decimal import Decimal, InvalidOperation
 from typing import Callable
 
 logger = logging.getLogger(__name__)
 
 # Repetición pedida de forma afirmativa ("cada uno", "dos veces", "x3").
-# Palabras sueltas como "veces" o "duplicar" no bastan: "a veces tomo taxi" o
-# "sin duplicar" no piden repetir nada.
+# Palabras sueltas como "veces" o "duplicar" no bastan.
 _REPEAT = re.compile(
     r"\bcada\s+un[oa]\b"
     r"|\b(?:dos|tres|cuatro|cinco|seis|siete|ocho|nueve|diez|\d+)\s+veces\b"
@@ -40,6 +42,10 @@ _NUMBER = re.compile(r"\d[\d.,]*")
 # Un monto se escribe a veces abreviado: "20k", "20 mil", "1,5M", "2 millones"
 # o, en monedas de alta denominación, sin los miles ("20 almuerzo" = 20.000).
 _SCALES = (Decimal(1), Decimal(1000), Decimal(1000000))
+_STOPWORDS = {
+    "de", "del", "la", "el", "los", "las", "en", "por", "para", "un", "una", "y",
+    "a", "al", "mi", "mis", "con", "gasto", "ingreso", "pago",
+}
 
 
 def _as_decimal(text: str) -> Decimal | None:
@@ -60,8 +66,8 @@ def _as_decimal(text: str) -> Decimal | None:
 def amount_mentions(message: str, amount: Decimal) -> int:
     """Cuántas veces el mensaje escribe ``amount``, entero o abreviado.
 
-    Se cuenta de más antes que de menos: un tope alto deja pasar un duplicado
-    (lo de antes), uno bajo bloquearía un movimiento legítimo.
+    Se cuenta de más antes que de menos: solo sirve para permitir más
+    registros idénticos, nunca menos.
     """
     count = 0
     for match in _NUMBER.finditer(message or ""):
@@ -71,64 +77,65 @@ def amount_mentions(message: str, amount: Decimal) -> int:
     return count
 
 
-_CLAUSE = re.compile(r"[.;:\n]+")
-
-
-def asks_for_repetition(message: str, amount: Decimal | None = None) -> bool:
-    """Repetición afirmativa en la misma cláusula que el monto.
-
-    "3 cervezas de 20000 cada una" sí; "ya pagué el taxi dos veces; registra
-    20000 de almuerzo" no: las "dos veces" son del taxi.
-    """
-    for clause in _CLAUSE.split(message or ""):
-        if amount is not None and not amount_mentions(clause, amount):
-            continue
-        for match in _REPEAT.finditer(clause):
-            if not _NEGATION.search(clause[: match.start()]):
-                return True
+def asks_for_repetition(message: str) -> bool:
+    for match in _REPEAT.finditer(message or ""):
+        if not _NEGATION.search(message[: match.start()]):
+            return True
     return False
+
+
+def note_key(note: str | None) -> frozenset[str]:
+    """La nota sin tildes, mayúsculas, puntuación ni palabras vacías:
+    "Devolución del préstamo de Darwin" == "devolucion prestamo Darwin"."""
+    text = unicodedata.normalize("NFKD", note or "")
+    text = "".join(c for c in text if not unicodedata.combining(c)).lower()
+    return frozenset(w for w in re.findall(r"\w+", text) if w not in _STOPWORDS)
 
 
 class TurnCreations:
     """Lo creado en un turno, para no registrar dos veces el mismo movimiento."""
 
     def __init__(self, user_message: str | None, previous_user_message: str | None = None):
-        self.user_message = user_message or ""
-        self.previous_user_message = previous_user_message or ""
+        self.texts = [user_message or "", previous_user_message or ""]
         self._lock = threading.Lock()
-        self._created: dict[tuple[str, Decimal, str], list[str]] = {}
+        self._created: dict[tuple, list[str]] = {}
 
     def _limit(self, amount: Decimal) -> int | None:
-        # Si el mensaje actual no trae el monto, completa una aclaración del
-        # anterior ("20k taxi y 20k almuerzo" → "¿moneda?" → "COP").
-        source = self.user_message
-        if not amount_mentions(source, amount):
-            source = self.previous_user_message
-        if asks_for_repetition(source, amount):
+        if any(asks_for_repetition(t) for t in self.texts):
             return None
-        return max(1, amount_mentions(source, amount))
+        return max(1, *(amount_mentions(t, amount) for t in self.texts))
 
-    def create(self, kind: str, amount, currency: str, do_create: Callable[[], str]) -> str:
+    def create(
+        self,
+        kind: str,
+        amount,
+        currency: str,
+        note: str | None,
+        do_create: Callable[[], str],
+        category: str | None = None,
+    ) -> str:
         """Ejecuta ``do_create`` salvo que ya se haya registrado lo mismo en este turno."""
         try:
             value = Decimal(str(amount))
         except (InvalidOperation, ValueError):
             return do_create()  # la tool base rechaza el monto inválido
-        key = (kind, value, (currency or "").upper())
+        # Sin nota, la categoría hace de identidad: dos gastos sin nota en
+        # categorías distintas no son el mismo movimiento.
+        key = (kind, value, (currency or "").upper(), note_key(note) or note_key(category))
         with self._lock:
             done = self._created.get(key, [])
             limit = self._limit(value)
             if limit is not None and len(done) >= limit:
                 logger.warning(
-                    "duplicate_guard: %s de %s ya registrado en este turno; se descarta otro",
-                    kind, value,
+                    "duplicate_guard: %s de %s (%s) ya registrado en este turno; se descarta otro",
+                    kind, value, note,
                 )
                 label = "gasto" if kind == "expense" else "ingreso"
                 return (
-                    f"Error: NO registrado. Ya registraste en este turno un {label} de "
-                    f"{value} ({done[0][:120]}). El usuario mencionó un solo movimiento: "
-                    "no lo dupliques ni cubras dos fechas posibles. Reporta solo el "
-                    "registro ya hecho."
+                    f"Error: NO registrado. Ya registraste en este turno el mismo {label} "
+                    f"de {value} ({done[0][:120]}). Es un solo movimiento: no lo "
+                    "dupliques ni cubras dos fechas posibles. Reporta solo el registro "
+                    "ya hecho."
                 )
             result = do_create()
             if isinstance(result, str) and not result.startswith("Error"):

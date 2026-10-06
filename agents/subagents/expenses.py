@@ -125,10 +125,10 @@ def build_expenses_tools(
     impide registrar dos veces el mismo movimiento (las tools se construyen
     una vez por turno, así que lo creado se cuenta por turno).
 
-    ``day_context`` es lo que el usuario dijo del movimiento de este turno (ver
-    ``agents.date_guard.current_turn_texts``) más lo que el agente busque en la
-    memoria; si ahí no hay un día, el registro nuevo es de hoy. Sin él se usa
-    ``user_context``.
+    ``day_context`` es lo que el usuario escribió en el historial visible más lo
+    que el agente busque en la memoria (sin la memoria semántica inyectada,
+    que trae fechas de otros movimientos); si ahí no hay un día, el registro
+    nuevo es de hoy. Sin él se usa ``user_context``.
     """
 
     external_id = user.external_id
@@ -289,14 +289,14 @@ def build_expenses_tools(
                 "color": category_color,
             })
         resolved = _currency(currency)
-        return turn.create("expense", amount, resolved or default_currency, lambda: _invoke_strict(create_expense, {
+        return turn.create("expense", amount, resolved or default_currency, note, lambda: _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": resolved,
             "category": category,
             "spent_at": _date(spent_at),
             "note": note,
-        }))
+        }), category)
 
     @tool
     def create_income_for_user(
@@ -323,14 +323,14 @@ def build_expenses_tools(
                 "color": category_color,
             })
         resolved = _currency(currency)
-        return turn.create("income", amount, resolved or default_currency, lambda: _invoke_strict(create_income, {
+        return turn.create("income", amount, resolved or default_currency, note, lambda: _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": resolved,
             "category": category,
             "received_at": _date(received_at),
             "note": note,
-        }))
+        }), category)
 
     @tool("update_expense")
     def update_expense_for_user(

@@ -83,20 +83,6 @@ def user_gave_a_day(texts: Iterable[str]) -> bool:
     return any(_DAY_SIGNAL.search(t or "") for t in texts)
 
 
-def current_turn_texts(user_message: str | None, previous_user_message: str | None) -> list[str]:
-    """Lo que el usuario dijo sobre el movimiento de ESTE turno: su mensaje
-    actual y el anterior, por si este completa una aclaración ("el 5 gasté en
-    taxi" → "¿cuánto?" → "20000"). Se incluye siempre el anterior: si era otro
-    asunto, como mucho deja pasar la fecha del modelo (lo de antes), mientras
-    que dejarlo fuera cambiaría a hoy una fecha que el usuario sí dio.
-    """
-
-    texts = [user_message or ""]
-    if previous_user_message:
-        texts.append(previous_user_message)
-    return texts
-
-
 def memory_user_texts(lines: Iterable[str]) -> list[str]:
     """Mensajes del usuario dentro de resultados de memoria, sin la fecha de
     metadatos ("[2026-10-01] Usuario: …") ni las líneas de Tresqu, que traen
@@ -116,8 +102,11 @@ def resolve_new_record_date(
 ) -> str | None:
     """Fecha de un registro NUEVO.
 
-    Si el usuario no dio el día del movimiento en ``day_texts`` (su mensaje de
-    este turno y lo que el agente buscó en la memoria), es de hoy, diga lo que
+    Si el usuario no dio un día en ``day_texts`` (lo que escribió en el
+    historial visible y lo que el agente buscó en la memoria), es de hoy. Es
+    amplio a propósito: un "ayer" de otro mensaje deja pasar la fecha del
+    modelo (lo de antes), pero así ninguna cadena de aclaraciones ("el 5 gasté
+    en taxi" → "¿cuánto?" → "20000" → "¿moneda?" → "COP") pierde el día. Diga lo que
     diga el modelo. El 2026-10-05 el supervisor copió "hoy, 4 de octubre" de una
     confirmación vieja del historial y el subagente registró el ingreso dos
     veces, una por cada fecha. Si el usuario sí dio un día, solo se corrige el
