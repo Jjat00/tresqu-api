@@ -7,8 +7,9 @@ una confirmación vieja del historial) y el modelo cubrió las dos fechas.
 Igual que con la moneda y la fecha, aquí no se le pregunta nada al modelo.
 
 Regla: en un mismo turno no se registra dos veces un movimiento IDÉNTICO
-(mismo tipo, monto, moneda y nota; la fecha y la categoría no cuentan, que es
-justo lo que el modelo varió). Movimientos distintos con el mismo monto
+(mismo tipo, monto, moneda y nota; la categoría no cuenta, y la fecha solo si
+el usuario dio un día: si no, la eligió el modelo y variarla es justo como
+duplicaba). Movimientos distintos con el mismo monto
 ("20k taxi y 20k almuerzo") pasan siempre, sin interpretar el texto. Para
 idénticos, el texto del usuario solo puede AFLOJAR el tope, nunca endurecerlo:
 se permiten tantos como veces escribió el monto (en su mensaje o en el
@@ -114,6 +115,7 @@ class TurnCreations:
         note: str | None,
         do_create: Callable[[], str],
         category: str | None = None,
+        day: str | None = None,
     ) -> str:
         """Ejecuta ``do_create`` salvo que ya se haya registrado lo mismo en este turno."""
         try:
@@ -122,7 +124,9 @@ class TurnCreations:
             return do_create()  # la tool base rechaza el monto inválido
         # Sin nota, la categoría hace de identidad: dos gastos sin nota en
         # categorías distintas no son el mismo movimiento.
-        key = (kind, value, (currency or "").upper(), note_key(note) or note_key(category))
+        # ``day`` solo llega si el usuario dio un día: entonces "el taxi de ayer"
+        # y "el de hoy" son dos movimientos.
+        key = (kind, value, (currency or "").upper(), note_key(note) or note_key(category), day)
         with self._lock:
             done = self._created.get(key, [])
             limit = self._limit(value)

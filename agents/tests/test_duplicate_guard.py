@@ -193,3 +193,28 @@ class ExpensesToolsWiringTests(SimpleTestCase):
         self.assertEqual(sent[0]["received_at"], "2026-10-05")
         self.assertIn("registrado", first)
         self.assertTrue(_blocked(second))
+
+    def test_dias_dados_por_el_usuario_distinguen(self):
+        # Revisión de Codex, ronda 5: "los taxis de ayer y hoy; ambos 20000".
+        from agents.subagents import expenses as subagent
+
+        message = "Registra los taxis de ayer y hoy; ambos costaron 20000 COP"
+        user = SimpleNamespace(external_id="x", default_currency="COP", timezone="America/Bogota")
+        tools = {t.name: t for t in subagent.build_expenses_tools(
+            user, "", "", (message,), [message], message, [message], None)}
+        sent = []
+
+        def fake_invoke(tool, payload):
+            sent.append(payload)
+            return "Gasto registrado"
+
+        with mock.patch.object(subagent, "_invoke_strict", fake_invoke), \
+                mock.patch("agents.subagents.expenses.datetime") as fake_dt:
+            fake_dt.now.return_value = SimpleNamespace(date=lambda: TODAY)
+            for day in ("2026-10-04", "2026-10-05"):
+                tools["create_expense_for_user"].invoke(
+                    {"amount": 20000, "category": "Transporte", "spent_at": day, "note": "taxi", "currency": "COP"})
+            repeated = tools["create_expense_for_user"].invoke(
+                {"amount": 20000, "category": "Transporte", "spent_at": "2026-10-05", "note": "taxi", "currency": "COP"})
+        self.assertEqual([p["spent_at"] for p in sent], ["2026-10-04", "2026-10-05"])
+        self.assertTrue(_blocked(repeated))

@@ -21,7 +21,7 @@ from langchain_openai import ChatOpenAI
 
 from agents.calculator import calculate_tool
 from agents.currency_guard import mentioned_currency, resolve_currency
-from agents.date_guard import resolve_new_record_date
+from agents.date_guard import resolve_new_record_date, user_gave_a_day
 from agents.duplicate_guard import TurnCreations
 from telegrambot.config import OPENAI_MAX_RETRIES, OPENAI_REQUEST_TIMEOUT
 from telegrambot.tools import (
@@ -157,6 +157,17 @@ def build_expenses_tools(
         day_texts = day_context if day_context is not None else user_context
         return resolve_new_record_date(value, today, day_texts, user_context)
 
+    def _day_identity(resolved: str | None) -> str | None:
+        """La fecha cuenta para distinguir dos movimientos iguales solo si el
+        usuario dio un día ("los taxis de ayer y hoy"). Si no, la eligió el
+        modelo, y variarla es justo como duplicaba (``agents.duplicate_guard``)."""
+        from telegrambot.tools import _user_tz
+
+        texts = day_context if day_context is not None else user_context
+        if not texts or not user_gave_a_day(texts):
+            return None
+        return (resolved or datetime.now(_user_tz(user)).date().isoformat())[:10]
+
     @tool
     async def parse_expense_for_user(text: str) -> dict:
         """Analiza un mensaje y extrae UN gasto (monto, categoría, fecha, nota).
@@ -289,14 +300,15 @@ def build_expenses_tools(
                 "color": category_color,
             })
         resolved = _currency(currency)
+        day = _date(spent_at)
         return turn.create("expense", amount, resolved or default_currency, note, lambda: _invoke_strict(create_expense, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": resolved,
             "category": category,
-            "spent_at": _date(spent_at),
+            "spent_at": day,
             "note": note,
-        }), category)
+        }), category, _day_identity(day))
 
     @tool
     def create_income_for_user(
@@ -323,14 +335,15 @@ def build_expenses_tools(
                 "color": category_color,
             })
         resolved = _currency(currency)
+        day = _date(received_at)
         return turn.create("income", amount, resolved or default_currency, note, lambda: _invoke_strict(create_income, {
             "user_external_id": external_id,
             "amount": amount,
             "currency": resolved,
             "category": category,
-            "received_at": _date(received_at),
+            "received_at": day,
             "note": note,
-        }), category)
+        }), category, _day_identity(day))
 
     @tool("update_expense")
     def update_expense_for_user(
