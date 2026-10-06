@@ -126,6 +126,31 @@ class BalanceTests(TestCase):
         self.assertEqual(self._row(data)["balance"], 700.0)
         self.assertIsNone(self._row(data)["since_initial_balance"])
 
+    def test_solo_fecha_de_corte_sigue_contando_desde_el_saldo_inicial(self):
+        # 2026-10-05: el agente pidió el saldo con end_date=hoy y salió −445.500
+        # (todo el historial) en vez de 539.000 desde el saldo inicial.
+        from datetime import timedelta
+        from expenses.balance import compute_balance
+
+        self._expense("984500", self.today - timedelta(days=300))
+        self._income("1660000", self.today - timedelta(days=6), note="saldo inicial")
+        self._expense("1321000", self.today - timedelta(days=3))
+        self._income("200000", self.today - timedelta(days=1))
+        self._expense("112000", self.today)
+        row = self._row(compute_balance(self.user, end_date=(self.today - timedelta(days=1)).isoformat()))
+        self.assertEqual(row["balance"], 539000.0)
+        self.assertEqual(row["since_initial_balance"], (self.today - timedelta(days=6)).isoformat())
+
+    def test_fecha_de_corte_anterior_al_saldo_inicial_usa_el_ancla_previa_o_ninguna(self):
+        from datetime import timedelta
+        from expenses.balance import compute_balance
+
+        self._expense("100", self.today - timedelta(days=10))
+        self._income("1000", self.today - timedelta(days=2), note="saldo inicial")
+        row = self._row(compute_balance(self.user, end_date=(self.today - timedelta(days=5)).isoformat()))
+        self.assertEqual(row["balance"], -100.0)
+        self.assertIsNone(row["since_initial_balance"])
+
     def test_una_nota_que_solo_menciona_saldo_inicial_no_es_ancla(self):
         from datetime import timedelta
         from expenses.balance import compute_balance

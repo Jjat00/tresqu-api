@@ -394,7 +394,9 @@ def build_expenses_tools(
         Sin fechas ("cuánto me queda", "mi saldo", "cuánto tengo"): desde el
         último saldo inicial que declaró el usuario, o todo lo registrado si no
         lo declaró. whole_history=True solo si pide explícitamente todo el
-        historial. Con fechas YYYY-MM-DD: ese período ("cómo voy este mes").
+        historial. Con start_date YYYY-MM-DD: ese período ("cómo voy este mes").
+        Solo end_date ("mi saldo al 5 de octubre") sigue contando desde el saldo
+        inicial; para el saldo de hoy no pases fechas.
         Úsala SIEMPRE para cualquier saldo o balance: nunca restes tú."""
         try:
             return _invoke_strict(get_balance, {

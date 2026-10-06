@@ -58,8 +58,8 @@ def _anchor_key(income: Income, tz):
     return (_effective_date(income, "received_at", tz), income.created_at, income.id)
 
 
-def latest_initial_balances(user: User) -> dict[str, Income]:
-    """El último saldo inicial declarado de cada moneda.
+def latest_initial_balances(user: User, until: date | None = None) -> dict[str, Income]:
+    """El último saldo inicial declarado de cada moneda (hasta ``until``, inclusive).
 
     Se ordena por su fecha (``received_at`` o, si no tiene, el día local de su
     ``timestamp``) y, dentro del mismo día, por cuándo se registró.
@@ -68,6 +68,8 @@ def latest_initial_balances(user: User) -> dict[str, Income]:
     tz = _user_tz(user)
     anchors: dict[str, Income] = {}
     for income in Income.objects.filter(user=user).filter(_initial_balance_q()):
+        if until and _effective_date(income, "received_at", tz) > until:
+            continue
         current = anchors.get(income.currency)
         if current is None or _anchor_key(income, tz) > _anchor_key(current, tz):
             anchors[income.currency] = income
@@ -170,15 +172,21 @@ def compute_balance(
 
     Sin fechas es lo que la gente entiende por "cuánto me queda": cada moneda
     desde su último saldo inicial declarado, o todo lo registrado si nunca lo
-    declaró (o si se pide ``whole_history``). Con fechas (YYYY-MM-DD,
+    declaró (o si se pide ``whole_history``). Con ``start_date`` (YYYY-MM-DD,
     inclusive), solo ese período y sin saldos iniciales de por medio.
+
+    Solo ``end_date`` es "mi saldo al día X": sigue contando desde el último
+    saldo inicial anterior a ese día. El 2026-10-05 el agente pidió el saldo
+    con ``end_date`` de hoy y, al apagarse el ancla, sumó gastos de 2025 ya
+    incluidos en la cifra declarada: −445.500 COP en vez de 539.000.
     """
 
     from telegrambot.tools import _filter_by_period
 
     tz = _user_tz(user)
-    use_anchors = not start_date and not end_date and not whole_history
-    anchors = latest_initial_balances(user) if use_anchors else {}
+    use_anchors = not start_date and not whole_history
+    until = date.fromisoformat(end_date) if end_date else None
+    anchors = latest_initial_balances(user, until) if use_anchors else {}
 
     expenses = _filter_by_period(
         Expense.objects.filter(user=user), "spent_at", start_date, end_date, user=user
@@ -218,10 +226,14 @@ def compute_balance(
             "balance": _money(inc["total"] - exp["total"]),
         })
 
-    if start_date or end_date:
-        label = f"{start_date or 'inicio'} a {end_date or 'hoy'}"
+    if start_date:
+        label = f"{start_date} a {end_date or 'hoy'}"
     elif anchors:
         label = "cada moneda desde su último saldo inicial (since_initial_balance); sin él, todo lo registrado"
+        if end_date:
+            label += f", hasta {end_date}"
+    elif end_date:
+        label = f"todo lo registrado hasta {end_date}"
     else:
         label = "todo lo registrado"
     return {
