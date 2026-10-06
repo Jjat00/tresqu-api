@@ -225,6 +225,10 @@ def compute_balance(
 
     since = date.fromisoformat(start_date) if start_date else None
     until = date.fromisoformat(end_date) if end_date else None
+    if since and until and until < since:
+        # Un rango invertido (o un inicio futuro sin fin) no tiene saldo: mejor
+        # un error claro que una cifra con un saldo inicial arrastrado.
+        raise ValueError(f"rango de fechas inválido: {start_date} es posterior a {end_date}")
     anchors = {} if whole_history else latest_initial_balances(user, since, until)
     carried: dict[str, Income] = {}
     if since and since.day == 1 and not whole_history:

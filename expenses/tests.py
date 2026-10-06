@@ -265,6 +265,16 @@ class BalanceTests(TestCase):
         self.assertEqual(data["period"]["to"], "2026-10-06")
         self.assertIsNone(self._row(data)["since_initial_balance"])
 
+    def test_rango_invertido_es_un_error(self):
+        from expenses.balance import compute_balance
+
+        self._income("1000", self._d(9, 29), note="saldo inicial")
+        self._expense("100", self._d(9, 30))
+        for kwargs in ({"start_date": "2026-10-01", "end_date": "2026-09-30"},
+                       {"start_date": "2026-11-01"}):  # inicio futuro: llega hasta hoy
+            with self.assertRaises(ValueError):
+                compute_balance(self.user, **kwargs)
+
     def test_una_nota_que_solo_menciona_saldo_inicial_no_es_ancla(self):
         from expenses.balance import compute_balance
 
